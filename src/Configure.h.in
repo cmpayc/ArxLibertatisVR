@@ -54,6 +54,9 @@
 #cmakedefine01 ARX_HAVE_EGL
 #cmakedefine01 ARX_HAVE_GL_STATIC
 
+// VR backend
+#cmakedefine01 ARX_HAVE_OPENXR
+
 // Audio backend
 #cmakedefine01 ARX_HAVE_OPENAL
 #cmakedefine01 ARX_HAVE_OPENAL_EFX

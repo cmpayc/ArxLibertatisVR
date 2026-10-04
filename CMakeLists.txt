@@ -72,6 +72,7 @@ option(INSTALL_SCRIPTS "Install the data install script" ON)
 # Optional dependencies
 option(USE_OPENAL "Build the OpenAL audio backend" ON)
 option(USE_OPENGL "Build the OpenGL renderer backend" ON)
+option(USE_OPENXR "Build VR support using OpenXR" ON)
 option(USE_WINHTTP "Use the native WinHTTP API instead of CURL on Windows" ON)
 option(USE_NATIVE_FS "Use the native filesystem backend directly instead of boost" ON)
 set(default_USE_X11 OFF)
@@ -439,6 +440,14 @@ if(USE_OPENGL)
 			set(ARX_HAVE_OPENGL 1)
 			set(ARX_HAVE_GL_STATIC ${GLEW_USE_STATIC_LIBS})
 		endif()
+	endif()
+endif()
+
+# OpenXR
+if(USE_OPENXR AND ARX_HAVE_EPOXY AND WIN32)
+	find_package(OpenXR ${OPTIONAL_DEPENDENCY})
+	if(OPENXR_FOUND)
+		set(ARX_HAVE_OPENXR 1)
 	endif()
 endif()
 
@@ -1048,6 +1057,10 @@ set(GRAPHICS_OPENGL_SOURCES
 	src/graphics/opengl/OpenGLUtil.cpp
 )
 
+set(VR_OPENXR_SOURCES
+	src/vr/VRSystem.cpp
+)
+
 set(GUI_SOURCES
 	src/gui/CharacterCreation.cpp
 	src/gui/CinematicBorder.cpp
@@ -1294,6 +1307,14 @@ else()
 	unset(ARX_HAVE_SDL)
 	unset(ARX_HAVE_SDL1)
 	unset(ARX_HAVE_SDL2)
+endif()
+
+# VR
+if(ARX_HAVE_OPENXR)
+	list(APPEND GRAPHICS_SOURCES ${VR_OPENXR_SOURCES})
+	# The OpenXR loader (or a runtime selected in the config) is loaded at runtime, see src/vr/VRSystem.cpp
+	include_directories(SYSTEM ${OpenXR_INCLUDE_DIR})
+	add_definitions(-DXR_NO_PROTOTYPES)
 endif()
 
 # Windowing / input
@@ -1988,6 +2009,7 @@ print_configuration("Features"
 	ARX_HAVE_CRASHHANDLER_POSIX   "POSIX crash handler"
 	ARX_HAVE_CRASHHANDLER_WINDOWS "Win32 crash handler"
 	BUILD_PROFILER_INSTRUMENT     "profiler instrumentation"
+	ARX_HAVE_OPENXR               "VR (OpenXR)"
 )
 print_configuration("Tools"
 	BUILD_TOOLS            "savetool"

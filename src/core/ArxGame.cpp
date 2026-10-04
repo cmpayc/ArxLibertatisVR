@@ -169,6 +169,10 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #include "Configure.h"
 
+#if ARX_HAVE_OPENXR
+#include "vr/VRSystem.h"
+#endif
+
 #include "window/RenderWindow.h"
 
 #if ARX_HAVE_SDL2
@@ -216,7 +220,17 @@ bool ArxGame::initialize() {
 		LogCritical << "Failed to initialize the config subsystem";
 		return false;
 	}
-	
+
+	#if ARX_HAVE_OPENXR
+	if(VRSystem::isRequested()) {
+		g_vr = new VRSystem;
+		if(!g_vr->initInstance()) {
+			LogError << "VR initialization failed, continuing without VR";
+			delete g_vr, g_vr = nullptr;
+		}
+	}
+	#endif
+
 	init = initWindow();
 	if(!init) {
 		return false;
@@ -420,7 +434,11 @@ bool ArxGame::initWindow(RenderWindow * window) {
 	m_MainWindow->setMinimizeOnFocusLost(config.window.minimizeOnFocusLost);
 	m_MainWindow->setMinTextureUnits(3);
 	m_MainWindow->setMaxMSAALevel(config.video.antialiasing ? 8 : 1);
-	m_MainWindow->setVSync(benchmark::isEnabled() ? 0 : config.video.vsync);
+	bool noVSync = benchmark::isEnabled();
+	#if ARX_HAVE_OPENXR
+	noVSync = noVSync || g_vr; // The OpenXR runtime paces frames
+	#endif
+	m_MainWindow->setVSync(noVSync ? 0 : config.video.vsync);
 	
 	setWindowSize(config.video.fullscreen);
 	
@@ -933,7 +951,11 @@ void ArxGame::shutdown() {
 		shutdownGame();
 	
 	Application::shutdown();
-	
+
+	#if ARX_HAVE_OPENXR
+	delete g_vr, g_vr = nullptr;
+	#endif
+
 	LogInfo << "Clean shutdown";
 }
 
@@ -1140,7 +1162,7 @@ void ArxGame::doFrame() {
 
 	// Manages Splash Screens if needed
 	if(HandleGameFlowTransitions()) {
-		m_MainWindow->showFrame();
+		presentFrame();
 		return;
 	}
 
@@ -1213,8 +1235,24 @@ void ArxGame::doFrame() {
 	} else {
 		cinematicLaunchWaiting();
 		render();
-		m_MainWindow->showFrame();
+		presentFrame();
 	}
+}
+
+void ArxGame::presentFrame() {
+
+	#if ARX_HAVE_OPENXR
+	if(g_vr && g_vr->hasSession()) {
+		g_vr->pollEvents();
+		// TODO(vr) Replace the mirrored window with real stereo rendering (T1.7)
+		if(g_vr->beginFrame()) {
+			g_vr->mirrorWindowToEyes(m_MainWindow->getSize());
+		}
+		g_vr->endFrame();
+	}
+	#endif
+
+	m_MainWindow->showFrame();
 }
 
 void ArxGame::updateFirstPersonCamera() {
@@ -2041,7 +2079,13 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	pDynamicVertexBuffer_TLVERTEX = new CircularVertexBuffer<TexturedVertex>(std::move(vb));
 	
 	MenuReInitAll();
-	
+
+	#if ARX_HAVE_OPENXR
+	if(g_vr && !g_vr->hasSession() && !g_vr->createSession()) {
+		LogError << "Could not create the VR session, continuing without VR";
+	}
+	#endif
+
 	// The app is ready to go
 	m_bReady = true;
 }
@@ -2054,7 +2098,13 @@ void ArxGame::onRendererShutdown(Renderer & renderer) {
 	}
 	
 	m_bReady = false;
-	
+
+	#if ARX_HAVE_OPENXR
+	if(g_vr) {
+		g_vr->destroySession();
+	}
+	#endif
+
 	GRenderer->ReleaseAllTextures();
 
 	delete pDynamicVertexBuffer_TLVERTEX, pDynamicVertexBuffer_TLVERTEX = nullptr;

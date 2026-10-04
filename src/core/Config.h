@@ -217,8 +217,27 @@ public:
 		bool improvedBowAim;
 		QuickLevelTransition quickLevelTransition;
 		bool allowConsole;
-		
+
 	} input;
+
+	// section 'vr'
+	struct {
+
+		bool enabled;
+		std::string runtime;
+
+		float worldScale;
+		float heightOffset;
+
+		bool snapTurn;
+		int snapTurnAngle;
+		float smoothTurnSpeed;
+		bool handOrientedMovement;
+		bool leftHanded;
+
+		float uiDistance;
+
+	} vr;
 	
 	// section 'key'
 	ActionKey actions[NUM_ACTION_KEY];

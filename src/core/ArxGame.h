@@ -70,6 +70,7 @@ protected:
 	
 	void doFrame();
 	void render();
+	void presentFrame();
 
 	void manageKeyMouse();
 	void manageEntityDescription();

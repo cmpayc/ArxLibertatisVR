@@ -71,7 +71,8 @@ constexpr const std::string_view
 	bufferUpload,
 	extensionOverride,
 	thumbnailSize = BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_WIDTH) "x"
-	                BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_HEIGHT);
+	                BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_HEIGHT),
+	vrRuntime = "auto";
 
 constexpr const int
 	refreshRate = 0,
@@ -90,7 +91,8 @@ constexpr const int
 	migration = Config::OriginalAssets,
 	quicksaveSlots = 3,
 	bufferSize = 0,
-	quickLevelTransition = JumpToChangeLevel;
+	quickLevelTransition = JumpToChangeLevel,
+	vrSnapTurnAngle = 30;
 
 constexpr const bool
 	fullscreen = true,
@@ -113,7 +115,11 @@ constexpr const bool
 	rawMouseInput = true,
 	borderTurning = true,
 	useAltRuneRecognition = true,
-	improvedBowAim = true;
+	improvedBowAim = true,
+	vrEnabled = false,
+	vrSnapTurn = true,
+	vrHandOrientedMovement = false,
+	vrLeftHanded = false;
 
 #ifdef ARX_DEBUG
 const bool allowConsole = true;
@@ -132,7 +138,11 @@ constexpr const float
 	volume = 10.f,
 	sfxVolume = 10.f,
 	speechVolume = 10.f,
-	ambianceVolume = 10.f;
+	ambianceVolume = 10.f,
+	vrWorldScale = 1.f,
+	vrHeightOffset = 0.f,
+	vrSmoothTurnSpeed = 120.f,
+	vrUiDistance = 1.5f;
 
 constexpr const ActionKey actions[NUM_ACTION_KEY] = {
 	ActionKey(Keyboard::Key_Spacebar), // JUMP
@@ -192,6 +202,7 @@ constexpr const std::string_view
 	Window = "window",
 	Audio = "audio",
 	Input = "input",
+	VR = "vr",
 	Key = "key",
 	Misc = "misc";
 
@@ -273,6 +284,19 @@ constexpr const std::string_view
 	improvedBowAim = "improved_bow_aim",
 	quickLevelTransition = "quick_level_transition",
 	allowConsole = "allow_console";
+
+// VR options
+constexpr const std::string_view
+	vrEnabled = "enabled",
+	vrRuntime = "runtime",
+	vrWorldScale = "world_scale",
+	vrHeightOffset = "height_offset",
+	vrSnapTurn = "snap_turn",
+	vrSnapTurnAngle = "snap_turn_angle",
+	vrSmoothTurnSpeed = "smooth_turn_speed",
+	vrHandOrientedMovement = "hand_oriented_movement",
+	vrLeftHanded = "left_handed",
+	vrUiDistance = "ui_distance";
 
 // Input key options
 constexpr const std::string_view actions[NUM_ACTION_KEY] = {
@@ -539,7 +563,20 @@ bool Config::save() {
 		// Only write this if true so that switching from release to debug builds enables the console
 		writer.writeKey(Key::allowConsole, input.allowConsole);
 	}
-	
+
+	// vr
+	writer.beginSection(Section::VR);
+	writer.writeKey(Key::vrEnabled, vr.enabled);
+	writer.writeKey(Key::vrRuntime, vr.runtime);
+	writer.writeKey(Key::vrWorldScale, vr.worldScale);
+	writer.writeKey(Key::vrHeightOffset, vr.heightOffset);
+	writer.writeKey(Key::vrSnapTurn, vr.snapTurn);
+	writer.writeKey(Key::vrSnapTurnAngle, vr.snapTurnAngle);
+	writer.writeKey(Key::vrSmoothTurnSpeed, vr.smoothTurnSpeed);
+	writer.writeKey(Key::vrHandOrientedMovement, vr.handOrientedMovement);
+	writer.writeKey(Key::vrLeftHanded, vr.leftHanded);
+	writer.writeKey(Key::vrUiDistance, vr.uiDistance);
+
 	// key
 	writer.beginSection(Section::Key);
 	for(size_t i = 0; i < NUM_ACTION_KEY; i++) {
@@ -676,7 +713,23 @@ bool Config::init(const fs::path & file) {
 	int quickLevelTransition = reader.getKey(Section::Input, Key::quickLevelTransition, Default::quickLevelTransition);
 	input.quickLevelTransition = QuickLevelTransition(glm::clamp(quickLevelTransition, 0, 2));
 	input.allowConsole = reader.getKey(Section::Input, Key::allowConsole, Default::allowConsole);
-	
+
+	// Get VR settings
+	vr.enabled = reader.getKey(Section::VR, Key::vrEnabled, Default::vrEnabled);
+	vr.runtime = reader.getKey(Section::VR, Key::vrRuntime, Default::vrRuntime);
+	float vrWorldScale = reader.getKey(Section::VR, Key::vrWorldScale, Default::vrWorldScale);
+	vr.worldScale = glm::clamp(vrWorldScale, 0.5f, 2.f);
+	vr.heightOffset = reader.getKey(Section::VR, Key::vrHeightOffset, Default::vrHeightOffset);
+	vr.snapTurn = reader.getKey(Section::VR, Key::vrSnapTurn, Default::vrSnapTurn);
+	int vrSnapTurnAngle = reader.getKey(Section::VR, Key::vrSnapTurnAngle, Default::vrSnapTurnAngle);
+	vr.snapTurnAngle = glm::clamp(vrSnapTurnAngle, 5, 90);
+	float vrSmoothTurnSpeed = reader.getKey(Section::VR, Key::vrSmoothTurnSpeed, Default::vrSmoothTurnSpeed);
+	vr.smoothTurnSpeed = glm::clamp(vrSmoothTurnSpeed, 10.f, 720.f);
+	vr.handOrientedMovement = reader.getKey(Section::VR, Key::vrHandOrientedMovement, Default::vrHandOrientedMovement);
+	vr.leftHanded = reader.getKey(Section::VR, Key::vrLeftHanded, Default::vrLeftHanded);
+	float vrUiDistance = reader.getKey(Section::VR, Key::vrUiDistance, Default::vrUiDistance);
+	vr.uiDistance = glm::clamp(vrUiDistance, 0.5f, 5.f);
+
 	// Get action key settings
 	for(size_t i = 0; i < NUM_ACTION_KEY; i++) {
 		actions[i] = reader.getActionKey(Section::Key, ControlAction(i));
