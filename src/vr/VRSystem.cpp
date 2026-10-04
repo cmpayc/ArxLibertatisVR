@@ -51,10 +51,10 @@
 #include "core/Config.h"
 #include "core/Version.h"
 #include "input/Input.h"
-#include "input/Keyboard.h"
 #include "input/Mouse.h"
 #include "io/log/Logger.h"
 #include "platform/ProgramOptions.h"
+#include "vr/VRControls.h"
 
 
 VRSystem * g_vr = nullptr;
@@ -314,6 +314,11 @@ VRSystem::VRSystem()
 	, m_uiExtent{ 1.f, 1.f }
 	, m_uiVisible(false)
 	, m_pointerOnUI(false)
+	, m_lastFrameStereo(false)
+	, m_triggerHoldTime(0.f)
+	, m_clickPosition(0)
+	, m_clickOnTarget(false)
+	, m_clickOnUI(false)
 	, m_frameState{ XR_TYPE_FRAME_STATE }
 	, m_frameActive(false)
 	, m_shouldRender(false)
@@ -752,6 +757,7 @@ bool VRSystem::beginFrame() {
 	// Controllers are read for every frame, also when nothing is rendered
 	m_input.update(m_frameState.predictedDisplayTime, m_stageSpace);
 	updatePointer();
+	updateVRControls();
 
 	if(!m_frameState.shouldRender) {
 		return false;
@@ -910,6 +916,7 @@ void VRSystem::endFrame() {
 	endInfo.layers = layers.data();
 	check(xrEndFrame(m_session, &endInfo), "xrEndFrame");
 	m_uiVisible = m_shouldRender && m_uiSubmitted;
+	m_lastFrameStereo = m_shouldRender && m_stereoRendered;
 
 	m_frameActive = false;
 	m_shouldRender = false;
@@ -1401,10 +1408,18 @@ void VRSystem::updatePointer() {
 	const VRHand dominant = config.vr.leftHanded ? VRHandLeft : VRHandRight;
 	const VRHandState & hand = m_input.getHand(dominant);
 
+	/*
+	 * In-game the laser points into the world, unless a 2D interface (inventory, book, ...) is open and the
+	 * laser points at the virtual screen. Outside the game (menus) it always points at the virtual screen.
+	 */
+	bool inGame = m_lastFrameStereo;
+	clearVRPointerBeam();
+	bool interfaceOpen = !inGame || isVRInterfaceOpen();
+	
 	// Intersect the dominant hand's aim ray with the virtual screen shown in the last frame
 	bool onUI = false;
 	Vec2s mouse(0);
-	if(m_uiVisible && hand.aim.valid && m_uiSize.x > 0 && m_uiSize.y > 0) {
+	if(interfaceOpen && m_uiVisible && hand.aim.valid && m_uiSize.x > 0 && m_uiSize.y > 0) {
 
 		glm::quat screenRotation(m_uiPose.orientation.w, m_uiPose.orientation.x,
 		                         m_uiPose.orientation.y, m_uiPose.orientation.z);
@@ -1421,6 +1436,11 @@ void VRSystem::updatePointer() {
 			float v = 0.5f - hit.y / m_uiExtent.height;
 			if(u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f) {
 				onUI = true;
+				if(inGame) {
+					float distance = -origin.z / direction.z;
+					Vec3f aimDirection = hand.aim.orientation * Vec3f(0.f, 0.f, -1.f);
+					setVRPointerBeamToUI(hand.aim.position, hand.aim.position + aimDirection * distance);
+				}
 				mouse = Vec2s(s16(u * float(m_uiSize.x - 1)), s16(v * float(m_uiSize.y - 1)));
 			}
 		}
@@ -1432,19 +1452,37 @@ void VRSystem::updatePointer() {
 	}
 	m_pointerOnUI = onUI;
 
-	GInput->setVirtualMousePosition(onUI, mouse);
-
+	bool onWorld = !onUI && inGame && getVRWorldPointer(hand.aim, mouse);
+	
 	/*
-	 * Trigger and grip act as the mouse buttons. Escape (game menu) is on Y of the left controller,
-	 * as the menu button is often reserved by the system (e.g. Quest through Virtual Desktop).
+	 * Pulling the trigger tilts the controller, which moves the cursor a lot at a distance and would turn every
+	 * click into a drag. Freeze the cursor where the trigger was pulled: releasing it quickly is a click there,
+	 * holding it longer lets the cursor follow the hand again to drag.
 	 */
-	const VRHandState & left = m_input.getHand(VRHandLeft);
-	GInput->setVirtualMouseButton(Mouse::Button_0, hand.isPressed(VRButtonTrigger));
-	GInput->setVirtualMouseButton(Mouse::Button_1, hand.isPressed(VRButtonGrip));
-	GInput->setVirtualKey(Keyboard::Key_Escape, left.isPressed(VRButtonSecondary) || left.isPressed(VRButtonMenu)
-	                                            || hand.isPressed(VRButtonMenu));
+	const float ClickDuration = 0.35f;
+	if(hand.wasPressed(VRButtonTrigger)) {
+		m_triggerHoldTime = 0.f;
+		m_clickPosition = mouse;
+		m_clickOnTarget = onUI || onWorld;
+		m_clickOnUI = onUI;
+	} else if(hand.isPressed(VRButtonTrigger) || hand.wasReleased(VRButtonTrigger)) {
+		m_triggerHoldTime += getFrameDuration();
+	}
+	bool clicking = hand.isPressed(VRButtonTrigger) || hand.wasReleased(VRButtonTrigger);
+	if(clicking && m_triggerHoldTime < ClickDuration && m_clickOnTarget) {
+		mouse = m_clickPosition;
+		onUI = m_clickOnUI;
+		onWorld = !m_clickOnUI;
+	}
 
-	if(onUI && (hand.wasPressed(VRButtonTrigger) || hand.wasPressed(VRButtonGrip))) {
+	GInput->setVirtualMousePosition(onUI || onWorld, mouse);
+
+	// Main hand trigger = left click, off hand grip = right click (other buttons are mapped in VRControls)
+	const VRHandState & off = m_input.getHand(config.vr.leftHanded ? VRHandRight : VRHandLeft);
+	GInput->setVirtualMouseButton(Mouse::Button_0, hand.isPressed(VRButtonTrigger));
+	GInput->setVirtualMouseButton(Mouse::Button_1, off.isPressed(VRButtonGrip));
+
+	if(onUI && (hand.wasPressed(VRButtonTrigger) || off.wasPressed(VRButtonGrip))) {
 		m_input.vibrate(dominant, 0.5f, 0.05f);
 	}
 

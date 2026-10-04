@@ -28,6 +28,7 @@
 #include "game/Camera.h"
 #include "graphics/Math.h"
 #include "graphics/opengl/OpenGLRenderer.h"
+#include "vr/VRControls.h"
 #include "vr/VRMath.h"
 #include "vr/VRSystem.h"
 
@@ -37,6 +38,16 @@ namespace {
 bool g_recenterRequested = true;
 Vec3f g_referencePosition(0.f); // OpenXR stage space, meters
 glm::quat g_referenceYawInverse(1.f, 0.f, 0.f, 0.f);
+
+// Mapping from the tracking space to the game world for the last prepared frame
+struct TrackingToWorld {
+	bool valid = false;
+	Vec3f origin = Vec3f(0.f);
+	glm::mat3x3 body = glm::mat3x3(1.f);
+	float scale = 100.f;
+	glm::mat4x4 worldToScreen = glm::mat4x4(1.f); //!< Center camera, window-sized screen
+};
+TrackingToWorld g_trackingToWorld;
 
 Vec3f toVec(const XrVector3f & v) {
 	return Vec3f(v.x, v.y, v.z);
@@ -117,10 +128,18 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	glm::mat4x4 centerWorldToView = vr::worldToViewMatrix(eyeRotation[0], center - forward * pullback);
 	glm::mat4x4 centerViewToClip = vr::projectionFromTangents(left, right, up, down, nearDist, farDist);
 	PrepareCamera(&cam, centerWorldToView, centerViewToClip, viewport);
-
+	
+	// Pointing into the world only makes sense from the player's own point of view
+	g_trackingToWorld.valid = (&cam == &g_playerCamera);
+	g_trackingToWorld.origin = origin;
+	g_trackingToWorld.body = body;
+	g_trackingToWorld.scale = scale;
+	g_trackingToWorld.worldToScreen = g_preparedCamera.m_worldToScreen;
 	// Gameplay code (sound listener, portal culling) uses the camera position and angle
 	cam.m_pos = center;
+	float bodyYaw = cam.angle.getYaw();
 	cam.angle = Camera::getLookAtAngle(center, center + forward * 100.f);
+	setVRHeadYawOffset(cam.angle.getYaw() - bodyYaw);
 
 	// Views for the stereo renderer: re-project pre-transformed vertices from the center camera into each eye
 	glm::dmat4 screenToWorld = glm::inverse(glm::dmat4(g_preparedCamera.m_worldToScreen));
@@ -138,5 +157,50 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	}
 	g_vr->setStereoViews(std::move(stereoViews));
 
+	return true;
+}
+
+bool trackingRayToWorld(const Vec3f & position, const glm::quat & orientation, Vec3f & origin, Vec3f & direction) {
+	
+	if(!g_trackingToWorld.valid) {
+		return false;
+	}
+	
+	const TrackingToWorld & t = g_trackingToWorld;
+	Vec3f relative = g_referenceYawInverse * (position - g_referencePosition);
+	origin = t.origin + t.body * (vr::toArxBasis(relative) * t.scale);
+	Vec3f forward = g_referenceYawInverse * (orientation * Vec3f(0.f, 0.f, -1.f));
+	direction = glm::normalize(t.body * vr::toArxBasis(forward));
+	
+	return true;
+}
+
+bool worldToVRScreen(const Vec3f & position, Vec2f & screen) {
+	
+	if(!g_trackingToWorld.valid) {
+		return false;
+	}
+	
+	Vec4f p = g_trackingToWorld.worldToScreen * Vec4f(position, 1.f);
+	if(p.w <= 0.f) {
+		return false;
+	}
+	
+	screen = Vec2f(p) / p.w;
+	return true;
+}
+
+void invalidateVRTracking() {
+	g_trackingToWorld.valid = false;
+}
+bool trackingPointToWorld(const Vec3f & position, Vec3f & world) {
+	
+	if(!g_trackingToWorld.valid) {
+		return false;
+	}
+	
+	Vec3f relative = g_referenceYawInverse * (position - g_referencePosition);
+	world = g_trackingToWorld.origin + g_trackingToWorld.body * (vr::toArxBasis(relative) * g_trackingToWorld.scale);
+	
 	return true;
 }

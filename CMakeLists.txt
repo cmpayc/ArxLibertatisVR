@@ -1059,6 +1059,7 @@ set(GRAPHICS_OPENGL_SOURCES
 
 set(VR_OPENXR_SOURCES
 	src/vr/VRCamera.cpp
+	src/vr/VRControls.cpp
 	src/vr/VRInput.cpp
 	src/vr/VRSystem.cpp
 )

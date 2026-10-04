@@ -20,6 +20,7 @@
 #ifndef ARX_VR_VRSYSTEM_H
 #define ARX_VR_VRSYSTEM_H
 
+#include <algorithm>
 #include <array>
 #include <string>
 #include <vector>
@@ -80,6 +81,10 @@ public:
 
 	[[nodiscard]] bool isFrameActive() const { return m_frameActive; }
 	[[nodiscard]] Vec2i getEyeSize() const { return m_eyeSize; }
+	//! Predicted duration of the current frame in seconds
+	[[nodiscard]] float getFrameDuration() const {
+		return std::min(float(m_frameState.predictedDisplayPeriod) * 1e-9f, 0.1f);
+	}
 	[[nodiscard]] const XrView & getView(size_t eye) const { return m_views[eye]; }
 
 	//! \return true between beginFrame() and endFrame() if the eye images should be rendered
@@ -209,6 +214,11 @@ private:
 	// Controllers and the laser pointer (dominant hand) emulating the mouse on the virtual screen
 	VRInput m_input;
 	bool m_pointerOnUI;
+	bool m_lastFrameStereo; // The last frame showed the game world
+	float m_triggerHoldTime;
+	Vec2s m_clickPosition;
+	bool m_clickOnTarget;
+	bool m_clickOnUI;
 
 	XrFrameState m_frameState;
 	bool m_frameActive;

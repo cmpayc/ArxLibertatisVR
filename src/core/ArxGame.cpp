@@ -171,6 +171,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #if ARX_HAVE_OPENXR
 #include "vr/VRCamera.h"
+#include "vr/VRControls.h"
 #include "vr/VRSystem.h"
 #endif
 
@@ -1918,7 +1919,7 @@ void ArxGame::renderLevel() {
 
 	#if ARX_HAVE_OPENXR
 	if(vrStereo) {
-		// TODO(vr) Draw the interface into a virtual screen shown in VR (T2.1) - for now it is only in the window
+		drawVRPointerBeam();
 		g_vr->endStereoRender(m_MainWindow->getSize());
 		GRenderer->Clear(Renderer::DepthBuffer);
 	}

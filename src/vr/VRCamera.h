@@ -20,7 +20,10 @@
 #ifndef ARX_VR_VRCAMERA_H
 #define ARX_VR_VRCAMERA_H
 
+#include <glm/gtc/quaternion.hpp>
+
 #include "math/Rectangle.h"
+#include "math/Types.h"
 
 struct Camera;
 
@@ -40,5 +43,22 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport);
 
 //! Use the current headset pose as the neutral position and orientation
 void requestVRRecenter();
+
+/*!
+ * Convert a ray in the tracking space (OpenXR stage space, e.g. a controller aim pose) to the game world,
+ * using the mapping of the last frame prepared by \ref prepareVRCamera.
+ *
+ * \return false if no frame has been prepared with the player camera
+ */
+bool trackingRayToWorld(const Vec3f & position, const glm::quat & orientation, Vec3f & origin, Vec3f & direction);
+
+//! Convert a point in the tracking space to the game world, see \ref trackingRayToWorld
+bool trackingPointToWorld(const Vec3f & position, Vec3f & world);
+
+//! Project a world position to the window-sized screen of the last prepared VR frame
+bool worldToVRScreen(const Vec3f & position, Vec2f & screen);
+
+//! Forget the mapping, e.g. when the game camera is not the player camera
+void invalidateVRTracking();
 
 #endif // ARX_VR_VRCAMERA_H

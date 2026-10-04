@@ -138,6 +138,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #if ARX_HAVE_OPENXR
 #include "vr/VRCamera.h"
+#include "vr/VRControls.h"
 #endif
 
 
@@ -180,6 +181,25 @@ bool bGCroucheToggle = false;
 
 bool bInverseInventory = false;
 bool lOldTruePlayerMouseLook = TRUE_PLAYER_MOUSELOOK_ON;
+
+//! \return true while a VR session is active (the head looks around, a laser pointer replaces the mouse)
+static bool isVRModeActive() {
+	#if ARX_HAVE_OPENXR
+	return isVRActive();
+	#else
+	return false;
+	#endif
+}
+
+/*!
+ * \return true if mouselook is toggled instead of held
+ *
+ * In VR the head looks around and the laser pointer needs cursor mode, so mouselook is only active while the
+ * free look button is held (and in combat), like with the toggle disabled. The flying eye spell still uses it.
+ */
+static bool isMouseLookToggle() {
+	return config.input.mouseLookToggle && (!isVRModeActive() || eyeball.isActive());
+}
 bool bForceEscapeFreeLook = false;
 bool bRenderInCursorMode = true;
 
@@ -628,7 +648,7 @@ void ARX_INTERFACE_setCombatMode(ARX_INTERFACE_COMBAT_MODE i) {
 		
 		if(i == 2) {
 			player.Interface |= INTER_NO_STRIKE;
-			if(config.input.mouseLookToggle) {
+			if(isMouseLookToggle()) {
 				TRUE_PLAYER_MOUSELOOK_ON = true;
 				SLID_START = g_platformTime.frameStart();
 			}
@@ -888,7 +908,38 @@ void ArxGame::managePlayerControls() {
 		} else if(MOVE_PRECEDENCE == PLAYER_MOVE_STRAFE_RIGHT) {
 			MOVE_PRECEDENCE = 0;
 		}
-		
+
+		#if ARX_HAVE_OPENXR
+		// Analog movement with the VR controller thumbstick, relative to where the head (or hand) points
+		Vec2f vrStick;
+		float vrYawOffset = 0.f;
+		if(!NOMOREMOVES && getVRLocomotion(vrStick, vrYawOffset)) {
+
+			float magnitude = glm::length(vrStick);
+			Vec2f direction = vrStick / magnitude;
+			float yaw = player.angle.getYaw() + vrYawOffset;
+
+			// Same speeds as the keys: forward 10, backward 5, sideways 6
+			float forwardSpeed = direction.y * (direction.y > 0.f ? 10.f : 5.f);
+			float sideSpeed = direction.x * 6.f;
+			float multi = FD * MoveDiv * magnitude;
+			tm += (angleToVectorXZ(yaw) * forwardSpeed + angleToVectorXZ(yaw - 90.f) * sideSpeed) * multi;
+
+			// Pick the walk animation for the main direction of movement
+			if(magnitude < 0.5f) {
+				player.m_currentMovement |= PLAYER_MOVE_STEALTH;
+			}
+			if(std::abs(direction.y) >= std::abs(direction.x)) {
+				player.m_currentMovement |= (direction.y > 0.f) ? PLAYER_MOVE_WALK_FORWARD : PLAYER_MOVE_WALK_BACKWARD;
+				player.m_strikeDirection = (direction.y > 0.f) ? 2 : 3;
+			} else {
+				player.m_currentMovement |= (direction.x > 0.f) ? PLAYER_MOVE_STRAFE_RIGHT : PLAYER_MOVE_STRAFE_LEFT;
+				player.m_strikeDirection = (direction.x > 0.f) ? 1 : 0;
+			}
+
+		}
+		#endif
+
 		g_moveto = player.pos + tm;
 	}
 	
@@ -1061,7 +1112,7 @@ void ArxGame::managePlayerControls() {
 			if(player.Interface & INTER_COMBATMODE) {
 				ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
 				SPECIAL_DRAW_WEAPON = 0;
-				if(config.input.mouseLookToggle) {
+				if(isMouseLookToggle()) {
 					TRUE_PLAYER_MOUSELOOK_ON = MEMO_PLAYER_MOUSELOOK_ON;
 				}
 			} else {
@@ -1081,7 +1132,7 @@ void ArxGame::managePlayerControls() {
 		}
 	} else {
 		if(eMouseState != MOUSE_IN_INVENTORY_ICON) {
-			if(!config.input.mouseLookToggle) {
+			if(!isMouseLookToggle()) {
 				if(GInput->actionPressed(CONTROLS_CUST_FREELOOK)) {
 					if(!TRUE_PLAYER_MOUSELOOK_ON) {
 						TRUE_PLAYER_MOUSELOOK_ON = true;
@@ -1121,7 +1172,7 @@ void ArxGame::managePlayerControls() {
 		bInverseInventory = !bInverseInventory;
 		lOldTruePlayerMouseLook = TRUE_PLAYER_MOUSELOOK_ON;
 		
-		if(!config.input.mouseLookToggle) {
+		if(!isMouseLookToggle()) {
 			bForceEscapeFreeLook = true;
 		}
 		
@@ -1195,7 +1246,7 @@ void ArxGame::managePlayerControls() {
 					g_secondaryInventoryHud.close();
 				}
 				
-				if(config.input.mouseLookToggle) {
+				if(isMouseLookToggle()) {
 					TRUE_PLAYER_MOUSELOOK_ON = true;
 					SLID_START = g_platformTime.frameStart();
 				}
@@ -1214,7 +1265,7 @@ void ArxGame::managePlayerControls() {
 					g_secondaryInventoryHud.close();
 				}
 				
-				if(config.input.mouseLookToggle) {
+				if(isMouseLookToggle()) {
 					TRUE_PLAYER_MOUSELOOK_ON = true;
 					SLID_START = g_platformTime.frameStart();
 				}
@@ -1271,7 +1322,7 @@ void ArxGame::manageKeyMouse() {
 				Vec2s poss = MemoMouse;
 
 				// mode systemshock
-				if(config.input.mouseLookToggle && config.input.autoReadyWeapon != AlwaysAutoReadyWeapon) {
+				if(isMouseLookToggle() && config.input.autoReadyWeapon != AlwaysAutoReadyWeapon) {
 					
 					DANAEMouse = g_size.center();
 					
@@ -1344,14 +1395,14 @@ void ArxGame::manageKeyMouse() {
 						
 						if(bOk && (FlyingOverIO->_itemdata->playerstacksize > 1 || FlyingOverIO->_itemdata->count <= 1)) {
 							SendIOScriptEvent(entities.player(), FlyingOverIO, SM_INVENTORYUSE);
-							if(config.input.autoReadyWeapon == AlwaysAutoReadyWeapon || !config.input.mouseLookToggle) {
+							if(config.input.autoReadyWeapon == AlwaysAutoReadyWeapon || !isMouseLookToggle()) {
 								TRUE_PLAYER_MOUSELOOK_ON = false;
 							}
 						}
 						
 					}
 					
-					if(config.input.autoReadyWeapon != AlwaysAutoReadyWeapon && config.input.mouseLookToggle) {
+					if(config.input.autoReadyWeapon != AlwaysAutoReadyWeapon && isMouseLookToggle()) {
 						EERIEMouseButton &= ~2;
 					}
 				}
@@ -1365,7 +1416,7 @@ void ArxGame::manageKeyMouse() {
 		if((eMouseState == MOUSE_IN_WORLD ||
 		    (eMouseState == MOUSE_IN_BOOK &&
 		     (!g_cursorOverBook || g_playerBook.currentPage() == BOOKMODE_MINIMAP))) &&
-		   !config.input.mouseLookToggle &&
+		   !isMouseLookToggle() &&
 		   TRUE_PLAYER_MOUSELOOK_ON &&
 		   !(EERIEMouseButton & 2) &&
 		   !SPECIAL_DRAW_WEAPON &&
@@ -1375,7 +1426,7 @@ void ArxGame::manageKeyMouse() {
 		
 		PLAYER_MOUSELOOK_ON = TRUE_PLAYER_MOUSELOOK_ON;
 		
-		if(player.doingmagic == 2 && config.input.mouseLookToggle)
+		if(player.doingmagic == 2 && isMouseLookToggle())
 			PLAYER_MOUSELOOK_ON = false;
 	}
 
@@ -1486,7 +1537,7 @@ void ArxGame::manageKeyMouse() {
 			rotation *= (float(config.input.mouseSensitivity) + 1.f) * 0.02f;
 			rotation *= toMsf(g_platformTime.lastFrameDuration());
 			
-		} else if(config.input.borderTurning) {
+		} else if(config.input.borderTurning && !isVRModeActive()) {
 			
 			// Turn the player if the cursor is close to the edges
 			
@@ -1604,7 +1655,16 @@ void ArxGame::manageKeyMouse() {
 			}
 		}
 	}
-	
+
+	#if ARX_HAVE_OPENXR
+	// Snap or smooth turning with the VR controller thumbstick
+	float vrTurn = takeVRTurn();
+	if(vrTurn != 0.f && ARXmenu.mode() == Mode_InGame && !BLOCK_PLAYER_CONTROLS && !eyeball.isActive()) {
+		player.angle.setYaw(MAKEANGLE(player.angle.getYaw() + vrTurn));
+		player.desiredangle.setYaw(MAKEANGLE(player.desiredangle.getYaw() + vrTurn));
+	}
+	#endif
+
 	manageEntityDescription();
 }
 
@@ -1672,7 +1732,7 @@ void ArxGame::manageEditorControls() {
 
 	if(   TRUE_PLAYER_MOUSELOOK_ON
 	   && config.input.autoReadyWeapon != AlwaysAutoReadyWeapon
-	   && config.input.mouseLookToggle
+	   && isMouseLookToggle()
 	) {
 		DANAEMouse = g_size.center();
 	}
@@ -1685,7 +1745,9 @@ void ArxGame::manageEditorControls() {
 			s_dragDistance = 0.f;
 		} else if(!DRAGGING) {
 			s_dragDistance += 5.f * glm::length(GInput->getRelativeMouseMovement());
-			if(s_dragDistance + glm::length(Vec2f(DANAEMouse - g_dragStartPos)) > 5.f) {
+			// A VR laser pointer always moves a little while the trigger is pulled
+			float dragThreshold = isVRModeActive() ? 60.f : 5.f;
+			if(s_dragDistance + glm::length(Vec2f(DANAEMouse - g_dragStartPos)) > dragThreshold) {
 				DRAGGING = true;
 			}
 		}
@@ -1746,7 +1808,7 @@ void ArxGame::manageEditorControls() {
 		if(   !(FlyingOverIO->ioflags & IO_MOVABLE)
 		   && (FlyingOverIO->ioflags & IO_ITEM)
 		   && bOk
-		   && GInput->actionPressed(CONTROLS_CUST_STEALTHMODE)
+		   && (GInput->actionPressed(CONTROLS_CUST_STEALTHMODE) || isVRModeActive()) // VR: point and click to take
 		   && !g_playerInventoryHud.containsPos(DANAEMouse)
 		   && !ARX_INTERFACE_MouseInBook()
 		) {
