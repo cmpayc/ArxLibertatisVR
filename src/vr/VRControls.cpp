@@ -29,8 +29,10 @@
 #include "core/Core.h"
 #include "game/Player.h"
 #include "game/Camera.h"
+#include "game/EntityManager.h"
 #include "graphics/Draw.h"
 #include "graphics/Raycast.h"
+#include "physics/Collisions.h"
 #include "graphics/Renderer.h"
 #include "graphics/data/Mesh.h"
 #include "gui/Interface.h"
@@ -41,12 +43,13 @@
 #include "input/Keyboard.h"
 #include "input/Mouse.h"
 #include "vr/VRCamera.h"
+#include "vr/VRMath.h"
 #include "vr/VRSystem.h"
 
 
 namespace {
 
-float g_headYawOffset = 0.f;
+float g_headYaw = 0.f; // world yaw of the head
 float g_pendingTurn = 0.f;
 bool g_snapTurnReady = true;
 std::vector<InputKeyId> g_pressedKeys;
@@ -67,10 +70,6 @@ VRHand dominantHand() {
 
 VRHand offHand() {
 	return config.vr.leftHanded ? VRHandRight : VRHandLeft;
-}
-
-float wrapDegrees(float angle) {
-	return std::remainder(angle, 360.f);
 }
 
 //! Yaw of an OpenXR orientation in degrees, positive turns left like the Arx convention
@@ -105,8 +104,8 @@ bool isVRActive() {
 	return g_vr && g_vr->hasSession();
 }
 
-void setVRHeadYawOffset(float yaw) {
-	g_headYawOffset = wrapDegrees(yaw);
+void setVRHeadYaw(float yaw) {
+	g_headYaw = yaw;
 }
 
 void updateVRControls() {
@@ -170,7 +169,7 @@ void updateVRControls() {
 
 }
 
-bool getVRLocomotion(Vec2f & stick, float & yawOffset) {
+bool getVRLocomotion(Vec2f & stick, float & yaw) {
 
 	if(!g_vr) {
 		return false;
@@ -182,13 +181,13 @@ bool getVRLocomotion(Vec2f & stick, float & yawOffset) {
 		return false;
 	}
 
-	yawOffset = g_headYawOffset;
+	yaw = g_headYaw;
 
 	if(config.vr.handOrientedMovement && off.aim.valid) {
-		// Move towards where the off hand points: its yaw relative to the head, then relative to the body
+		// Move towards where the off hand points: its yaw relative to the head in the tracking space
 		const XrQuaternionf & head = g_vr->getView(0).pose.orientation;
 		float headYaw = yawDegrees(glm::quat(head.w, head.x, head.y, head.z));
-		yawOffset += wrapDegrees(yawDegrees(off.aim.orientation) - headYaw);
+		yaw += vr::wrapDegrees(yawDegrees(off.aim.orientation) - headYaw);
 	}
 
 	return true;
@@ -303,6 +302,52 @@ void drawVRPointerBeam() {
 		worldToClipSpace(center + right + down, dot[3]);
 		dot[0].color = dot[1].color = dot[2].color = dot[3].color = Color::rgb(0.6f, 0.85f, 1.f).toRGBA();
 		EERIEDRAWPRIM(Renderer::TriangleStrip, dot, 4);
+	}
+	
+}
+void applyVRRoomScale() {
+	
+	Vec3f movement = takeVRRoomScaleMovement();
+	if(movement == Vec3f(0.f) || !entities.player()) {
+		return;
+	}
+	
+	if(!USE_PLAYERCOLLISIONS) {
+		player.pos += movement;
+		return;
+	}
+	
+	// Move the player cylinder with the same sliding collision as normal movement
+	IO_PHYSICS physics = player.physics;
+	physics.cyl.origin = player.basePosition();
+	physics.startpos = physics.cyl.origin;
+	physics.targetpos = physics.startpos + movement;
+	ARX_COLLISION_Move_Cylinder(&physics, entities.player(), 40.f, CFLAG_EASY_SLIDING | CFLAG_PLAYER);
+	
+	Vec3f moved = physics.cyl.origin - player.basePosition();
+	player.pos = physics.cyl.origin + player.baseOffset();
+	player.physics.cyl.origin = physics.cyl.origin;
+	
+	// Play the walk animation while physically walking, unless the thumbstick already moves the player
+	static float speed = 0.f;
+	float dt = g_vr ? g_vr->getFrameDuration() : 0.f;
+	if(dt > 0.f) {
+		float frameSpeed = glm::length(Vec2f(moved.x, moved.z)) / dt;
+		speed += (frameSpeed - speed) * (1.f - std::exp(-dt * 8.f));
+	}
+	const PlayerMovement walking = PLAYER_MOVE_WALK_FORWARD | PLAYER_MOVE_WALK_BACKWARD
+	                               | PLAYER_MOVE_STRAFE_LEFT | PLAYER_MOVE_STRAFE_RIGHT;
+	if(speed > 40.f && !(player.m_currentMovement & walking)) {
+		Vec3f forward = angleToVectorXZ(player.angle.getYaw());
+		Vec3f right = angleToVectorXZ(player.angle.getYaw() - 90.f);
+		float alongForward = glm::dot(moved, forward);
+		float alongRight = glm::dot(moved, right);
+		player.m_currentMovement |= PLAYER_MOVE_STEALTH;
+		if(std::abs(alongForward) >= std::abs(alongRight)) {
+			player.m_currentMovement |= (alongForward > 0.f) ? PLAYER_MOVE_WALK_FORWARD : PLAYER_MOVE_WALK_BACKWARD;
+		} else {
+			player.m_currentMovement |= (alongRight > 0.f) ? PLAYER_MOVE_STRAFE_RIGHT : PLAYER_MOVE_STRAFE_LEFT;
+		}
 	}
 	
 }

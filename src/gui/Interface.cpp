@@ -197,6 +197,15 @@ static bool isVRModeActive() {
  * In VR the head looks around and the laser pointer needs cursor mode, so mouselook is only active while the
  * free look button is held (and in combat), like with the toggle disabled. The flying eye spell still uses it.
  */
+//! \return true while the user physically crouches in VR
+static bool isVRCrouching() {
+	#if ARX_HAVE_OPENXR
+	return isVRModeActive() && isVRPhysicallyCrouching();
+	#else
+	return false;
+	#endif
+}
+
 static bool isMouseLookToggle() {
 	return config.input.mouseLookToggle && (!isVRModeActive() || eyeball.isActive());
 }
@@ -912,12 +921,12 @@ void ArxGame::managePlayerControls() {
 		#if ARX_HAVE_OPENXR
 		// Analog movement with the VR controller thumbstick, relative to where the head (or hand) points
 		Vec2f vrStick;
-		float vrYawOffset = 0.f;
-		if(!NOMOREMOVES && getVRLocomotion(vrStick, vrYawOffset)) {
+		float vrYaw = 0.f;
+		if(!NOMOREMOVES && getVRLocomotion(vrStick, vrYaw)) {
 
 			float magnitude = glm::length(vrStick);
 			Vec2f direction = vrStick / magnitude;
-			float yaw = player.angle.getYaw() + vrYawOffset;
+			float yaw = vrYaw;
 
 			// Same speeds as the keys: forward 10, backward 5, sideways 6
 			float forwardSpeed = direction.y * (direction.y > 0.f ? 10.f : 5.f);
@@ -948,7 +957,7 @@ void ArxGame::managePlayerControls() {
 		bGCroucheToggle = !bGCroucheToggle;
 	}
 
-	if(GInput->actionPressed(CONTROLS_CUST_CROUCH) || bGCroucheToggle) {
+	if(GInput->actionPressed(CONTROLS_CUST_CROUCH) || bGCroucheToggle || isVRCrouching()) {
 		player.m_currentMovement |= PLAYER_CROUCH;
 	}
 

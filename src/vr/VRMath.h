@@ -20,6 +20,8 @@
 #ifndef ARX_VR_VRMATH_H
 #define ARX_VR_VRMATH_H
 
+#include <cmath>
+
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -34,6 +36,11 @@
  * Both are right-handed, so the change of basis is a 180° rotation around the x axis: (x, y, z) -> (x, -y, -z).
  */
 namespace vr {
+
+//! Wrap an angle in degrees to [-180, 180]
+[[nodiscard]] inline float wrapDegrees(float angle) {
+	return std::remainder(angle, 360.f);
+}
 
 [[nodiscard]] inline Vec3f toArxBasis(const Vec3f & v) {
 	return Vec3f(v.x, -v.y, -v.z);

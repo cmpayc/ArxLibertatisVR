@@ -41,18 +41,21 @@ void updateVRControls();
 /*!
  * Analog movement from the thumbstick of the off hand
  *
- * \param stick     Movement in the controller frame: x right, y forward, length at most 1
- * \param yawOffset Direction of "forward" relative to the player body: the head or the off hand
+ * \param stick Movement in the controller frame: x right, y forward, length at most 1
+ * \param yaw   World yaw of "forward": where the head (or the off hand) points
  *
  * \return true if the stick is outside the dead zone
  */
-bool getVRLocomotion(Vec2f & stick, float & yawOffset);
+bool getVRLocomotion(Vec2f & stick, float & yaw);
 
 //! \return the body rotation requested since the last call
 float takeVRTurn();
 
-//! Set by the VR camera: the yaw of the head relative to the player body
-void setVRHeadYawOffset(float yaw);
+//! Set by the VR camera: the world yaw of the head
+void setVRHeadYaw(float yaw);
+
+//! Move the player by the physical (room-scale) head movement, with collision - after the normal movement
+void applyVRRoomScale();
 
 //! \return true if a 2D interface (menu, inventory, book, note) is open and the laser should point at it
 [[nodiscard]] bool isVRInterfaceOpen();

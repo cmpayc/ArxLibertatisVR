@@ -1722,6 +1722,13 @@ void ArxGame::updateLevel() {
 	}
 	
 	ARX_PLAYER_Manage_Movement();
+	
+	#if ARX_HAVE_OPENXR
+	// Physical (room-scale) head movement moves the player with collision
+	if(isVRActive()) {
+		applyVRRoomScale();
+	}
+	#endif
 
 	ARX_PLAYER_Manage_Visual();
 
@@ -1736,13 +1743,27 @@ void ArxGame::updateLevel() {
 			AnimationDuration framedelay = toAnimationDuration(g_platformTime.lastFrameDuration());
 			Entity * entity = entities.player();
 			
+			Vec3f bodyPosition = entity->pos;
+			#if ARX_HAVE_OPENXR
+			// In VR the body is placed behind the eyes instead of the camera being placed at the model's eyes
+			if(isVRActive()) {
+				bodyPosition += getVRBodyOffset();
+			}
+			#endif
+			
 			EERIEDrawAnimQuatUpdate(entity->obj,
 			                        entity->animlayer.data(),
 			                        entity->angle,
-			                        entity->pos,
+			                        bodyPosition,
 			                        framedelay,
 			                        entity,
 			                        true);
+			
+			#if ARX_HAVE_OPENXR
+			if(isVRActive() && entity->obj->fastaccess.view_attach) {
+				updateVRBodyOffset(entity->obj->vertexWorldPositions[entity->obj->fastaccess.view_attach].v);
+			}
+			#endif
 		}
 		
 		if((player.Interface & INTER_COMBATMODE) && entities.player()->animlayer[1].cur_anim)
