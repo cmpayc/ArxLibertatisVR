@@ -236,6 +236,12 @@ public:
 		bool leftHanded;
 
 		float uiDistance;
+		
+		//! Wrist joint relative to the controller grip pose (meters; x right, y towards the thumb, z backwards)
+		Vec3f handOffset;
+		
+		//! How far the neck of the player model is behind the eyes (meters)
+		float bodyOffset;
 
 	} vr;
 	

@@ -50,15 +50,8 @@ Vec3f takeVRRoomScaleMovement();
 //! \return true while the user physically crouches (head well below the height at the last recenter)
 bool isVRPhysicallyCrouching();
 
-//! \return where the player model should be drawn relative to the player position
-Vec3f getVRBodyOffset();
-
-/*!
- * Adjust the player model placement so that its head ends up just behind the eyes of the user
- *
- * \param headVertex World position of the model's eye vertex, animated with the current offset
- */
-void updateVRBodyOffset(const Vec3f & headVertex);
+//! \return the world position between the eyes in the last prepared player frame
+bool getVREyeCenter(Vec3f & position);
 
 /*!
  * Convert a ray in the tracking space (OpenXR stage space, e.g. a controller aim pose) to the game world,
@@ -71,6 +64,14 @@ bool trackingRayToWorld(const Vec3f & position, const glm::quat & orientation, V
 //! Convert a point in the tracking space to the game world, see \ref trackingRayToWorld
 bool trackingPointToWorld(const Vec3f & position, Vec3f & world);
 
+/*!
+ * Convert a pose in the tracking space to the game world
+ *
+ * The world orientation maps the pose's axes, converted to the Arx basis (x right, y down, z forward),
+ * to world directions.
+ */
+bool trackingPoseToWorld(const Vec3f & position, const glm::quat & orientation,
+                         Vec3f & worldPosition, glm::quat & worldOrientation);
 //! Project a world position to the window-sized screen of the last prepared VR frame
 bool worldToVRScreen(const Vec3f & position, Vec2f & screen);
 

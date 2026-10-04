@@ -118,4 +118,10 @@ void AnimatedEntityRender(Entity * entity, float invisibility);
 
 void animateSkeleton(Entity * entity, AnimLayer * animlayer, Skeleton & skeleton);
 
+/*!
+ * Called for the player after its skeleton has been animated in world space and before the mesh is skinned,
+ * e.g. to apply inverse kinematics in VR
+ */
+extern void (*g_playerSkeletonHook)(Entity & player, Skeleton & skeleton);
+
 #endif // ARX_ANIMATION_ANIMATIONRENDER_H

@@ -307,41 +307,53 @@ void drawVRPointerBeam() {
 }
 void applyVRRoomScale() {
 	
+	if(!entities.player()) {
+		return;
+	}
+	
 	Vec3f movement = takeVRRoomScaleMovement();
-	if(movement == Vec3f(0.f) || !entities.player()) {
-		return;
+	Vec3f moved(0.f);
+	if(movement != Vec3f(0.f)) {
+		if(USE_PLAYERCOLLISIONS) {
+			// Move the player cylinder with the same sliding collision as normal movement
+			IO_PHYSICS physics = player.physics;
+			physics.cyl.origin = player.basePosition();
+			physics.startpos = physics.cyl.origin;
+			physics.targetpos = physics.startpos + movement;
+			ARX_COLLISION_Move_Cylinder(&physics, entities.player(), 40.f, CFLAG_EASY_SLIDING | CFLAG_PLAYER);
+			moved = physics.cyl.origin - player.basePosition();
+			player.pos = physics.cyl.origin + player.baseOffset();
+			player.physics.cyl.origin = physics.cyl.origin;
+		} else {
+			moved = movement;
+			player.pos += movement;
+		}
 	}
 	
-	if(!USE_PLAYERCOLLISIONS) {
-		player.pos += movement;
-		return;
-	}
-	
-	// Move the player cylinder with the same sliding collision as normal movement
-	IO_PHYSICS physics = player.physics;
-	physics.cyl.origin = player.basePosition();
-	physics.startpos = physics.cyl.origin;
-	physics.targetpos = physics.startpos + movement;
-	ARX_COLLISION_Move_Cylinder(&physics, entities.player(), 40.f, CFLAG_EASY_SLIDING | CFLAG_PLAYER);
-	
-	Vec3f moved = physics.cyl.origin - player.basePosition();
-	player.pos = physics.cyl.origin + player.baseOffset();
-	player.physics.cyl.origin = physics.cyl.origin;
-	
-	// Play the walk animation while physically walking, unless the thumbstick already moves the player
-	static float speed = 0.f;
+	/*
+	 * Play the walk animation while physically stepping, unless the thumbstick already moves the player.
+	 * Any noticeable movement plays at least about one step, so that even small steps are animated.
+	 */
+	static float animationTime = 0.f;
+	static Vec3f direction(0.f);
 	float dt = g_vr ? g_vr->getFrameDuration() : 0.f;
 	if(dt > 0.f) {
-		float frameSpeed = glm::length(Vec2f(moved.x, moved.z)) / dt;
-		speed += (frameSpeed - speed) * (1.f - std::exp(-dt * 8.f));
+		Vec3f horizontal(moved.x, 0.f, moved.z);
+		if(glm::length(horizontal) / dt > 10.f) {
+			animationTime = 0.4f;
+			direction = horizontal;
+		} else {
+			animationTime -= dt;
+		}
 	}
+	
 	const PlayerMovement walking = PLAYER_MOVE_WALK_FORWARD | PLAYER_MOVE_WALK_BACKWARD
 	                               | PLAYER_MOVE_STRAFE_LEFT | PLAYER_MOVE_STRAFE_RIGHT;
-	if(speed > 40.f && !(player.m_currentMovement & walking)) {
+	if(animationTime > 0.f && !(player.m_currentMovement & walking)) {
 		Vec3f forward = angleToVectorXZ(player.angle.getYaw());
 		Vec3f right = angleToVectorXZ(player.angle.getYaw() - 90.f);
-		float alongForward = glm::dot(moved, forward);
-		float alongRight = glm::dot(moved, right);
+		float alongForward = glm::dot(direction, forward);
+		float alongRight = glm::dot(direction, right);
 		player.m_currentMovement |= PLAYER_MOVE_STEALTH;
 		if(std::abs(alongForward) >= std::abs(alongRight)) {
 			player.m_currentMovement |= (alongForward > 0.f) ? PLAYER_MOVE_WALK_FORWARD : PLAYER_MOVE_WALK_BACKWARD;

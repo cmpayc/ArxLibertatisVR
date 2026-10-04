@@ -170,6 +170,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "Configure.h"
 
 #if ARX_HAVE_OPENXR
+#include "vr/VRBody.h"
 #include "vr/VRCamera.h"
 #include "vr/VRControls.h"
 #include "vr/VRSystem.h"
@@ -229,6 +230,10 @@ bool ArxGame::initialize() {
 		if(!g_vr->initInstance()) {
 			LogError << "VR initialization failed, continuing without VR";
 			delete g_vr, g_vr = nullptr;
+		}
+		if(g_vr) {
+			// The player model follows the headset and controllers
+			g_playerSkeletonHook = &applyVRBodyIK;
 		}
 	}
 	#endif
@@ -1745,9 +1750,8 @@ void ArxGame::updateLevel() {
 			
 			Vec3f bodyPosition = entity->pos;
 			#if ARX_HAVE_OPENXR
-			// In VR the body is placed behind the eyes instead of the camera being placed at the model's eyes
 			if(isVRActive()) {
-				bodyPosition += getVRBodyOffset();
+				bodyPosition += getVRModelOffset();
 			}
 			#endif
 			
@@ -1760,8 +1764,8 @@ void ArxGame::updateLevel() {
 			                        true);
 			
 			#if ARX_HAVE_OPENXR
-			if(isVRActive() && entity->obj->fastaccess.view_attach) {
-				updateVRBodyOffset(entity->obj->vertexWorldPositions[entity->obj->fastaccess.view_attach].v);
+			if(isVRActive()) {
+				logVRPlayerSkeleton(*entity);
 			}
 			#endif
 		}

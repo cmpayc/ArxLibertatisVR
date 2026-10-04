@@ -29,6 +29,7 @@
 #include "game/Camera.h"
 #include "game/Player.h"
 #include "graphics/Math.h"
+#include "graphics/Raycast.h"
 #include "graphics/opengl/OpenGLRenderer.h"
 #include "vr/VRControls.h"
 #include "vr/VRMath.h"
@@ -52,15 +53,22 @@ glm::quat g_referenceYawInverse(1.f, 0.f, 0.f, 0.f);
 bool g_playSpaceValid = false;
 float g_playSpaceYaw = 0.f; // degrees, Arx convention
 float g_lastBodyYaw = 0.f; // player body yaw when it was last seen
-bool g_bodyTurning = false;
 Vec2f g_consumedOffset(0.f); // horizontal head offset already converted into player movement (x, z)
 Vec3f g_roomScaleMovement(0.f); // world movement waiting to be applied to the player
 bool g_physicallyCrouching = false;
+bool g_standingHeightValid = false;
+float g_standingHeight = 0.f; // OpenXR stage space, meters
+Vec2f g_previousHead(0.f);
+bool g_previousHeadValid = false;
+Vec2f g_previousHandsXZ(0.f);
+int g_previousHands = 0;
+Vec2f g_headVelocity(0.f); // horizontal, m/s
+Vec2f g_handsVelocity(0.f);
+float g_settleTime = 0.f; // how long the head has been offset without leaning
 bool g_standingEyeValid = false;
 float g_standingEyeOffset = 0.f; // eye height above player.pos while standing (game units, y down)
 Vec3f g_eyeCenter(0.f); // world position of the eyes in the last prepared player frame
 bool g_eyeCenterValid = false;
-Vec3f g_bodyOffset(0.f); // where the player model is drawn relative to the player position
 // Mapping from the tracking space to the game world for the last prepared frame
 struct TrackingToWorld {
 	bool valid = false;
@@ -80,29 +88,17 @@ glm::quat toQuat(const XrQuaternionf & q) {
 	return glm::quat(q.w, q.x, q.y, q.z);
 }
 
-//! Turn the player body towards the head once the head looks too far to the side, or while moving
+//! The player body turns with the head (smoothed)
 void updateBodyYaw(float headYaw) {
-
+	
 	float bodyYaw = player.angle.getYaw();
 	float difference = vr::wrapDegrees(headYaw - bodyYaw);
-
-	Vec2f stick;
-	float movementYaw;
-	bool moving = getVRLocomotion(stick, movementYaw);
-
-	if(std::abs(difference) > 45.f || moving) {
-		g_bodyTurning = true;
-	}
-	if(g_bodyTurning) {
-		float dt = g_vr->getFrameDuration();
-		bodyYaw += difference * (1.f - std::exp(-dt * 6.f));
-		if(std::abs(difference) < 3.f && !moving) {
-			g_bodyTurning = false;
-		}
-		player.angle.setYaw(MAKEANGLE(bodyYaw));
-		player.desiredangle.setYaw(player.angle.getYaw());
-	}
-
+	
+	float dt = g_vr->getFrameDuration();
+	bodyYaw += difference * (1.f - std::exp(-dt * 12.f));
+	player.angle.setYaw(MAKEANGLE(bodyYaw));
+	player.desiredangle.setYaw(player.angle.getYaw());
+	
 	g_lastBodyYaw = player.angle.getYaw();
 }
 
@@ -124,14 +120,37 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	const XrView * views[VRSystem::EyeCount] = { &g_vr->getView(0), &g_vr->getView(1) };
 	const bool isPlayer = (&cam == &g_playerCamera);
 
+	const Vec3f headStage = (toVec(views[0]->pose.position) + toVec(views[1]->pose.position)) * 0.5f;
+	
+	/*
+	 * Standing height: the highest the head has been recently, slowly adapting (e.g. to sitting down). It is not
+	 * taken when recentering, as the user may be bent over the keyboard to press the key.
+	 */
+	if(!g_standingHeightValid) {
+		g_standingHeight = headStage.y;
+		g_standingHeightValid = true;
+	} else {
+		g_standingHeight = std::max(g_standingHeight - 0.002f * g_vr->getFrameDuration(), headStage.y);
+	}
+	
 	if(g_recenterRequested) {
-		g_referencePosition = (toVec(views[0]->pose.position) + toVec(views[1]->pose.position)) * 0.5f;
+		// Keep the current lean: the feet of the player do not move when recentering
+		Vec3f leanStage(0.f);
+		if(g_playSpaceValid) {
+			Vec3f head = g_referenceYawInverse * (headStage - g_referencePosition);
+			Vec2f lean = Vec2f(head.x, head.z) - g_consumedOffset;
+			leanStage = glm::inverse(g_referenceYawInverse) * Vec3f(lean.x, 0.f, lean.y);
+		}
+		g_referencePosition = headStage;
 		g_referenceYawInverse = glm::inverse(vr::yawOnly(toQuat(views[0]->pose.orientation)));
-		g_consumedOffset = Vec2f(0.f);
+		Vec3f lean = g_referenceYawInverse * leanStage;
+		g_consumedOffset = -Vec2f(lean.x, lean.z);
 		g_playSpaceValid = false;
 		g_physicallyCrouching = false;
+		g_previousHeadValid = false;
 		g_recenterRequested = false;
 	}
+	g_referencePosition.y = g_standingHeight;
 
 	const float scale = 100.f * config.vr.worldScale; // meters to centimeters
 
@@ -171,20 +190,98 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	}
 	const glm::mat3x3 body = glm::transpose(glm::mat3x3(toRotationMatrix(Anglef(0.f, heading, 0.f))));
 
-	// Room-scale: horizontal head movement moves the player body, the view stays above it
+	/*
+	 * Room-scale: the feet of the player (the body root, g_consumedOffset in the tracking space) stay planted
+	 * while the head leans away from them - the spine bends to follow (VRBody). The feet follow the head when
+	 * stepping or walking (the controllers move along with the head) or when leaning too far.
+	 */
 	Vec3f consumed(0.f);
 	if(isPlayer) {
 		Vec3f head = g_referenceYawInverse * ((toVec(views[0]->pose.position) + toVec(views[1]->pose.position)) * 0.5f
 		                                      - g_referencePosition);
-		Vec2f pending = Vec2f(head.x, head.z) - g_consumedOffset;
-		// Large jumps (e.g. walking around while a menu was open) are not converted into movement
-		if(glm::length(pending) < 0.5f) {
-			g_roomScaleMovement += body * (vr::toArxBasis(Vec3f(pending.x, 0.f, pending.y)) * scale);
-		}
-		g_consumedOffset += pending;
-		consumed = Vec3f(g_consumedOffset.x, 0.f, g_consumedOffset.y);
+		Vec2f headXZ(head.x, head.z);
+		const float dt = std::max(g_vr->getFrameDuration(), 0.001f);
 		
-		// Real crouching (with hysteresis) relative to the head height when recentering standing up
+		/*
+		 * Step or lean: when stepping or walking, the controllers move along with the head. When leaning, the
+		 * hands stay where they are or move differently. The feet follow the part of the head movement that the
+		 * hands share.
+		 */
+		Vec2f handsXZ(0.f);
+		int hands = 0;
+		for(size_t hand = 0; hand < VRHandCount; hand++) {
+			const VRPose & grip = g_vr->getInput().getHand(VRHand(hand)).grip;
+			if(grip.valid) {
+				Vec3f position = g_referenceYawInverse * (grip.position - g_referencePosition);
+				handsXZ += Vec2f(position.x, position.z);
+				hands++;
+			}
+		}
+		if(hands > 0) {
+			handsXZ /= float(hands);
+		}
+		
+		Vec2f headDelta = g_previousHeadValid ? headXZ - g_previousHead : Vec2f(0.f);
+		// A hand appearing or disappearing is not movement
+		Vec2f handsDelta = (g_previousHeadValid && hands > 0 && hands == g_previousHands) ? handsXZ - g_previousHandsXZ
+		                                                                                   : Vec2f(0.f);
+		float smoothing = 1.f - std::exp(-dt * 7.f);
+		g_headVelocity += (headDelta / dt - g_headVelocity) * smoothing;
+		g_handsVelocity += (handsDelta / dt - g_handsVelocity) * smoothing;
+		g_previousHead = headXZ;
+		g_previousHandsXZ = handsXZ;
+		g_previousHands = hands;
+		g_previousHeadValid = true;
+		
+		const float MaxLean = 0.3f;    // m
+		const float WalkSpeed = 0.45f; // m/s, without tracked controllers
+		const float HipToEyes = 0.75f; // m, pivot of a lean
+		float headSpeed = glm::length(g_headVelocity);
+		Vec2f root = g_consumedOffset;
+		
+		// Only movement away from the feet can be a step: returning from a lean must never move the feet
+		bool movingAway = glm::dot(headDelta, headXZ - root) > 0.f;
+		float follow = 0.f;
+		if(headSpeed > 0.05f && movingAway) {
+			if(hands > 0) {
+				follow = glm::clamp(glm::dot(g_handsVelocity, g_headVelocity) / (headSpeed * headSpeed), 0.f, 1.f);
+			} else {
+				follow = (headSpeed > WalkSpeed) ? 1.f : 0.f;
+			}
+		}
+		root += headDelta * follow;
+		
+		/*
+		 * A lean rotates around the hips and lowers the head. An offset without that drop (shifting the shoulders,
+		 * leftovers of earlier movement) settles: the feet slowly move back under the head.
+		 */
+		Vec2f lean = headXZ - root;
+		float leanLength = glm::length(lean);
+		float expectedDrop = HipToEyes - std::sqrt(std::max(HipToEyes * HipToEyes - leanLength * leanLength, 0.f));
+		float drop = -head.y;
+		if(leanLength > 0.05f && drop < expectedDrop * 0.5f) {
+			g_settleTime += dt;
+		} else {
+			g_settleTime = 0.f;
+		}
+		if(g_settleTime > 1.f) {
+			root += lean * (1.f - std::exp(-dt * 2.f));
+		}
+		
+		lean = headXZ - root;
+		leanLength = glm::length(lean);
+		if(leanLength > MaxLean) {
+			root = headXZ - lean * (MaxLean / leanLength);
+		}		
+		Vec2f step = root - g_consumedOffset;
+		// Large jumps (e.g. walking around while a menu was open) are not converted into movement
+		if(glm::length(step) < 0.5f) {
+			g_roomScaleMovement += body * (vr::toArxBasis(Vec3f(step.x, 0.f, step.y)) * scale);
+		}
+		g_consumedOffset = root;
+		consumed = Vec3f(root.x, 0.f, root.y);
+		
+		// Real crouching (with hysteresis) relative to the standing height
 		if(head.y < -0.35f) {
 			g_physicallyCrouching = true;
 		} else if(head.y > -0.25f) {
@@ -199,6 +296,23 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 		glm::quat orientation = g_referenceYawInverse * toQuat(views[eye]->pose.orientation);
 		eyeRotation[eye] = body * glm::mat3_cast(vr::toArxBasis(orientation));
 		eyePosition[eye] = origin + body * (vr::toArxBasis(position) * scale);
+	}
+	
+	// Leaning must not put the head through walls: stop the view in front of them
+	if(isPlayer) {
+		Vec3f eyes = (eyePosition[0] + eyePosition[1]) * 0.5f;
+		Vec3f lean = eyes - origin;
+		float leanLength = glm::length(lean);
+		if(leanLength > 1.f) {
+			if(RaycastResult hit = raycastScene(origin, eyes + lean / leanLength * 10.f, POLY_TRANS, RaycastIgnorePlayer)) {
+				float allowed = std::max(glm::distance(origin, hit.pos) - 10.f, 0.f);
+				if(allowed < leanLength) {
+					Vec3f correction = lean / leanLength * (leanLength - allowed);
+					eyePosition[0] -= correction;
+					eyePosition[1] -= correction;
+				}
+			}
+		}
 	}
 
 	const float nearDist = 1.f;
@@ -327,28 +441,21 @@ void invalidateVRTracking() {
 bool isVRPhysicallyCrouching() {
 	return g_physicallyCrouching;
 }
-Vec3f getVRBodyOffset() {
-	return g_bodyOffset;
+
+bool getVREyeCenter(Vec3f & position) {
+	position = g_eyeCenter;
+	return g_eyeCenterValid;
 }
 
-void updateVRBodyOffset(const Vec3f & headVertex) {
+bool trackingPoseToWorld(const Vec3f & position, const glm::quat & orientation,
+                         Vec3f & worldPosition, glm::quat & worldOrientation) {
 	
-	if(!g_eyeCenterValid) {
-		g_bodyOffset = Vec3f(0.f);
-		return;
+	if(!trackingPointToWorld(position, worldPosition)) {
+		return false;
 	}
 	
-	// Keep the head of the model about 10 cm behind the eyes (horizontally), where the head of the user is
-	Vec3f forward = angleToVectorXZ(player.angle.getYaw());
-	Vec3f target = g_eyeCenter - forward * 10.f;
-	Vec3f error = target - headVertex;
-	error.y = 0.f;
+	glm::quat relative = g_referenceYawInverse * orientation;
+	worldOrientation = glm::quat_cast(g_trackingToWorld.body * glm::mat3_cast(vr::toArxBasis(relative)));
 	
-	g_bodyOffset += error;
-	
-	// After teleports or with a bad pose, fall back to the normal model placement
-	if(glm::length(g_bodyOffset) > 80.f) {
-		g_bodyOffset = Vec3f(0.f);
-	}
-	
+	return true;
 }

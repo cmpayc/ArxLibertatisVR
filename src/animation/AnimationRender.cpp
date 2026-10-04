@@ -830,6 +830,8 @@ static void pushSlotHalo(HaloInfo & haloInfo, EquipmentSlot slot, VertexSelectio
 //-----------------------------------------------------------------------------
 extern long IN_BOOK_DRAW;
 
+void (*g_playerSkeletonHook)(Entity & player, Skeleton & skeleton) = nullptr;
+
 static void PrepareAnimatedObjectHalo(HaloInfo & haloInfo, const Vec3f & pos,
                                       Skeleton * obj, EERIE_3DOBJ * eobj) {
 	
@@ -1465,6 +1467,10 @@ void EERIEDrawAnimQuatUpdate(EERIE_3DOBJ * eobj,
 	
 	arx_assert(eobj->m_skeleton);
 	animateSkeleton(eobj, animlayer, angle, pos, scale, ftr, io, *eobj->m_skeleton, io ? &io->animBlend : nullptr);
+	
+	if(g_playerSkeletonHook && io && io == entities.player() && !IN_BOOK_DRAW) {
+		g_playerSkeletonHook(*io, *eobj->m_skeleton);
+	}
 	
 	Cedric_TransformVerts(eobj);
 	if(io) {

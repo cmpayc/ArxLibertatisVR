@@ -142,7 +142,11 @@ constexpr const float
 	vrWorldScale = 1.f,
 	vrHeightOffset = 0.f,
 	vrSmoothTurnSpeed = 120.f,
-	vrUiDistance = 1.5f;
+	vrUiDistance = 1.5f,
+	vrHandOffsetX = 0.f,
+	vrHandOffsetY = 0.06f,
+	vrHandOffsetZ = 0.07f,
+	vrBodyOffset = 0.22f;
 
 constexpr const ActionKey actions[NUM_ACTION_KEY] = {
 	ActionKey(Keyboard::Key_Spacebar), // JUMP
@@ -296,7 +300,11 @@ constexpr const std::string_view
 	vrSmoothTurnSpeed = "smooth_turn_speed",
 	vrHandOrientedMovement = "hand_oriented_movement",
 	vrLeftHanded = "left_handed",
-	vrUiDistance = "ui_distance";
+	vrUiDistance = "ui_distance",
+	vrHandOffsetX = "hand_offset_x",
+	vrHandOffsetY = "hand_offset_y",
+	vrHandOffsetZ = "hand_offset_z",
+	vrBodyOffset = "body_offset";
 
 // Input key options
 constexpr const std::string_view actions[NUM_ACTION_KEY] = {
@@ -576,6 +584,10 @@ bool Config::save() {
 	writer.writeKey(Key::vrHandOrientedMovement, vr.handOrientedMovement);
 	writer.writeKey(Key::vrLeftHanded, vr.leftHanded);
 	writer.writeKey(Key::vrUiDistance, vr.uiDistance);
+	writer.writeKey(Key::vrHandOffsetX, vr.handOffset.x);
+	writer.writeKey(Key::vrHandOffsetY, vr.handOffset.y);
+	writer.writeKey(Key::vrHandOffsetZ, vr.handOffset.z);
+	writer.writeKey(Key::vrBodyOffset, vr.bodyOffset);
 
 	// key
 	writer.beginSection(Section::Key);
@@ -729,6 +741,10 @@ bool Config::init(const fs::path & file) {
 	vr.leftHanded = reader.getKey(Section::VR, Key::vrLeftHanded, Default::vrLeftHanded);
 	float vrUiDistance = reader.getKey(Section::VR, Key::vrUiDistance, Default::vrUiDistance);
 	vr.uiDistance = glm::clamp(vrUiDistance, 0.5f, 5.f);
+	vr.handOffset.x = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetX, Default::vrHandOffsetX), -0.2f, 0.2f);
+	vr.handOffset.y = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetY, Default::vrHandOffsetY), -0.2f, 0.2f);
+	vr.handOffset.z = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetZ, Default::vrHandOffsetZ), -0.2f, 0.2f);
+	vr.bodyOffset = glm::clamp(reader.getKey(Section::VR, Key::vrBodyOffset, Default::vrBodyOffset), 0.f, 0.4f);
 
 	// Get action key settings
 	for(size_t i = 0; i < NUM_ACTION_KEY; i++) {
