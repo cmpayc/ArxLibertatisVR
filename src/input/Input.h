@@ -127,7 +127,16 @@ public:
 	void setMousePosAbs(const Vec2s & mousePos);
 	
 	void setRawMouseInput(bool enabled);
-	
+
+	/*!
+	 * Virtual input from other devices (VR controllers), merged with the real mouse and keyboard
+	 *
+	 * Changes are applied on the next \ref update.
+	 */
+	void setVirtualMousePosition(bool active, const Vec2s & position = Vec2s(0));
+	void setVirtualMouseButton(int buttonId, bool pressed);
+	void setVirtualKey(int keyId, bool pressed);
+
 	void setMouseSensitivity(int sensitivity);
 	void setMouseAcceleration(int acceleration);
 	void setInvertMouseY(bool invert);
@@ -202,7 +211,14 @@ private:
 	
 	int   iKeyId;                         // Id of the key pressed in the last update
 	int   keysStates[Keyboard::KeyCount]; // 0: up, 1: just pressed/released, 2: pressed
-	
+
+	// Virtual input
+	bool  m_virtualMouseActive;
+	Vec2s m_virtualMousePosition;
+	bool  m_virtualMouseButton[Mouse::ButtonCount];
+	bool  m_virtualMouseButtonApplied[Mouse::ButtonCount];
+	bool  m_virtualKeys[Keyboard::KeyCount];
+
 };
 
 extern Input * GInput;

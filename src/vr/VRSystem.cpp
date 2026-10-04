@@ -50,6 +50,9 @@
 
 #include "core/Config.h"
 #include "core/Version.h"
+#include "input/Input.h"
+#include "input/Keyboard.h"
+#include "input/Mouse.h"
 #include "io/log/Logger.h"
 #include "platform/ProgramOptions.h"
 
@@ -309,6 +312,8 @@ VRSystem::VRSystem()
 	, m_uiAnchor(0.f)
 	, m_uiPose{ { 0.f, 0.f, 0.f, 1.f }, { 0.f, 0.f, 0.f } }
 	, m_uiExtent{ 1.f, 1.f }
+	, m_uiVisible(false)
+	, m_pointerOnUI(false)
 	, m_frameState{ XR_TYPE_FRAME_STATE }
 	, m_frameActive(false)
 	, m_shouldRender(false)
@@ -399,6 +404,10 @@ bool VRSystem::initInstance() {
 		                      reinterpret_cast<PFN_xrVoidFunction *>(&g_convertTime));
 	}
 
+	if(!m_input.init(m_instance)) {
+		LogWarning << "OpenXR: controller input is not available";
+	}
+
 	XrInstanceProperties instanceProperties = { XR_TYPE_INSTANCE_PROPERTIES };
 	if(XR_SUCCEEDED(xrGetInstanceProperties(m_instance, &instanceProperties))) {
 		std::ostringstream oss;
@@ -447,6 +456,7 @@ void VRSystem::shutdown() {
 	destroySession();
 
 	if(m_instance != XR_NULL_HANDLE) {
+		m_input.shutdown();
 		xrDestroyInstance(m_instance);
 		m_instance = XR_NULL_HANDLE;
 	}
@@ -522,6 +532,8 @@ bool VRSystem::createSession() {
 		destroySession();
 		return false;
 	}
+
+	m_input.attach(m_session);
 
 	LogInfo << "OpenXR session created";
 
@@ -625,6 +637,7 @@ void VRSystem::destroySession() {
 		m_stageSpace = XR_NULL_HANDLE;
 	}
 
+	m_input.detach();
 	xrDestroySession(m_session);
 	m_session = XR_NULL_HANDLE;
 	m_sessionRunning = false;
@@ -653,6 +666,11 @@ void VRSystem::pollEvents() {
 				break;
 			}
 
+			case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED: {
+				m_input.logInteractionProfiles();
+				break;
+			}
+			
 			case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING: {
 				LogWarning << "OpenXR: instance loss pending";
 				m_exitRequested = true;
@@ -730,6 +748,10 @@ bool VRSystem::beginFrame() {
 		return false;
 	}
 	m_frameActive = true;
+
+	// Controllers are read for every frame, also when nothing is rendered
+	m_input.update(m_frameState.predictedDisplayTime, m_stageSpace);
+	updatePointer();
 
 	if(!m_frameState.shouldRender) {
 		return false;
@@ -887,6 +909,7 @@ void VRSystem::endFrame() {
 	endInfo.layerCount = uint32_t(layers.size());
 	endInfo.layers = layers.data();
 	check(xrEndFrame(m_session, &endInfo), "xrEndFrame");
+	m_uiVisible = m_shouldRender && m_uiSubmitted;
 
 	m_frameActive = false;
 	m_shouldRender = false;
@@ -1366,5 +1389,63 @@ void VRSystem::drawTextureToWindow(unsigned texture, const Vec2i & windowSize, b
 
 	glActiveTexture(GLenum(previousActiveTexture));
 	glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFramebuffer));
+
+}
+
+void VRSystem::updatePointer() {
+
+	if(!GInput) {
+		return;
+	}
+
+	const VRHand dominant = config.vr.leftHanded ? VRHandLeft : VRHandRight;
+	const VRHandState & hand = m_input.getHand(dominant);
+
+	// Intersect the dominant hand's aim ray with the virtual screen shown in the last frame
+	bool onUI = false;
+	Vec2s mouse(0);
+	if(m_uiVisible && hand.aim.valid && m_uiSize.x > 0 && m_uiSize.y > 0) {
+
+		glm::quat screenRotation(m_uiPose.orientation.w, m_uiPose.orientation.x,
+		                         m_uiPose.orientation.y, m_uiPose.orientation.z);
+		glm::quat toScreen = glm::inverse(screenRotation);
+		Vec3f screenPosition(m_uiPose.position.x, m_uiPose.position.y, m_uiPose.position.z);
+
+		// Ray in screen space: the screen is the z = 0 plane, visible from +z
+		Vec3f origin = toScreen * (hand.aim.position - screenPosition);
+		Vec3f direction = toScreen * (hand.aim.orientation * Vec3f(0.f, 0.f, -1.f));
+
+		if(direction.z < -1e-4f && origin.z > 0.f) {
+			Vec3f hit = origin + direction * (-origin.z / direction.z);
+			float u = hit.x / m_uiExtent.width + 0.5f;
+			float v = 0.5f - hit.y / m_uiExtent.height;
+			if(u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f) {
+				onUI = true;
+				mouse = Vec2s(s16(u * float(m_uiSize.x - 1)), s16(v * float(m_uiSize.y - 1)));
+			}
+		}
+
+	}
+
+	if(onUI && !m_pointerOnUI) {
+		m_input.vibrate(dominant, 0.25f, 0.04f);
+	}
+	m_pointerOnUI = onUI;
+
+	GInput->setVirtualMousePosition(onUI, mouse);
+
+	/*
+	 * Trigger and grip act as the mouse buttons. Escape (game menu) is on Y of the left controller,
+	 * as the menu button is often reserved by the system (e.g. Quest through Virtual Desktop).
+	 */
+	const VRHandState & left = m_input.getHand(VRHandLeft);
+	GInput->setVirtualMouseButton(Mouse::Button_0, hand.isPressed(VRButtonTrigger));
+	GInput->setVirtualMouseButton(Mouse::Button_1, hand.isPressed(VRButtonGrip));
+	GInput->setVirtualKey(Keyboard::Key_Escape, left.isPressed(VRButtonSecondary) || left.isPressed(VRButtonMenu)
+	                                            || hand.isPressed(VRButtonMenu));
+
+	if(onUI && (hand.wasPressed(VRButtonTrigger) || hand.wasPressed(VRButtonGrip))) {
+		m_input.vibrate(dominant, 0.5f, 0.05f);
+	}
 
 }

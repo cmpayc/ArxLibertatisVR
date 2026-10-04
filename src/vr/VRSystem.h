@@ -28,6 +28,7 @@
 
 #include "graphics/opengl/OpenGLRenderer.h"
 #include "math/Types.h"
+#include "vr/VRInput.h"
 
 
 /*!
@@ -125,6 +126,12 @@ public:
 
 	//! Place the virtual screen in front of the user again
 	void resetUIPlacement() { m_uiPlaced = false; }
+	
+	[[nodiscard]] const VRInput & getInput() const { return m_input; }
+	[[nodiscard]] VRInput & getInput() { return m_input; }
+	
+	//! \return true if the laser pointer currently points at the virtual screen
+	[[nodiscard]] bool isPointingAtUI() const { return m_pointerOnUI; }
 
 	//! Acquire the current swapchain image for an eye and return its OpenGL texture name
 	unsigned acquireEyeImage(size_t eye);
@@ -149,6 +156,7 @@ private:
 	void destroyUITarget();
 	void updateUIPlacement(bool followHead);
 	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
+	void updatePointer();
 	unsigned acquireSwapchainImage(EyeSwapchain & swapchain);
 	void releaseSwapchainImage(EyeSwapchain & swapchain);
 	void handleSessionStateChange(XrSessionState state);
@@ -196,6 +204,11 @@ private:
 	Vec3f m_uiAnchor; // head position the screen is placed relative to, OpenXR stage space
 	XrPosef m_uiPose;
 	XrExtent2Df m_uiExtent;
+	bool m_uiVisible; // The virtual screen was shown in the last frame
+	
+	// Controllers and the laser pointer (dominant hand) emulating the mouse on the virtual screen
+	VRInput m_input;
+	bool m_pointerOnUI;
 
 	XrFrameState m_frameState;
 	bool m_frameActive;

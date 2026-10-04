@@ -343,9 +343,29 @@ Input::Input()
 	, m_invertMouseY(false)
 	, iWheelDir(0)
 	, iKeyId(-1)
+	, m_virtualMouseActive(false)
+	, m_virtualMousePosition(0)
 {
+	std::fill(std::begin(m_virtualMouseButton), std::end(m_virtualMouseButton), false);
+	std::fill(std::begin(m_virtualMouseButtonApplied), std::end(m_virtualMouseButtonApplied), false);
+	std::fill(std::begin(m_virtualKeys), std::end(m_virtualKeys), false);
 	setMouseSensitivity(2);
 	reset();
+}
+
+void Input::setVirtualMousePosition(bool active, const Vec2s & position) {
+	m_virtualMouseActive = active;
+	m_virtualMousePosition = position;
+}
+
+void Input::setVirtualMouseButton(int buttonId, bool pressed) {
+	arx_assert(buttonId >= Mouse::ButtonBase && buttonId < Mouse::ButtonMax);
+	m_virtualMouseButton[buttonId - Mouse::ButtonBase] = pressed;
+}
+
+void Input::setVirtualKey(int keyId, bool pressed) {
+	arx_assert(keyId >= Keyboard::KeyBase && keyId < Keyboard::KeyMax);
+	m_virtualKeys[keyId - Keyboard::KeyBase] = pressed;
 }
 
 bool Input::init(Window * window) {
@@ -488,6 +508,15 @@ void Input::update(float time) {
 		int iNumUnClick;
 		backend->getMouseButtonClickCount(buttonId, iNumClick, iNumUnClick);
 		
+		// Virtual buttons generate press and release events like the real mouse
+		if(m_virtualMouseButton[i] != m_virtualMouseButtonApplied[i]) {
+			if(m_virtualMouseButton[i]) {
+				iNumClick++;
+			} else {
+				iNumUnClick++;
+			}
+			m_virtualMouseButtonApplied[i] = m_virtualMouseButton[i];
+		}		
 		iOldNumClick[i] += iNumClick + iNumUnClick;
 		
 		if(!bMouseButton[i] && iOldNumClick[i] == iNumUnClick) {
@@ -549,6 +578,11 @@ void Input::update(float time) {
 		mouseInWindow = false;
 	}
 	
+	// A virtual pointer (VR laser) overrides the cursor position while it points at the screen
+	if(m_virtualMouseActive && m_mouseMode == Mouse::Absolute) {
+		iMouseA = m_virtualMousePosition;
+		mouseInWindow = true;
+	}	
 	int relX, relY;
 	backend->getRelativeMouseCoords(relX, relY, iWheelDir);
 	
@@ -749,19 +783,19 @@ void Input::setInvertMouseY(bool invert) {
 bool Input::isKeyPressed(int keyId) const {
 	arx_assert(keyId >= Keyboard::KeyBase && keyId < Keyboard::KeyMax);
 
-	return backend->isKeyboardKeyPressed(keyId);
+	return backend->isKeyboardKeyPressed(keyId) || m_virtualKeys[keyId - Keyboard::KeyBase];
 }
 
 bool Input::isKeyPressedNowPressed(int keyId) const {
 	arx_assert(keyId >= Keyboard::KeyBase && keyId < Keyboard::KeyMax);
 
-	return backend->isKeyboardKeyPressed(keyId) && (keysStates[keyId] == 1);
+	return isKeyPressed(keyId) && (keysStates[keyId] == 1);
 }
 
 bool Input::isKeyPressedNowUnPressed(int keyId) const {
 	arx_assert(keyId >= Keyboard::KeyBase && keyId < Keyboard::KeyMax);
 
-	return !backend->isKeyboardKeyPressed(keyId) && (keysStates[keyId] == 1);
+	return !isKeyPressed(keyId) && (keysStates[keyId] == 1);
 }
 
 void Input::startTextInput(const Rect & box, TextInputHandler * handler) {
