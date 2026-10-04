@@ -170,6 +170,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "Configure.h"
 
 #if ARX_HAVE_OPENXR
+#include "vr/VRCamera.h"
 #include "vr/VRSystem.h"
 #endif
 
@@ -433,7 +434,13 @@ bool ArxGame::initWindow(RenderWindow * window) {
 	m_MainWindow->setTitle(arx_name + " " + arx_version);
 	m_MainWindow->setMinimizeOnFocusLost(config.window.minimizeOnFocusLost);
 	m_MainWindow->setMinTextureUnits(3);
-	m_MainWindow->setMaxMSAALevel(config.video.antialiasing ? 8 : 1);
+	bool windowMSAA = config.video.antialiasing;
+	#if ARX_HAVE_OPENXR
+	// In VR, anti-aliasing is done in the eye render target, and the window must not be multisampled
+	// so that the left eye can be copied into it
+	windowMSAA = windowMSAA && !g_vr;
+	#endif
+	m_MainWindow->setMaxMSAALevel(windowMSAA ? 8 : 1);
 	bool noVSync = benchmark::isEnabled();
 	#if ARX_HAVE_OPENXR
 	noVSync = noVSync || g_vr; // The OpenXR runtime paces frames
@@ -1234,6 +1241,13 @@ void ArxGame::doFrame() {
 		levelInit();
 	} else {
 		cinematicLaunchWaiting();
+		#if ARX_HAVE_OPENXR
+		if(g_vr && g_vr->hasSession()) {
+			// Begin the VR frame before updating so that the camera uses the predicted head pose
+			g_vr->pollEvents();
+			g_vr->beginFrame();
+		}
+		#endif
 		render();
 		presentFrame();
 	}
@@ -1243,9 +1257,12 @@ void ArxGame::presentFrame() {
 
 	#if ARX_HAVE_OPENXR
 	if(g_vr && g_vr->hasSession()) {
-		g_vr->pollEvents();
-		// TODO(vr) Replace the mirrored window with real stereo rendering (T1.7)
-		if(g_vr->beginFrame()) {
+		if(!g_vr->isFrameActive()) {
+			g_vr->pollEvents();
+			g_vr->beginFrame();
+		}
+		if(g_vr->isRenderingFrame() && !g_vr->hasRenderedStereo()) {
+			// Menus, cinematics and loading screens are not rendered in stereo yet: show them as a flat screen
 			g_vr->mirrorWindowToEyes(m_MainWindow->getSize());
 		}
 		g_vr->endFrame();
@@ -1323,7 +1340,11 @@ void ArxGame::updateFirstPersonCamera() {
 				g_playerCameraStablePos = skeleton.bones[viewGroup].anim(io->obj->vertexlocal[viewVertex]);
 			}
 			
-			if(!config.video.viewBobbing) {
+			bool viewBobbing = config.video.viewBobbing;
+			#if ARX_HAVE_OPENXR
+			viewBobbing = viewBobbing && !g_vr; // Causes motion sickness in VR
+			#endif
+			if(!viewBobbing) {
 				g_playerCamera.m_pos = g_playerCameraStablePos;
 			}
 			
@@ -1519,8 +1540,15 @@ void ArxGame::updateActiveCamera() {
 		cam = &g_playerCamera;
 	}
 	
+	#if ARX_HAVE_OPENXR
+	// Head tracking replaces the screen camera, without screen shake for comfort
+	if(prepareVRCamera(*cam, g_size)) {
+		return;
+	}
+	#endif
+
 	ManageQuakeFX(cam);
-	
+
 	PrepareCamera(cam, g_size);
 	
 }
@@ -1820,10 +1848,15 @@ void ArxGame::updateLevel() {
 void ArxGame::renderLevel() {
 	
 	ARX_PROFILE_FUNC();
-	
+
+	#if ARX_HAVE_OPENXR
+	// The 3D scene is drawn once and every draw call is replicated into both eyes by the renderer
+	bool vrStereo = g_vr && g_vr->beginStereoRender();
+	#endif
+
 	// Clear screen & Z buffers
 	GRenderer->Clear(Renderer::ColorBuffer | Renderer::DepthBuffer, g_fogColor);
-	
+
 	cinematicBorder.render();
 	
 	GRenderer->SetAntialiasing(true);
@@ -1879,6 +1912,14 @@ void ArxGame::renderLevel() {
 	
 	// Manage Death visual & Launch menu...
 	ARX_PLAYER_Manage_Death();
+
+	#if ARX_HAVE_OPENXR
+	if(vrStereo) {
+		// TODO(vr) Draw the interface into a virtual screen shown in VR (T2.1) - for now it is only in the window
+		g_vr->endStereoRender(m_MainWindow->getSize());
+		GRenderer->Clear(Renderer::DepthBuffer);
+	}
+	#endif
 
 	// INTERFACE
 	g_renderBatcher.clear();

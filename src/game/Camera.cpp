@@ -105,7 +105,41 @@ void PrepareCamera(Camera * cam, const Rect & viewport, const Vec2i & projection
 	g_preparedCamera.m_center = Vec2f(projectionCenter);
 	Vec2f defov = Vec2f(g_preparedCamera.m_viewToClip[0][0], -g_preparedCamera.m_viewToClip[1][1]);
 	g_preparedCamera.m_screenToView = 2.f / (Vec2f(viewport.size()) * defov);
-	
+
+}
+
+void PrepareCamera(Camera * cam, const glm::mat4x4 & worldToView, const glm::mat4x4 & viewToClip,
+                   const Rect & viewport) {
+
+	SetActiveCamera(cam);
+
+	g_preparedCamera.m_worldToView = worldToView;
+	GRenderer->SetViewMatrix(g_preparedCamera.m_worldToView);
+
+	g_preparedCamera.m_viewToClip = viewToClip;
+	GRenderer->SetProjectionMatrix(g_preparedCamera.m_viewToClip);
+
+	// Change coordinate system from [-1, 1] x [-1, 1] to [0, width] x [0, height] and flip the y axis
+	glm::mat4x4 ndcToScreen(1.f);
+	ndcToScreen = glm::scale(ndcToScreen, Vec3f(Vec2f(viewport.size()) / 2.f, 1.f));
+	ndcToScreen = glm::translate(ndcToScreen, Vec3f(1.f, 1.f, 0.f));
+	ndcToScreen = glm::scale(ndcToScreen, Vec3f(1.f, -1.f, 1.f));
+	g_preparedCamera.m_viewToScreen = ndcToScreen * g_preparedCamera.m_viewToClip;
+
+	g_preparedCamera.m_worldToScreen = g_preparedCamera.m_viewToScreen * g_preparedCamera.m_worldToView;
+
+	GRenderer->SetViewport(viewport);
+
+	g_preparedCamera.m_viewToWorld = glm::inverse(worldToView);
+
+	// The projection may be asymmetric: the view axis projects to the off-center point (m[2][0], m[2][1]) in NDC
+	Vec2f centerNdc = Vec2f(viewToClip[2][0], viewToClip[2][1]) / viewToClip[2][3];
+	Vec2f size = Vec2f(viewport.size());
+	g_preparedCamera.m_center = Vec2f(viewport.topLeft())
+	                            + Vec2f(centerNdc.x + 1.f, 1.f - centerNdc.y) * size / 2.f;
+	Vec2f defov = Vec2f(viewToClip[0][0], -viewToClip[1][1]);
+	g_preparedCamera.m_screenToView = 2.f / (size * defov);
+
 }
 
 void SetActiveCamera(Camera * cam) {

@@ -21,6 +21,7 @@
 #define ARX_GRAPHICS_OPENGL_OPENGLRENDERER_H
 
 #include <memory>
+#include <vector>
 
 #include <boost/intrusive/list.hpp>
 
@@ -95,7 +96,37 @@ public:
 	
 	template <class Vertex>
 	void beforeDraw() { flushState(); selectTrasform<Vertex>(); }
-	
+
+	//! Issue a draw call once for each active view, see \ref setStereoViews
+	template <class DrawFunction>
+	void drawViews(const DrawFunction & draw);
+
+	struct StereoView {
+		Rect viewport; //!< In render target coordinates (top-left origin)
+		glm::mat4x4 view; //!< World to view space for transformed vertices
+		glm::mat4x4 projection; //!< View to clip space for transformed vertices
+		glm::mat4x4 screenToClip; //!< Screen to clip space for pre-transformed vertices
+	};
+
+	/*!
+	 * Render into a framebuffer object instead of the window
+	 *
+	 * \param framebuffer The framebuffer to bind, or 0 for the window
+	 * \param size        The size of the framebuffer (ignored for the window)
+	 */
+	void setRenderTarget(GLuint framebuffer, const Vec2i & size);
+
+	/*!
+	 * Replicate every draw call into multiple views (one per eye for VR)
+	 *
+	 * Pre-transformed vertices are expected to be projected with a single "center" camera and are re-projected
+	 * into each view using \ref StereoView::screenToClip. Scissor rectangles are ignored while views are active.
+	 *
+	 * \param views The views to draw into, or an empty list to disable
+	 */
+	void setStereoViews(std::vector<StereoView> views);
+	[[nodiscard]] bool hasStereoViews() const { return !m_stereoViews.empty(); }
+
 	bool hasTextureNPOT() const { return m_hasTextureNPOT; }
 	bool hasSizedTextureFormats() const { return m_hasSizedTextureFormats; }
 	bool hasIntensityTextures() const { return m_hasIntensityTextures; }
@@ -125,7 +156,10 @@ private:
 	
 	void enableTransform();
 	void disableTransform();
-	
+	void applyStereoView(const StereoView & view, bool transformed);
+	void applyViewport();
+	[[nodiscard]] int getRenderTargetHeight() const;
+
 	friend class GLTextureStage;
 	
 	size_t maxTextureStage; // the highest active texture stage
@@ -174,8 +208,28 @@ private:
 	GLTransformMode m_currentTransform;
 	glm::mat4x4 m_projection;
 	glm::mat4x4 m_view;
-	
+
+	GLuint m_renderTarget;
+	Vec2i m_renderTargetSize;
+	std::vector<StereoView> m_stereoViews;
+
 };
+
+template <class DrawFunction>
+void OpenGLRenderer::drawViews(const DrawFunction & draw) {
+
+	if(m_stereoViews.empty()) {
+		draw();
+		return;
+	}
+
+	bool transformed = (m_currentTransform == GL_ModelViewProjectionTransform);
+	for(const StereoView & view : m_stereoViews) {
+		applyStereoView(view, transformed);
+		draw();
+	}
+
+}
 
 template <class Vertex>
 void OpenGLRenderer::selectTrasform() { enableTransform(); }

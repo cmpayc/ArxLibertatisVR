@@ -26,6 +26,7 @@
 
 #include <openxr/openxr.h>
 
+#include "graphics/opengl/OpenGLRenderer.h"
 #include "math/Types.h"
 
 
@@ -80,6 +81,24 @@ public:
 	[[nodiscard]] Vec2i getEyeSize() const { return m_eyeSize; }
 	[[nodiscard]] const XrView & getView(size_t eye) const { return m_views[eye]; }
 
+	//! \return true between beginFrame() and endFrame() if the eye images should be rendered
+	[[nodiscard]] bool isRenderingFrame() const { return m_frameActive && m_shouldRender; }
+
+	//! Set the eye views for the current frame, see \ref prepareVRCamera
+	void setStereoViews(std::vector<OpenGLRenderer::StereoView> views);
+
+	/*!
+	 * Redirect rendering into the stereo render target, replicating draw calls into both eyes
+	 *
+	 * \return false if there are no eye views for this frame, in which case nothing was changed
+	 */
+	bool beginStereoRender();
+
+	//! Resolve the stereo render target into the eye images and show the left eye in the window
+	void endStereoRender(const Vec2i & windowSize);
+
+	[[nodiscard]] bool hasRenderedStereo() const { return m_stereoRendered; }
+
 	//! Acquire the current swapchain image for an eye and return its OpenGL texture name
 	unsigned acquireEyeImage(size_t eye);
 	void releaseEyeImage(size_t eye);
@@ -100,6 +119,8 @@ private:
 
 	bool createSwapchains();
 	void destroySwapchains();
+	bool createStereoTarget();
+	void destroyStereoTarget();
 	void handleSessionStateChange(XrSessionState state);
 	bool check(XrResult result, const char * call) const;
 
@@ -120,6 +141,16 @@ private:
 	unsigned m_resolveFramebuffer;
 	unsigned m_resolveRenderbuffer;
 	Vec2i m_resolveSize;
+
+	// Double-wide (left eye | right eye) multisampled render target and its resolve target
+	std::vector<OpenGLRenderer::StereoView> m_stereoViews;
+	unsigned m_stereoFramebuffer;
+	unsigned m_stereoColor;
+	unsigned m_stereoDepth;
+	unsigned m_stereoResolveFramebuffer;
+	unsigned m_stereoResolveColor;
+	bool m_stereoActive;
+	bool m_stereoRendered;
 
 	XrFrameState m_frameState;
 	bool m_frameActive;

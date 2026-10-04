@@ -76,6 +76,8 @@ OpenGLRenderer::OpenGLRenderer()
 	, m_currentTransform(GL_UnsetTransform)
 	, m_projection(1.f)
 	, m_view(1.f)
+	, m_renderTarget(0)
+	, m_renderTargetSize(0)
 { }
 
 OpenGLRenderer::~OpenGLRenderer() {
@@ -472,13 +474,18 @@ void OpenGLRenderer::enableTransform() {
 	if(m_currentTransform == GL_ModelViewProjectionTransform) {
 		return;
 	}
-	
-	glMatrixMode(GL_MODELVIEW);
-	glLoadMatrixf(glm::value_ptr(m_view));
-		
-	glMatrixMode(GL_PROJECTION);
-	glLoadMatrixf(glm::value_ptr(m_projection));
-	
+
+	// With stereo views, the matrices are loaded for each view in drawViews()
+	if(m_stereoViews.empty()) {
+
+		glMatrixMode(GL_MODELVIEW);
+		glLoadMatrixf(glm::value_ptr(m_view));
+
+		glMatrixMode(GL_PROJECTION);
+		glLoadMatrixf(glm::value_ptr(m_projection));
+
+	}
+
 	if(hasVertexFogCoordinate()) {
 		glFogi(GL_FOG_COORDINATE_SOURCE, GL_FRAGMENT_DEPTH);
 	}
@@ -494,20 +501,25 @@ void OpenGLRenderer::disableTransform() {
 	
 	// D3D doesn't apply any transform for D3DTLVERTEX
 	// but we still need to change from D3D to OpenGL coordinates
-	
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
-	
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	
-	// Change coordinate system from [0, width] x [0, height] to [-1, 1] x [-1, 1] and flip the y axis
-	glTranslatef(-1.f, 1.f, 0.f);
-	glScalef(2.f / viewport.width(), -2.f / viewport.height(), 1.f);
-	
-	// Change pixel origins
-	glTranslatef(0.5f, 0.5f, 0.f);
-	
+
+	// With stereo views, the matrices are loaded for each view in drawViews()
+	if(m_stereoViews.empty()) {
+
+		glMatrixMode(GL_MODELVIEW);
+		glLoadIdentity();
+
+		glMatrixMode(GL_PROJECTION);
+		glLoadIdentity();
+
+		// Change coordinate system from [0, width] x [0, height] to [-1, 1] x [-1, 1] and flip the y axis
+		glTranslatef(-1.f, 1.f, 0.f);
+		glScalef(2.f / viewport.width(), -2.f / viewport.height(), 1.f);
+
+		// Change pixel origins
+		glTranslatef(0.5f, 0.5f, 0.f);
+
+	}
+
 	if(hasVertexFogCoordinate()) {
 		glFogi(GL_FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE);
 	}
@@ -574,16 +586,82 @@ void OpenGLRenderer::SetViewport(const Rect & _viewport) {
 	}
 	
 	viewport = _viewport;
-	
+
 	// TODO maybe it's better to always have the viewport cover the whole window and use glScissor instead?
-	
-	int height = mainApp->getWindow()->getSize().y;
-	
-	glViewport(viewport.left, height - viewport.bottom, viewport.width(), viewport.height());
-	
+
+	applyViewport();
+
 	if(m_currentTransform == GL_NoTransform) {
 		m_currentTransform = GL_UnsetTransform;
 	}
+}
+
+int OpenGLRenderer::getRenderTargetHeight() const {
+	return m_renderTarget ? m_renderTargetSize.y : mainApp->getWindow()->getSize().y;
+}
+
+void OpenGLRenderer::applyViewport() {
+	glViewport(viewport.left, getRenderTargetHeight() - viewport.bottom, viewport.width(), viewport.height());
+}
+
+void OpenGLRenderer::setRenderTarget(GLuint framebuffer, const Vec2i & size) {
+
+	arx_assert(m_stereoViews.empty());
+
+	if(framebuffer == m_renderTarget && (!framebuffer || size == m_renderTargetSize)) {
+		return;
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+	m_renderTarget = framebuffer;
+	m_renderTargetSize = framebuffer ? size : Vec2i(0);
+
+	// The viewport and scissor rectangle use bottom-left coordinates that depend on the target height
+	applyViewport();
+	if(m_scissor.isValid()) {
+		int height = getRenderTargetHeight();
+		glScissor(m_scissor.left, height - m_scissor.bottom, m_scissor.width(), m_scissor.height());
+	}
+
+}
+
+void OpenGLRenderer::setStereoViews(std::vector<StereoView> views) {
+
+	bool wasActive = !m_stereoViews.empty();
+	m_stereoViews = std::move(views);
+	bool isActive = !m_stereoViews.empty();
+
+	if(isActive && !wasActive && m_scissor.isValid()) {
+		glDisable(GL_SCISSOR_TEST);
+	} else if(!isActive && wasActive) {
+		if(m_scissor.isValid()) {
+			int height = getRenderTargetHeight();
+			glScissor(m_scissor.left, height - m_scissor.bottom, m_scissor.width(), m_scissor.height());
+			glEnable(GL_SCISSOR_TEST);
+		}
+		applyViewport();
+	}
+
+	// Force the matrices to be reloaded for the next draw call
+	m_currentTransform = GL_UnsetTransform;
+
+}
+
+void OpenGLRenderer::applyStereoView(const StereoView & view, bool transformed) {
+
+	glViewport(view.viewport.left, getRenderTargetHeight() - view.viewport.bottom,
+	           view.viewport.width(), view.viewport.height());
+
+	glMatrixMode(GL_MODELVIEW);
+	if(transformed) {
+		glLoadMatrixf(glm::value_ptr(view.view));
+	} else {
+		glLoadIdentity();
+	}
+
+	glMatrixMode(GL_PROJECTION);
+	glLoadMatrixf(glm::value_ptr(transformed ? view.projection : view.screenToClip));
+
 }
 
 void OpenGLRenderer::SetScissor(const Rect & rect) {
@@ -591,12 +669,18 @@ void OpenGLRenderer::SetScissor(const Rect & rect) {
 	if(m_scissor == rect) {
 		return;
 	}
-	
+
+	if(!m_stereoViews.empty()) {
+		// Screen-space scissor rectangles do not map to the stereo views - applied in setStereoViews() once disabled
+		m_scissor = rect;
+		return;
+	}
+
 	if(rect.isValid()) {
 		if(!m_scissor.isValid()) {
 			glEnable(GL_SCISSOR_TEST);
 		}
-		int height = mainApp->getWindow()->getSize().y;
+		int height = getRenderTargetHeight();
 		glScissor(rect.left, height - rect.bottom, rect.width(), rect.height());
 	} else {
 		if(m_scissor.isValid()) {
@@ -652,17 +736,20 @@ void OpenGLRenderer::Clear(BufferFlags bufferFlags, Color clearColor, float clea
 		SetScissor(scissor);
 		
 	} else {
-		
-		if(m_scissor.isValid()) {
+
+		// The scissor test is always disabled while stereo views are active
+		bool scissor = m_scissor.isValid() && m_stereoViews.empty();
+
+		if(scissor) {
 			glDisable(GL_SCISSOR_TEST);
 		}
-		
+
 		glClear(buffers);
-		
-		if(m_scissor.isValid()) {
+
+		if(scissor) {
 			glEnable(GL_SCISSOR_TEST);
 		}
-		
+
 	}
 }
 
@@ -851,12 +938,14 @@ void OpenGLRenderer::drawIndexed(Primitive primitive, const TexturedVertex * ver
 	
 	setVertexArray(this, vertices, vertices);
 	
-	if(hasDrawRangeElements()) {
-		glDrawRangeElements(arxToGlPrimitiveType[primitive], 0, nvertices - 1, nindices, GL_UNSIGNED_SHORT, indices);
-	} else {
-		glDrawElements(arxToGlPrimitiveType[primitive], nindices, GL_UNSIGNED_SHORT, indices);
-	}
-	
+	drawViews([&]() {
+		if(hasDrawRangeElements()) {
+			glDrawRangeElements(arxToGlPrimitiveType[primitive], 0, nvertices - 1, nindices, GL_UNSIGNED_SHORT, indices);
+		} else {
+			glDrawElements(arxToGlPrimitiveType[primitive], nindices, GL_UNSIGNED_SHORT, indices);
+		}
+	});
+
 }
 
 bool OpenGLRenderer::getSnapshot(Image & image) {

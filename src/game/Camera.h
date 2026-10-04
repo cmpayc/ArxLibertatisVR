@@ -125,6 +125,16 @@ inline void PrepareCamera(Camera * cam, const Rect & viewport) {
 	PrepareCamera(cam, viewport, viewport.center());
 }
 
+/*!
+ * Prepare a camera with explicit matrices, e.g. from a VR headset pose
+ *
+ * The camera position and angle are not modified and should be updated by the caller for gameplay code.
+ * The projection may be asymmetric but must use the same conventions as the default projection matrix
+ * (view space: x right, y down, z forward; clip w = view z).
+ */
+void PrepareCamera(Camera * cam, const glm::mat4x4 & worldToView, const glm::mat4x4 & viewToClip,
+                   const Rect & viewport);
+
 void SetActiveCamera(Camera * cam);
 
 Vec3f screenToWorldSpace(Vec2f pos, float depth = 1.f);

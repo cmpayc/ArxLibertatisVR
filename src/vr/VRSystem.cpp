@@ -106,6 +106,24 @@ bool loadFunctions(XrInstance instance) {
 	return success;
 }
 
+PFN_xrConvertWin32PerformanceCounterToTimeKHR g_convertTime = nullptr;
+
+//! \return the current OpenXR time, or 0 if not available
+XrTime getCurrentTime(XrInstance instance) {
+	LARGE_INTEGER counter;
+	XrTime time = 0;
+	if(!g_convertTime || !QueryPerformanceCounter(&counter) || XR_FAILED(g_convertTime(instance, &counter, &time))) {
+		return 0;
+	}
+	return time;
+}
+
+//! Rate limit for repeated per-frame errors: log the first few, then every 1000th
+bool shouldLogRepeatedError(u64 & count) {
+	count++;
+	return count <= 5 || count % 1000 == 0;
+}
+
 bool g_vrForced = false;
 
 void enableVR() {
@@ -297,6 +315,13 @@ VRSystem::VRSystem()
 	, m_resolveFramebuffer(0)
 	, m_resolveRenderbuffer(0)
 	, m_resolveSize(0)
+	, m_stereoFramebuffer(0)
+	, m_stereoColor(0)
+	, m_stereoDepth(0)
+	, m_stereoResolveFramebuffer(0)
+	, m_stereoResolveColor(0)
+	, m_stereoActive(false)
+	, m_stereoRendered(false)
 	, m_frameState{ XR_TYPE_FRAME_STATE }
 	, m_frameActive(false)
 	, m_shouldRender(false)
@@ -353,7 +378,14 @@ bool VRSystem::initInstance() {
 		return false;
 	}
 
-	const char * enabledExtensions[] = { XR_KHR_OPENGL_ENABLE_EXTENSION_NAME };
+	bool hasTimeConversion = std::any_of(extensions.begin(), extensions.end(), [](const XrExtensionProperties & e) {
+		return std::strcmp(e.extensionName, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0;
+	});
+	
+	std::vector<const char *> enabledExtensions = { XR_KHR_OPENGL_ENABLE_EXTENSION_NAME };
+	if(hasTimeConversion) {
+		enabledExtensions.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+	}
 
 	XrInstanceCreateInfo createInfo = { XR_TYPE_INSTANCE_CREATE_INFO };
 	std::snprintf(createInfo.applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE, "%s", "Arx Libertatis VR");
@@ -361,8 +393,8 @@ bool VRSystem::initInstance() {
 	std::snprintf(createInfo.applicationInfo.engineName, XR_MAX_ENGINE_NAME_SIZE, "%s", "Arx Libertatis");
 	createInfo.applicationInfo.engineVersion = 1;
 	createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
-	createInfo.enabledExtensionCount = uint32_t(std::size(enabledExtensions));
-	createInfo.enabledExtensionNames = enabledExtensions;
+	createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
+	createInfo.enabledExtensionNames = enabledExtensions.data();
 
 	if(!check(xrCreateInstance(&createInfo, &m_instance), "xrCreateInstance")) {
 		m_instance = XR_NULL_HANDLE;
@@ -372,6 +404,12 @@ bool VRSystem::initInstance() {
 	if(!loadFunctions(m_instance)) {
 		shutdown();
 		return false;
+	}
+	
+	g_convertTime = nullptr;
+	if(hasTimeConversion) {
+		xrGetInstanceProcAddr(m_instance, "xrConvertWin32PerformanceCounterToTimeKHR",
+		                      reinterpret_cast<PFN_xrVoidFunction *>(&g_convertTime));
 	}
 
 	XrInstanceProperties instanceProperties = { XR_TYPE_INSTANCE_PROPERTIES };
@@ -494,6 +532,11 @@ bool VRSystem::createSession() {
 	glGenFramebuffers(1, &m_blitFramebuffer);
 	glGenFramebuffers(1, &m_resolveFramebuffer);
 
+	if(!createStereoTarget()) {
+		destroySession();
+		return false;
+	}
+
 	LogInfo << "OpenXR session created";
 
 	return true;
@@ -595,6 +638,8 @@ void VRSystem::destroySession() {
 	}
 	m_resolveSize = Vec2i(0);
 
+	destroyStereoTarget();
+
 	destroySwapchains();
 
 	if(m_stageSpace != XR_NULL_HANDLE) {
@@ -688,6 +733,8 @@ bool VRSystem::beginFrame() {
 
 	m_shouldRender = false;
 	m_rendered = false;
+	m_stereoRendered = false;
+	m_stereoViews.clear();
 
 	if(!m_sessionRunning) {
 		return false;
@@ -718,9 +765,32 @@ bool VRSystem::beginFrame() {
 	for(XrView & view : m_views) {
 		view = { XR_TYPE_VIEW };
 	}
-	if(!check(xrLocateViews(m_session, &locateInfo, &viewState, uint32_t(m_views.size()), &viewCount, m_views.data()),
-	          "xrLocateViews")) {
-		return false;
+	XrResult result = xrLocateViews(m_session, &locateInfo, &viewState, uint32_t(m_views.size()), &viewCount,
+	                                m_views.data());
+	if(XR_FAILED(result)) {
+		
+		static u64 failures = 0;
+		XrTime now = getCurrentTime(m_instance);
+		if(shouldLogRepeatedError(failures)) {
+			LogError << "OpenXR: xrLocateViews failed (#" << failures << "): " << resultString(m_instance, result)
+			         << ", predicted display time " << m_frameState.predictedDisplayTime
+			         << ", period " << m_frameState.predictedDisplayPeriod << ", now " << now;
+		}
+		
+		// Fall back to predicting one frame ahead from the current time
+		if(now <= 0) {
+			return false;
+		}
+		locateInfo.displayTime = now + std::max(m_frameState.predictedDisplayPeriod, XrDuration(0));
+		for(XrView & view : m_views) {
+			view = { XR_TYPE_VIEW };
+		}
+		viewState = { XR_TYPE_VIEW_STATE };
+		if(XR_FAILED(xrLocateViews(m_session, &locateInfo, &viewState, uint32_t(m_views.size()), &viewCount,
+		                           m_views.data()))) {
+			return false;
+		}
+		
 	}
 
 	const XrViewStateFlags required = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
@@ -866,6 +936,9 @@ void VRSystem::endFrame() {
 		return;
 	}
 
+	arx_assert(!m_stereoActive);
+	m_stereoViews.clear();
+
 	for(size_t eye = 0; eye < EyeCount; eye++) {
 		releaseEyeImage(eye);
 	}
@@ -888,5 +961,151 @@ void VRSystem::endFrame() {
 	m_frameActive = false;
 	m_shouldRender = false;
 	m_rendered = false;
+
+}
+
+bool VRSystem::createStereoTarget() {
+
+	const Vec2i size(m_eyeSize.x * s32(EyeCount), m_eyeSize.y);
+
+	GLint maxSamples = 0;
+	glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
+	GLsizei samples = config.video.antialiasing ? std::min(GLint(4), maxSamples) : 0;
+
+	glGenRenderbuffers(1, &m_stereoColor);
+	glBindRenderbuffer(GL_RENDERBUFFER, m_stereoColor);
+	glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, size.x, size.y);
+
+	glGenRenderbuffers(1, &m_stereoDepth);
+	glBindRenderbuffer(GL_RENDERBUFFER, m_stereoDepth);
+	glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, size.x, size.y);
+
+	glGenRenderbuffers(1, &m_stereoResolveColor);
+	glBindRenderbuffer(GL_RENDERBUFFER, m_stereoResolveColor);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, size.x, size.y);
+
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+	glGenFramebuffers(1, &m_stereoFramebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_stereoFramebuffer);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, m_stereoColor);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_stereoDepth);
+	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+
+	glGenFramebuffers(1, &m_stereoResolveFramebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_stereoResolveFramebuffer);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, m_stereoResolveColor);
+	GLenum resolveStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	if(status != GL_FRAMEBUFFER_COMPLETE || resolveStatus != GL_FRAMEBUFFER_COMPLETE) {
+		LogError << "OpenXR: could not create the stereo render target (status 0x" << std::hex << status
+		         << ", 0x" << resolveStatus << ')';
+		destroyStereoTarget();
+		return false;
+	}
+
+	LogInfo << "VR stereo render target: " << size.x << 'x' << size.y << ", " << samples << "x MSAA";
+
+	return true;
+}
+
+void VRSystem::destroyStereoTarget() {
+
+	arx_assert(!m_stereoActive);
+
+	GLuint framebuffers[] = { m_stereoFramebuffer, m_stereoResolveFramebuffer };
+	glDeleteFramebuffers(GLsizei(std::size(framebuffers)), framebuffers);
+	GLuint renderbuffers[] = { m_stereoColor, m_stereoDepth, m_stereoResolveColor };
+	glDeleteRenderbuffers(GLsizei(std::size(renderbuffers)), renderbuffers);
+
+	m_stereoFramebuffer = m_stereoResolveFramebuffer = 0;
+	m_stereoColor = m_stereoDepth = m_stereoResolveColor = 0;
+
+}
+
+void VRSystem::setStereoViews(std::vector<OpenGLRenderer::StereoView> views) {
+	m_stereoViews = std::move(views);
+}
+
+bool VRSystem::beginStereoRender() {
+
+	arx_assert(!m_stereoActive);
+
+	if(!isRenderingFrame() || m_stereoViews.size() != EyeCount || !m_stereoFramebuffer) {
+		return false;
+	}
+
+	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
+	renderer->setRenderTarget(m_stereoFramebuffer, Vec2i(m_eyeSize.x * s32(EyeCount), m_eyeSize.y));
+	renderer->setStereoViews(m_stereoViews);
+
+	m_stereoActive = true;
+
+	return true;
+}
+
+void VRSystem::endStereoRender(const Vec2i & windowSize) {
+
+	if(!m_stereoActive) {
+		return;
+	}
+
+	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
+	renderer->setStereoViews({ });
+	renderer->setRenderTarget(0, Vec2i(0));
+	m_stereoActive = false;
+
+	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_SCISSOR_TEST);
+
+	const Vec2i size(m_eyeSize.x * s32(EyeCount), m_eyeSize.y);
+
+	// Resolve multisampling - this cannot be combined with partial or scaled blits
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, m_stereoFramebuffer);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_stereoResolveFramebuffer);
+	glBlitFramebuffer(0, 0, size.x, size.y, 0, 0, size.x, size.y, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, m_stereoResolveFramebuffer);
+	for(size_t eye = 0; eye < EyeCount; eye++) {
+
+		GLuint image = acquireEyeImage(eye);
+		if(!image) {
+			continue;
+		}
+
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_blitFramebuffer);
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
+
+		GLint x = GLint(eye) * m_eyeSize.x;
+		glBlitFramebuffer(x, 0, x + m_eyeSize.x, m_eyeSize.y, 0, 0, m_eyeSize.x, m_eyeSize.y,
+		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+
+		releaseEyeImage(eye);
+	}
+
+	// Show the center of the left eye in the window, cropped to the window aspect ratio
+	if(windowSize.x > 0 && windowSize.y > 0) {
+		Vec2i crop = m_eyeSize;
+		if(m_eyeSize.x * windowSize.y > windowSize.x * m_eyeSize.y) {
+			crop.x = m_eyeSize.y * windowSize.x / windowSize.y;
+		} else {
+			crop.y = m_eyeSize.x * windowSize.y / windowSize.x;
+		}
+		Vec2i offset = (m_eyeSize - crop) / s32(2);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glBlitFramebuffer(offset.x, offset.y, offset.x + crop.x, offset.y + crop.y,
+		                  0, 0, windowSize.x, windowSize.y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	if(scissor) {
+		glEnable(GL_SCISSOR_TEST);
+	}
+
+	m_stereoRendered = true;
 
 }

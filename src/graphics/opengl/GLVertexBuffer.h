@@ -150,7 +150,9 @@ public:
 		
 		setVertexArray<Vertex>(m_renderer, nullptr, this);
 		
-		glDrawArrays(arxToGlPrimitiveType[primitive], m_offset + offset, count);
+		m_renderer->drawViews([&]() {
+			glDrawArrays(arxToGlPrimitiveType[primitive], m_offset + offset, count);
+		});
 		
 	}
 	
@@ -175,19 +177,21 @@ public:
 		
 		if(m_renderer->hasDrawElementsBaseVertex()) {
 			
-			if(m_renderer->hasDrawRangeElements()) {
-				#if !ARX_HAVE_GLEW
-				glDrawRangeElementsBaseVertex(mode, 0, count - 1, nbindices, type, data, offset);
-				#else
-				glDrawRangeElementsBaseVertex(mode, 0, count - 1, nbindices, type, const_cast<void *>(data), offset);
-				#endif
-			} else {
-				#if !ARX_HAVE_GLEW
-				glDrawElementsBaseVertex(mode, nbindices, type, data, offset);
-				#else
-				glDrawElementsBaseVertex(mode, nbindices, type, const_cast<void *>(data), offset);
-				#endif
-			}
+			m_renderer->drawViews([&]() {
+				if(m_renderer->hasDrawRangeElements()) {
+					#if !ARX_HAVE_GLEW
+					glDrawRangeElementsBaseVertex(mode, 0, count - 1, nbindices, type, data, offset);
+					#else
+					glDrawRangeElementsBaseVertex(mode, 0, count - 1, nbindices, type, const_cast<void *>(data), offset);
+					#endif
+				} else {
+					#if !ARX_HAVE_GLEW
+					glDrawElementsBaseVertex(mode, nbindices, type, data, offset);
+					#else
+					glDrawElementsBaseVertex(mode, nbindices, type, const_cast<void *>(data), offset);
+					#endif
+				}
+			});
 			
 		} else {
 			
@@ -209,11 +213,13 @@ public:
 				}
 			}
 			
-			if(m_renderer->hasDrawRangeElements()) {
-				glDrawRangeElements(mode, offset, offset + count - 1, nbindices, type, data);
-			} else {
-				glDrawElements(mode, nbindices, type, data);
-			}
+			m_renderer->drawViews([&]() {
+				if(m_renderer->hasDrawRangeElements()) {
+					glDrawRangeElements(mode, offset, offset + count - 1, nbindices, type, data);
+				} else {
+					glDrawElements(mode, nbindices, type, data);
+				}
+			});
 			
 		}
 		
