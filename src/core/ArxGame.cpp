@@ -1246,6 +1246,8 @@ void ArxGame::doFrame() {
 			// Begin the VR frame before updating so that the camera uses the predicted head pose
 			g_vr->pollEvents();
 			g_vr->beginFrame();
+			// Everything except the stereo 3D scene is drawn into the virtual screen
+			g_vr->beginUIRender(m_MainWindow->getSize());
 		}
 		#endif
 		render();
@@ -1257,14 +1259,15 @@ void ArxGame::presentFrame() {
 
 	#if ARX_HAVE_OPENXR
 	if(g_vr && g_vr->hasSession()) {
+		Vec2i windowSize = m_MainWindow->getSize();
+		// In-game, the interface is drawn over the 3D scene and follows the head, otherwise it is a fixed screen
+		g_vr->endUIRender(windowSize, g_vr->hasRenderedStereo());
 		if(!g_vr->isFrameActive()) {
 			g_vr->pollEvents();
 			g_vr->beginFrame();
 		}
-		if(g_vr->isRenderingFrame() && !g_vr->hasRenderedStereo()) {
-			// Menus, cinematics and loading screens are not rendered in stereo yet: show them as a flat screen
-			g_vr->mirrorWindowToEyes(m_MainWindow->getSize());
-		}
+		// Frames drawn directly to the window (logos) are shown as the virtual screen
+		g_vr->submitWindowAsUI(windowSize);
 		g_vr->endFrame();
 	}
 	#endif

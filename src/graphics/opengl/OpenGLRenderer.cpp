@@ -78,6 +78,7 @@ OpenGLRenderer::OpenGLRenderer()
 	, m_view(1.f)
 	, m_renderTarget(0)
 	, m_renderTargetSize(0)
+	, m_premultipliedAlphaOutput(false)
 { }
 
 OpenGLRenderer::~OpenGLRenderer() {
@@ -625,6 +626,34 @@ void OpenGLRenderer::setRenderTarget(GLuint framebuffer, const Vec2i & size) {
 
 }
 
+void OpenGLRenderer::setPremultipliedAlphaOutput(bool enable) {
+
+	if(m_premultipliedAlphaOutput == enable) {
+		return;
+	}
+
+	m_premultipliedAlphaOutput = enable;
+
+	applyBlendFunc(m_glblendSrc, m_glblendDst);
+
+}
+
+void OpenGLRenderer::applyBlendFunc(GLenum src, GLenum dst) {
+
+	if(m_premultipliedAlphaOutput) {
+		/*
+		 * Produce a premultiplied alpha image that can be composited over another one:
+		 * the color channels are blended as usual while the alpha channel accumulates coverage.
+		 * Additive and multiplicative blending do not add coverage.
+		 */
+		bool coverage = dst != GL_ONE && src != GL_ZERO;
+		glBlendFuncSeparate(src, dst, coverage ? GL_ONE : GL_ZERO, coverage ? GL_ONE_MINUS_SRC_ALPHA : GL_ONE);
+	} else {
+		glBlendFunc(src, dst);
+	}
+
+}
+
 void OpenGLRenderer::setStereoViews(std::vector<StereoView> views) {
 
 	bool wasActive = !m_stereoViews.empty();
@@ -721,8 +750,16 @@ void OpenGLRenderer::Clear(BufferFlags bufferFlags, Color clearColor, float clea
 		buffers |= GL_DEPTH_BUFFER_BIT;
 	}
 	
-	if(nrects) {
-		
+	if(nrects && !m_stereoViews.empty()) {
+
+		/*
+		 * Screen rectangles do not map to the stereo views, and clearing the whole target instead would erase the
+		 * scene (cinematic borders clear the depth buffer to 0). These are only used for letterboxing.
+		 */
+		return;
+
+	} else if(nrects) {
+
 		Rect scissor = m_scissor;
 		
 		for(size_t i = 0; i < nrects; i++) {
@@ -1082,7 +1119,7 @@ void OpenGLRenderer::flushState() {
 			GLenum glblendSrc = arxToGlBlendFactor[blendSrc];
 			GLenum glblendDst = arxToGlBlendFactor[blendDst];
 			if(m_glblendSrc != glblendSrc || m_glblendDst != glblendDst) {
-				glBlendFunc(glblendSrc, glblendDst);
+				applyBlendFunc(glblendSrc, glblendDst);
 				m_glblendSrc = glblendSrc;
 				m_glblendDst = glblendDst;
 			}

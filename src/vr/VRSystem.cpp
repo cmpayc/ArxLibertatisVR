@@ -27,13 +27,18 @@
 #endif
 
 #include "vr/VRSystem.h"
+#include "vr/VRFunctions.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <sstream>
+
+#include <glm/gtc/constants.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include "graphics/opengl/OpenGLUtil.h"
 #include <epoxy/wgl.h>
@@ -51,43 +56,13 @@
 
 VRSystem * g_vr = nullptr;
 
-namespace {
-
-#define ARX_XR_GLOBAL_FUNCTIONS(X) \
-	X(xrEnumerateInstanceExtensionProperties) \
-	X(xrCreateInstance)
-
-#define ARX_XR_INSTANCE_FUNCTIONS(X) \
-	X(xrResultToString) \
-	X(xrDestroyInstance) \
-	X(xrGetInstanceProperties) \
-	X(xrGetSystem) \
-	X(xrGetSystemProperties) \
-	X(xrEnumerateViewConfigurationViews) \
-	X(xrCreateSession) \
-	X(xrDestroySession) \
-	X(xrBeginSession) \
-	X(xrEndSession) \
-	X(xrCreateReferenceSpace) \
-	X(xrDestroySpace) \
-	X(xrEnumerateSwapchainFormats) \
-	X(xrCreateSwapchain) \
-	X(xrDestroySwapchain) \
-	X(xrEnumerateSwapchainImages) \
-	X(xrAcquireSwapchainImage) \
-	X(xrWaitSwapchainImage) \
-	X(xrReleaseSwapchainImage) \
-	X(xrPollEvent) \
-	X(xrWaitFrame) \
-	X(xrBeginFrame) \
-	X(xrEndFrame) \
-	X(xrLocateViews)
-
-#define ARX_XR_DECLARE_FUNCTION(name) PFN_##name name = nullptr;
+#define ARX_XR_DEFINE_FUNCTION(name) PFN_##name name = nullptr;
 PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr = nullptr;
-ARX_XR_GLOBAL_FUNCTIONS(ARX_XR_DECLARE_FUNCTION)
-ARX_XR_INSTANCE_FUNCTIONS(ARX_XR_DECLARE_FUNCTION)
-#undef ARX_XR_DECLARE_FUNCTION
+ARX_XR_GLOBAL_FUNCTIONS(ARX_XR_DEFINE_FUNCTION)
+ARX_XR_INSTANCE_FUNCTIONS(ARX_XR_DEFINE_FUNCTION)
+#undef ARX_XR_DEFINE_FUNCTION
+
+namespace {
 
 bool loadFunctions(XrInstance instance) {
 	bool success = true;
@@ -312,9 +287,6 @@ VRSystem::VRSystem()
 	, m_eyeSize(0)
 	, m_colorFormat(0)
 	, m_blitFramebuffer(0)
-	, m_resolveFramebuffer(0)
-	, m_resolveRenderbuffer(0)
-	, m_resolveSize(0)
 	, m_stereoFramebuffer(0)
 	, m_stereoColor(0)
 	, m_stereoDepth(0)
@@ -322,6 +294,21 @@ VRSystem::VRSystem()
 	, m_stereoResolveColor(0)
 	, m_stereoActive(false)
 	, m_stereoRendered(false)
+	, m_stereoPreviousTarget(0)
+	, m_stereoPreviousTargetSize(0)
+	, m_uiFramebuffer(0)
+	, m_uiColor(0)
+	, m_uiDepth(0)
+	, m_uiSize(0)
+	, m_uiActive(false)
+	, m_uiSubmitted(false)
+	, m_uiPlaced(false)
+	, m_uiFollowHead(false)
+	, m_uiTurning(false)
+	, m_uiYaw(0.f)
+	, m_uiAnchor(0.f)
+	, m_uiPose{ { 0.f, 0.f, 0.f, 1.f }, { 0.f, 0.f, 0.f } }
+	, m_uiExtent{ 1.f, 1.f }
 	, m_frameState{ XR_TYPE_FRAME_STATE }
 	, m_frameActive(false)
 	, m_shouldRender(false)
@@ -530,7 +517,6 @@ bool VRSystem::createSession() {
 	}
 
 	glGenFramebuffers(1, &m_blitFramebuffer);
-	glGenFramebuffers(1, &m_resolveFramebuffer);
 
 	if(!createStereoTarget()) {
 		destroySession();
@@ -628,17 +614,9 @@ void VRSystem::destroySession() {
 		glDeleteFramebuffers(1, &m_blitFramebuffer);
 		m_blitFramebuffer = 0;
 	}
-	if(m_resolveFramebuffer) {
-		glDeleteFramebuffers(1, &m_resolveFramebuffer);
-		m_resolveFramebuffer = 0;
-	}
-	if(m_resolveRenderbuffer) {
-		glDeleteRenderbuffers(1, &m_resolveRenderbuffer);
-		m_resolveRenderbuffer = 0;
-	}
-	m_resolveSize = Vec2i(0);
 
 	destroyStereoTarget();
+	destroyUITarget();
 
 	destroySwapchains();
 
@@ -735,6 +713,7 @@ bool VRSystem::beginFrame() {
 	m_rendered = false;
 	m_stereoRendered = false;
 	m_stereoViews.clear();
+	m_uiSubmitted = false;
 
 	if(!m_sessionRunning) {
 		return false;
@@ -802,11 +781,9 @@ bool VRSystem::beginFrame() {
 	return true;
 }
 
-unsigned VRSystem::acquireEyeImage(size_t eye) {
+unsigned VRSystem::acquireSwapchainImage(EyeSwapchain & swapchain) {
 
 	arx_assert(m_shouldRender);
-
-	EyeSwapchain & swapchain = m_swapchains[eye];
 	arx_assert(!swapchain.acquired);
 
 	XrSwapchainImageAcquireInfo acquireInfo = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
@@ -827,6 +804,20 @@ unsigned VRSystem::acquireEyeImage(size_t eye) {
 	return swapchain.images[index];
 }
 
+void VRSystem::releaseSwapchainImage(EyeSwapchain & swapchain) {
+
+	arx_assert(swapchain.acquired);
+
+	XrSwapchainImageReleaseInfo releaseInfo = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+	check(xrReleaseSwapchainImage(swapchain.handle, &releaseInfo), "xrReleaseSwapchainImage");
+	swapchain.acquired = false;
+
+}
+
+unsigned VRSystem::acquireEyeImage(size_t eye) {
+	return acquireSwapchainImage(m_swapchains[eye]);
+}
+
 void VRSystem::releaseEyeImage(size_t eye) {
 
 	EyeSwapchain & swapchain = m_swapchains[eye];
@@ -834,9 +825,7 @@ void VRSystem::releaseEyeImage(size_t eye) {
 		return;
 	}
 
-	XrSwapchainImageReleaseInfo releaseInfo = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-	check(xrReleaseSwapchainImage(swapchain.handle, &releaseInfo), "xrReleaseSwapchainImage");
-	swapchain.acquired = false;
+	releaseSwapchainImage(swapchain);
 
 	XrCompositionLayerProjectionView & layerView = m_layerViews[eye];
 	layerView = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
@@ -850,86 +839,6 @@ void VRSystem::releaseEyeImage(size_t eye) {
 	m_rendered = true;
 }
 
-void VRSystem::mirrorWindowToEyes(const Vec2i & windowSize) {
-
-	arx_assert(m_shouldRender);
-
-	if(windowSize.x <= 0 || windowSize.y <= 0) {
-		return;
-	}
-
-	// Save state that the renderer caches
-	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-	GLfloat clearColor[4];
-	glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
-	glDisable(GL_SCISSOR_TEST);
-
-	/*
-	 * The window back buffer may be multisampled, and a multisampled blit cannot be scaled.
-	 * Resolve it into a single-sampled buffer of the same size first.
-	 */
-	if(m_resolveSize != windowSize) {
-		if(!m_resolveRenderbuffer) {
-			glGenRenderbuffers(1, &m_resolveRenderbuffer);
-		}
-		glBindRenderbuffer(GL_RENDERBUFFER, m_resolveRenderbuffer);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, windowSize.x, windowSize.y);
-		glBindRenderbuffer(GL_RENDERBUFFER, 0);
-		glBindFramebuffer(GL_FRAMEBUFFER, m_resolveFramebuffer);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, m_resolveRenderbuffer);
-		m_resolveSize = windowSize;
-	}
-
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_resolveFramebuffer);
-	glBlitFramebuffer(0, 0, windowSize.x, windowSize.y, 0, 0, windowSize.x, windowSize.y,
-	                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
-
-	// Show the window contents as a screen in the center of each eye
-	Vec2i size(m_eyeSize.x / s32(2), m_eyeSize.x / s32(2) * windowSize.y / windowSize.x);
-	Vec2i offset = (m_eyeSize - size) / s32(2);
-
-	for(size_t eye = 0; eye < EyeCount; eye++) {
-
-		GLuint image = acquireEyeImage(eye);
-		if(!image) {
-			continue;
-		}
-
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_blitFramebuffer);
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
-
-		glClearColor(0.f, 0.f, 0.f, 1.f);
-		glClear(GL_COLOR_BUFFER_BIT);
-
-		// OpenGL images are bottom-up, which matches what OpenXR expects for OpenGL swapchains
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, m_resolveFramebuffer);
-		glBlitFramebuffer(0, 0, windowSize.x, windowSize.y,
-		                  offset.x, offset.y, offset.x + size.x, offset.y + size.y,
-		                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
-
-		releaseEyeImage(eye);
-	}
-
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
-	if(scissor) {
-		glEnable(GL_SCISSOR_TEST);
-	}
-
-	GLenum error = glGetError();
-	if(error != GL_NO_ERROR) {
-		static bool logged = false;
-		if(!logged) {
-			LogError << "OpenXR: OpenGL error 0x" << std::hex << error << " while mirroring the window to the eyes";
-			logged = true;
-		}
-	}
-
-}
-
 void VRSystem::endFrame() {
 
 	if(!m_frameActive) {
@@ -937,30 +846,52 @@ void VRSystem::endFrame() {
 	}
 
 	arx_assert(!m_stereoActive);
+	arx_assert(!m_uiActive);
 	m_stereoViews.clear();
 
 	for(size_t eye = 0; eye < EyeCount; eye++) {
 		releaseEyeImage(eye);
 	}
+	if(m_uiSwapchain.acquired) {
+		releaseSwapchainImage(m_uiSwapchain);
+	}
 
-	XrCompositionLayerProjection layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
-	layer.space = m_stageSpace;
-	layer.viewCount = uint32_t(m_layerViews.size());
-	layer.views = m_layerViews.data();
-	const XrCompositionLayerBaseHeader * layers[] = {
-		reinterpret_cast<const XrCompositionLayerBaseHeader *>(&layer)
-	};
+	std::vector<const XrCompositionLayerBaseHeader *> layers;
+
+	XrCompositionLayerProjection projection = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+	if(m_shouldRender && m_rendered) {
+		projection.space = m_stageSpace;
+		projection.viewCount = uint32_t(m_layerViews.size());
+		projection.views = m_layerViews.data();
+		layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projection));
+	}
+
+	XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+	if(m_shouldRender && m_uiSubmitted) {
+		// The virtual screen contains premultiplied alpha
+		quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+		quad.space = m_stageSpace;
+		quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+		quad.subImage.swapchain = m_uiSwapchain.handle;
+		quad.subImage.imageRect.offset = { 0, 0 };
+		quad.subImage.imageRect.extent = { m_uiSize.x, m_uiSize.y };
+		quad.subImage.imageArrayIndex = 0;
+		quad.pose = m_uiPose;
+		quad.size = m_uiExtent;
+		layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&quad));
+	}
 
 	XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
 	endInfo.displayTime = m_frameState.predictedDisplayTime;
 	endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-	endInfo.layerCount = (m_shouldRender && m_rendered) ? 1 : 0;
-	endInfo.layers = layers;
+	endInfo.layerCount = uint32_t(layers.size());
+	endInfo.layers = layers.data();
 	check(xrEndFrame(m_session, &endInfo), "xrEndFrame");
 
 	m_frameActive = false;
 	m_shouldRender = false;
 	m_rendered = false;
+	m_uiSubmitted = false;
 
 }
 
@@ -1038,6 +969,9 @@ bool VRSystem::beginStereoRender() {
 	}
 
 	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
+	m_stereoPreviousTarget = renderer->getRenderTarget();
+	m_stereoPreviousTargetSize = renderer->getRenderTargetSize();
+	renderer->setPremultipliedAlphaOutput(false);
 	renderer->setRenderTarget(m_stereoFramebuffer, Vec2i(m_eyeSize.x * s32(EyeCount), m_eyeSize.y));
 	renderer->setStereoViews(m_stereoViews);
 
@@ -1054,7 +988,8 @@ void VRSystem::endStereoRender(const Vec2i & windowSize) {
 
 	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
 	renderer->setStereoViews({ });
-	renderer->setRenderTarget(0, Vec2i(0));
+	renderer->setRenderTarget(m_stereoPreviousTarget, m_stereoPreviousTargetSize);
+	renderer->setPremultipliedAlphaOutput(m_uiActive);
 	m_stereoActive = false;
 
 	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
@@ -1101,11 +1036,335 @@ void VRSystem::endStereoRender(const Vec2i & windowSize) {
 		                  0, 0, windowSize.x, windowSize.y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
 	}
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_stereoPreviousTarget);
 	if(scissor) {
 		glEnable(GL_SCISSOR_TEST);
 	}
 
 	m_stereoRendered = true;
+
+}
+
+bool VRSystem::createUITarget(const Vec2i & size) {
+
+	destroyUITarget();
+
+	GLint previousFramebuffer = 0;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+	GLint previousTexture = 0;
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+
+	glGenTextures(1, &m_uiColor);
+	glBindTexture(GL_TEXTURE_2D, m_uiColor);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size.x, size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, GLuint(previousTexture));
+
+	// The interface draws the 3D player model in the book, so it needs a depth buffer
+	glGenRenderbuffers(1, &m_uiDepth);
+	glBindRenderbuffer(GL_RENDERBUFFER, m_uiDepth);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, size.x, size.y);
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+	glGenFramebuffers(1, &m_uiFramebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_uiFramebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_uiColor, 0);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_uiDepth);
+	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFramebuffer));
+
+	if(status != GL_FRAMEBUFFER_COMPLETE) {
+		LogError << "OpenXR: could not create the interface render target (status 0x" << std::hex << status << ')';
+		destroyUITarget();
+		return false;
+	}
+
+	XrSwapchainCreateInfo info = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+	info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+	info.format = m_colorFormat;
+	info.sampleCount = 1;
+	info.width = uint32_t(size.x);
+	info.height = uint32_t(size.y);
+	info.faceCount = 1;
+	info.arraySize = 1;
+	info.mipCount = 1;
+	if(!check(xrCreateSwapchain(m_session, &info, &m_uiSwapchain.handle), "xrCreateSwapchain")) {
+		m_uiSwapchain.handle = XR_NULL_HANDLE;
+		destroyUITarget();
+		return false;
+	}
+
+	uint32_t imageCount = 0;
+	xrEnumerateSwapchainImages(m_uiSwapchain.handle, 0, &imageCount, nullptr);
+	std::vector<XrSwapchainImageOpenGLKHR> images(imageCount, { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR });
+	if(!check(xrEnumerateSwapchainImages(m_uiSwapchain.handle, imageCount, &imageCount,
+	                                     reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data())),
+	          "xrEnumerateSwapchainImages")) {
+		destroyUITarget();
+		return false;
+	}
+	for(const XrSwapchainImageOpenGLKHR & image : images) {
+		m_uiSwapchain.images.push_back(image.image);
+	}
+
+	m_uiSize = size;
+
+	LogInfo << "VR interface layer: " << size.x << 'x' << size.y;
+
+	return true;
+}
+
+void VRSystem::destroyUITarget() {
+
+	arx_assert(!m_uiActive);
+
+	if(m_uiSwapchain.handle != XR_NULL_HANDLE) {
+		if(m_uiSwapchain.acquired) {
+			releaseSwapchainImage(m_uiSwapchain);
+		}
+		xrDestroySwapchain(m_uiSwapchain.handle);
+	}
+	m_uiSwapchain = EyeSwapchain();
+	m_uiSubmitted = false;
+
+	if(m_uiFramebuffer) {
+		glDeleteFramebuffers(1, &m_uiFramebuffer);
+	}
+	if(m_uiDepth) {
+		glDeleteRenderbuffers(1, &m_uiDepth);
+	}
+	if(m_uiColor) {
+		glDeleteTextures(1, &m_uiColor);
+	}
+	m_uiFramebuffer = m_uiDepth = m_uiColor = 0;
+	m_uiSize = Vec2i(0);
+
+}
+
+bool VRSystem::beginUIRender(const Vec2i & windowSize) {
+
+	if(!isRenderingFrame() || m_uiActive || windowSize.x <= 0 || windowSize.y <= 0) {
+		return false;
+	}
+
+	if(m_uiSize != windowSize && !createUITarget(windowSize)) {
+		return false;
+	}
+
+	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
+	renderer->setRenderTarget(m_uiFramebuffer, m_uiSize);
+	renderer->setPremultipliedAlphaOutput(true);
+	renderer->Clear(Renderer::ColorBuffer | Renderer::DepthBuffer, Color(0, 0, 0, 0));
+
+	m_uiActive = true;
+
+	return true;
+}
+
+void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
+
+	if(!m_uiActive) {
+		return;
+	}
+
+	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
+	renderer->setPremultipliedAlphaOutput(false);
+	renderer->setRenderTarget(0, Vec2i(0));
+	m_uiActive = false;
+
+	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_SCISSOR_TEST);
+
+	GLuint image = acquireSwapchainImage(m_uiSwapchain);
+	if(image) {
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, m_uiFramebuffer);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_blitFramebuffer);
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
+		glBlitFramebuffer(0, 0, m_uiSize.x, m_uiSize.y, 0, 0, m_uiSize.x, m_uiSize.y,
+		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+		releaseSwapchainImage(m_uiSwapchain);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	if(scissor) {
+		glEnable(GL_SCISSOR_TEST);
+	}
+
+	// Desktop view: the interface over the left eye image, or on its own for menus
+	drawTextureToWindow(m_uiColor, windowSize, !overScene);
+
+	if(image) {
+		updateUIPlacement(overScene);
+		m_uiSubmitted = true;
+	}
+
+}
+
+void VRSystem::submitWindowAsUI(const Vec2i & windowSize) {
+
+	if(!isRenderingFrame() || m_uiSubmitted || windowSize.x <= 0 || windowSize.y <= 0) {
+		return;
+	}
+
+	if(m_uiSize != windowSize && !createUITarget(windowSize)) {
+		return;
+	}
+
+	GLuint image = acquireSwapchainImage(m_uiSwapchain);
+	if(!image) {
+		return;
+	}
+
+	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_SCISSOR_TEST);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_blitFramebuffer);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
+	glBlitFramebuffer(0, 0, windowSize.x, windowSize.y, 0, 0, m_uiSize.x, m_uiSize.y,
+	                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	if(scissor) {
+		glEnable(GL_SCISSOR_TEST);
+	}
+
+	releaseSwapchainImage(m_uiSwapchain);
+
+	updateUIPlacement(false);
+	m_uiSubmitted = true;
+
+}
+
+void VRSystem::updateUIPlacement(bool followHead) {
+
+	const XrPosef & left = m_views[0].pose;
+	const XrPosef & right = m_views[1].pose;
+	Vec3f head = (Vec3f(left.position.x, left.position.y, left.position.z)
+	              + Vec3f(right.position.x, right.position.y, right.position.z)) * 0.5f;
+	glm::quat orientation(left.orientation.w, left.orientation.x, left.orientation.y, left.orientation.z);
+	Vec3f forward = orientation * Vec3f(0.f, 0.f, -1.f);
+	float headYaw = glm::atan(-forward.x, -forward.z);
+
+	if(!m_uiPlaced || followHead != m_uiFollowHead) {
+
+		m_uiYaw = headYaw;
+		m_uiAnchor = head;
+		m_uiPlaced = true;
+		m_uiFollowHead = followHead;
+		m_uiTurning = false;
+
+	} else if(followHead) {
+
+		// Lazily follow the head: start turning once it looks away, stop once it is centered again
+		float dt = glm::clamp(float(m_frameState.predictedDisplayPeriod) * 1e-9f, 0.f, 0.1f);
+		float smoothing = 1.f - glm::exp(-dt * 4.f);
+
+		float difference = std::remainder(headYaw - m_uiYaw, glm::two_pi<float>());
+		if(glm::abs(difference) > glm::radians(30.f)) {
+			m_uiTurning = true;
+		}
+		if(m_uiTurning) {
+			m_uiYaw += difference * smoothing;
+			if(glm::abs(difference) < glm::radians(2.f)) {
+				m_uiTurning = false;
+			}
+		}
+
+		m_uiAnchor += (head - m_uiAnchor) * smoothing;
+
+	}
+
+	// A screen 60° wide at the configured distance
+	float distance = config.vr.uiDistance;
+	float width = 2.f * distance * glm::tan(glm::radians(30.f));
+	m_uiExtent.width = width;
+	m_uiExtent.height = width * float(m_uiSize.y) / float(m_uiSize.x);
+
+	glm::quat rotation = glm::angleAxis(m_uiYaw, Vec3f(0.f, 1.f, 0.f));
+	Vec3f position = m_uiAnchor + rotation * Vec3f(0.f, 0.f, -distance);
+	m_uiPose.orientation = { rotation.x, rotation.y, rotation.z, rotation.w };
+	m_uiPose.position = { position.x, position.y, position.z };
+
+}
+
+void VRSystem::drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear) {
+
+	// Draw with the fixed-function pipeline, saving and restoring all state the renderer caches
+	GLint previousFramebuffer = 0;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+	GLint previousActiveTexture = 0;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &previousActiveTexture);
+	GLint textureUnits = 1;
+	glGetIntegerv(GL_MAX_TEXTURE_UNITS, &textureUnits);
+
+	glPushAttrib(GL_ALL_ATTRIB_BITS);
+
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(0, 0, windowSize.x, windowSize.y);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_ALPHA_TEST);
+	glDisable(GL_FOG);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_LIGHTING);
+
+	if(clear) {
+		glClearColor(0.f, 0.f, 0.f, 1.f);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+
+	std::vector<GLint> previousTextures(static_cast<size_t>(textureUnits), 0);
+	for(GLint unit = textureUnits - 1; unit >= 0; unit--) {
+		glActiveTexture(GLenum(GL_TEXTURE0 + unit));
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTextures[size_t(unit)]);
+		glDisable(GL_TEXTURE_2D);
+	}
+
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+
+	// Premultiplied alpha
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+	glBegin(GL_TRIANGLE_STRIP);
+	glTexCoord2f(0.f, 0.f);
+	glVertex2f(-1.f, -1.f);
+	glTexCoord2f(1.f, 0.f);
+	glVertex2f(1.f, -1.f);
+	glTexCoord2f(0.f, 1.f);
+	glVertex2f(-1.f, 1.f);
+	glTexCoord2f(1.f, 1.f);
+	glVertex2f(1.f, 1.f);
+	glEnd();
+
+	for(GLint unit = textureUnits - 1; unit >= 0; unit--) {
+		glActiveTexture(GLenum(GL_TEXTURE0 + unit));
+		glBindTexture(GL_TEXTURE_2D, GLuint(previousTextures[size_t(unit)]));
+	}
+
+	glMatrixMode(GL_MODELVIEW);
+	glPopMatrix();
+	glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+
+	glPopAttrib();
+
+	glActiveTexture(GLenum(previousActiveTexture));
+	glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFramebuffer));
 
 }

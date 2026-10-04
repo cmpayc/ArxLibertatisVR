@@ -50,6 +50,9 @@ glm::quat toQuat(const XrQuaternionf & q) {
 
 void requestVRRecenter() {
 	g_recenterRequested = true;
+	if(g_vr) {
+		g_vr->resetUIPlacement();
+	}
 }
 
 bool prepareVRCamera(Camera & cam, const Rect & viewport) {

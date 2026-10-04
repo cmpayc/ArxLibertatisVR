@@ -127,6 +127,16 @@ public:
 	void setStereoViews(std::vector<StereoView> views);
 	[[nodiscard]] bool hasStereoViews() const { return !m_stereoViews.empty(); }
 
+	[[nodiscard]] GLuint getRenderTarget() const { return m_renderTarget; }
+	[[nodiscard]] Vec2i getRenderTargetSize() const { return m_renderTargetSize; }
+
+	/*!
+	 * Write premultiplied alpha coverage to the render target alpha channel
+	 *
+	 * Used to render the interface into a transparent layer that is composited over the 3D scene.
+	 */
+	void setPremultipliedAlphaOutput(bool enable);
+
 	bool hasTextureNPOT() const { return m_hasTextureNPOT; }
 	bool hasSizedTextureFormats() const { return m_hasSizedTextureFormats; }
 	bool hasIntensityTextures() const { return m_hasIntensityTextures; }
@@ -157,6 +167,7 @@ private:
 	void enableTransform();
 	void disableTransform();
 	void applyStereoView(const StereoView & view, bool transformed);
+	void applyBlendFunc(GLenum src, GLenum dst);
 	void applyViewport();
 	[[nodiscard]] int getRenderTargetHeight() const;
 
@@ -212,6 +223,7 @@ private:
 	GLuint m_renderTarget;
 	Vec2i m_renderTargetSize;
 	std::vector<StereoView> m_stereoViews;
+	bool m_premultipliedAlphaOutput;
 
 };
 

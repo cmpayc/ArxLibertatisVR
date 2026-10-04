@@ -99,12 +99,36 @@ public:
 
 	[[nodiscard]] bool hasRenderedStereo() const { return m_stereoRendered; }
 
+	/*!
+	 * Redirect rendering into the virtual screen: a transparent window-sized layer shown as a quad in VR
+	 *
+	 * All 2D rendering (interface, menus, cinematics) should happen between beginUIRender() and endUIRender().
+	 * The stereo 3D scene can be rendered in between (\ref beginStereoRender restores this target).
+	 *
+	 * \return false if there is no VR frame to render
+	 */
+	bool beginUIRender(const Vec2i & windowSize);
+
+	/*!
+	 * Submit the virtual screen to the headset and composite it into the window
+	 *
+	 * \param overScene true if the virtual screen is drawn over the 3D scene (in-game HUD) - it then follows
+	 *                  the head, otherwise it stays in place like a cinema screen
+	 */
+	void endUIRender(const Vec2i & windowSize, bool overScene);
+
+	[[nodiscard]] bool isUIActive() const { return m_uiActive; }
+	[[nodiscard]] bool hasSubmittedUI() const { return m_uiSubmitted; }
+
+	//! Show the window contents as the virtual screen, for frames rendered without \ref beginUIRender
+	void submitWindowAsUI(const Vec2i & windowSize);
+
+	//! Place the virtual screen in front of the user again
+	void resetUIPlacement() { m_uiPlaced = false; }
+
 	//! Acquire the current swapchain image for an eye and return its OpenGL texture name
 	unsigned acquireEyeImage(size_t eye);
 	void releaseEyeImage(size_t eye);
-
-	//! Debug output: blit the window back buffer into both eye images (\ref beginFrame must have returned true)
-	void mirrorWindowToEyes(const Vec2i & windowSize);
 
 	[[nodiscard]] const std::string & getRuntimeName() const { return m_runtimeName; }
 	[[nodiscard]] const std::string & getSystemName() const { return m_systemName; }
@@ -121,6 +145,12 @@ private:
 	void destroySwapchains();
 	bool createStereoTarget();
 	void destroyStereoTarget();
+	bool createUITarget(const Vec2i & size);
+	void destroyUITarget();
+	void updateUIPlacement(bool followHead);
+	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
+	unsigned acquireSwapchainImage(EyeSwapchain & swapchain);
+	void releaseSwapchainImage(EyeSwapchain & swapchain);
 	void handleSessionStateChange(XrSessionState state);
 	bool check(XrResult result, const char * call) const;
 
@@ -138,9 +168,6 @@ private:
 	Vec2i m_eyeSize;
 	s64 m_colorFormat;
 	unsigned m_blitFramebuffer;
-	unsigned m_resolveFramebuffer;
-	unsigned m_resolveRenderbuffer;
-	Vec2i m_resolveSize;
 
 	// Double-wide (left eye | right eye) multisampled render target and its resolve target
 	std::vector<OpenGLRenderer::StereoView> m_stereoViews;
@@ -151,6 +178,24 @@ private:
 	unsigned m_stereoResolveColor;
 	bool m_stereoActive;
 	bool m_stereoRendered;
+	unsigned m_stereoPreviousTarget;
+	Vec2i m_stereoPreviousTargetSize;
+
+	// Virtual screen (interface layer) render target and quad layer
+	EyeSwapchain m_uiSwapchain;
+	unsigned m_uiFramebuffer;
+	unsigned m_uiColor;
+	unsigned m_uiDepth;
+	Vec2i m_uiSize;
+	bool m_uiActive;
+	bool m_uiSubmitted;
+	bool m_uiPlaced;
+	bool m_uiFollowHead;
+	bool m_uiTurning;
+	float m_uiYaw; // radians, OpenXR stage space
+	Vec3f m_uiAnchor; // head position the screen is placed relative to, OpenXR stage space
+	XrPosef m_uiPose;
+	XrExtent2Df m_uiExtent;
 
 	XrFrameState m_frameState;
 	bool m_frameActive;

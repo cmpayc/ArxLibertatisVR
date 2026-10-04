@@ -134,6 +134,12 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #include "window/RenderWindow.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRCamera.h"
+#endif
+
 
 extern AnimationDuration PLAYER_ROTATION;
 extern float SLID_VALUE;
@@ -1553,6 +1559,9 @@ void ArxGame::manageKeyMouse() {
 		}
 
 		if(GInput->actionPressed(CONTROLS_CUST_CENTERVIEW)) {
+			#if ARX_HAVE_OPENXR
+			requestVRRecenter();
+			#endif
 			eyeball.centerView();
 			player.desiredangle.setPitch(0);
 			player.angle.setPitch(0);
