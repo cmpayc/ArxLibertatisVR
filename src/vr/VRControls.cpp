@@ -36,6 +36,8 @@
 #include "physics/Collisions.h"
 #include "graphics/Renderer.h"
 #include "graphics/data/Mesh.h"
+#include "graphics/data/TextureContainer.h"
+#include "gui/Cursor.h"
 #include "gui/Interface.h"
 #include "gui/Menu.h"
 #include "gui/hud/SecondaryInventory.h"
@@ -65,6 +67,7 @@ struct PointerBeam {
 	bool hit = false; //!< The beam ends on something: draw a dot there
 	Vec3f start = Vec3f(0.f);
 	Vec3f end = Vec3f(0.f);
+	TextureContainer * icon = nullptr; //!< Shown at the end (the item selected to combine)
 };
 PointerBeam g_beam;
 PointerBeam g_offHandBeam; //!< Only for debugging
@@ -339,12 +342,15 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 		return false;
 	}
 	
-	// The world ray is invisible, except for debugging
-	if(config.vr.debugRay) {
+	// The world ray is invisible, except for debugging and while an item is selected to combine (with its icon)
+	const Vec3f start = origin;
+	bool showRay = config.vr.debugRay || COMBINE;
+	if(showRay) {
 		g_beam.visible = true;
 		g_beam.hit = false;
-		g_beam.start = origin;
+		g_beam.start = start;
 		g_beam.end = origin + direction * 200.f;
+		g_beam.icon = COMBINE ? COMBINE->m_icon : nullptr;
 	}
 	
 	// Start a little in front of the controller so that the player's own hand and weapon are not hit
@@ -372,7 +378,7 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 			hitSomething = true;
 		}
 	}
-	if(config.vr.debugRay && hitSomething) {
+	if(showRay && hitSomething) {
 		g_beam.end = target;
 		g_beam.hit = true;
 	}
@@ -391,6 +397,7 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 }
 void clearVRPointerBeam() {
 	g_beam.visible = false;
+	g_beam.icon = nullptr;
 	g_offHandBeam.visible = false;
 }
 
@@ -428,10 +435,10 @@ static void drawPointerBeam(const PointerBeam & beam) {
 	UseRenderState state(render3D().depthWrite(false).blendAdditive());
 	GRenderer->ResetTexture(0);
 	
-	// A thin ribbon facing the viewer, brighter at the hand
+	// A thin ribbon facing the viewer, brighter at the hand (not while combining: only the item icon is shown)
 	Vec3f toEye = eye - beam.start;
 	Vec3f side = glm::cross(direction, toEye);
-	if(glm::length(side) > 0.001f) {
+	if(glm::length(side) > 0.001f && !beam.icon) {
 		side = glm::normalize(side) * 0.3f;
 		const Color startColor = Color::rgb(0.35f, 0.6f, 1.f);
 		const Color endColor = Color::rgb(0.1f, 0.2f, 0.4f);
@@ -443,6 +450,48 @@ static void drawPointerBeam(const PointerBeam & beam) {
 		ribbon[0].color = ribbon[1].color = startColor.toRGBA();
 		ribbon[2].color = ribbon[3].color = endColor.toRGBA();
 		EERIEDRAWPRIM(Renderer::TriangleStrip, ribbon, 4);
+	}
+	
+	/*
+	 * The icon of the item selected to combine at the end, kept about the same apparent size at any distance, with the
+	 * game's combine cursor at its top left corner: a circle with a triangle over a target (an interactive object, like
+	 * the game's cursor), empty and with a tinted icon elsewhere
+	 */
+	if(beam.icon) {
+		bool onTarget = FlyingOverIO && FlyingOverIO != COMBINE;
+		Vec3f center = beam.end - direction * 5.f;
+		float size = 2.f + 0.03f * glm::distance(eye, center);
+		Vec2f iconSize(beam.icon->m_size);
+		float largest = std::max(std::max(iconSize.x, iconSize.y), 1.f);
+		Vec3f right = Vec3f(g_preparedCamera.m_viewToWorld[0]) * (size * iconSize.x / largest);
+		Vec3f down = Vec3f(g_preparedCamera.m_viewToWorld[1]) * (size * iconSize.y / largest);
+		Color color = onTarget ? Color::white : Color(255, 170, 102);
+		UseRenderState iconState(render3D().depthWrite(false).blend());
+		auto drawQuad = [&](TextureContainer * texture, const Vec3f & middle, const Vec3f & x, const Vec3f & y) {
+			TexturedVertex quad[4];
+			worldToClipSpace(middle - x - y, quad[0]);
+			worldToClipSpace(middle + x - y, quad[1]);
+			worldToClipSpace(middle - x + y, quad[2]);
+			worldToClipSpace(middle + x + y, quad[3]);
+			quad[0].uv = Vec2f(0.f, 0.f);
+			quad[1].uv = Vec2f(texture->uv.x, 0.f);
+			quad[2].uv = Vec2f(0.f, texture->uv.y);
+			quad[3].uv = texture->uv;
+			quad[0].color = quad[1].color = quad[2].color = quad[3].color = color.toRGBA();
+			GRenderer->SetTexture(0, texture);
+			EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
+		};
+		drawQuad(beam.icon, center, right, down);
+		if(TextureContainer * circle = cursorCombineTexture(onTarget)) {
+			// The same size relative to the icon as on the screen, centered on its top left corner
+			float scale = size * float(circle->m_size.x) / largest;
+			Vec3f x = Vec3f(g_preparedCamera.m_viewToWorld[0]) * scale;
+			Vec3f y = Vec3f(g_preparedCamera.m_viewToWorld[1]) * scale;
+			color = onTarget ? Color::white : Color(160, 160, 160);
+			drawQuad(circle, center - right - down - direction * 0.5f, x, y);
+		}
+		GRenderer->ResetTexture(0);
+		return;
 	}
 	
 	// A dot where the beam hits, kept about the same apparent size at any distance

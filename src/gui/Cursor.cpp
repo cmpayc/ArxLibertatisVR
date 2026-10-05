@@ -97,6 +97,10 @@ TextureContainer * cursorMovable = nullptr;   // TextureContainer for Movable It
 
 TextureContainer * scursor[8]; // Animated Hand Cursor
 
+TextureContainer * cursorCombineTexture(bool onTarget) {
+	return onTarget ? cursorTargetOn : cursorTargetOff;
+}
+
 void cursorTexturesInit() {
 	
 	cursorTargetOn       = TextureContainer::LoadUI("graph/interface/cursors/target_on");

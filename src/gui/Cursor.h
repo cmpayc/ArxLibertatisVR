@@ -31,6 +31,9 @@ extern TextureContainer * cursorMovable;
 
 void cursorTexturesInit();
 
+//! The circle drawn at the item icon while combining: with a triangle over a target, empty elsewhere
+TextureContainer * cursorCombineTexture(bool onTarget);
+
 void ARX_INTERFACE_RenderCursor(bool flag);
 
 #endif // ARX_GUI_CURSOR_H

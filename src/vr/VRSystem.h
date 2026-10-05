@@ -27,6 +27,7 @@
 
 #include <openxr/openxr.h>
 
+#include "game/GameTypes.h"
 #include "graphics/opengl/OpenGLRenderer.h"
 #include "math/Rectangle.h"
 #include "math/Types.h"
@@ -139,7 +140,7 @@ public:
 	[[nodiscard]] VRInput & getInput() { return m_input; }
 	
 	//! \return true while the trigger is used to click on an interface panel (and not for magic)
-	[[nodiscard]] bool isTriggerClicking() const { return m_clickByTrigger; }
+	[[nodiscard]] bool isTriggerClicking() const { return m_clickByTrigger || m_triggerOnItem; }
 	
 	//! \return true if the laser pointer currently points at the virtual screen
 	[[nodiscard]] bool isPointingAtUI() const { return m_pointerOnUI; }
@@ -255,6 +256,14 @@ private:
 	bool m_gripIsClick; // The grip press is a game click (not grabbing directly, see VRGrab)
 	bool m_clickUseOnTap; // The trigger click started on a panel where a tap uses the item
 	int m_useTapFrames; // Frames left of a use action from a trigger tap (press, then release in place)
+	float m_useTapDelay; // s until a pending tap uses its item (waiting for a second tap), negative if none
+	Vec2s m_useTapPosition; // Where the pending tap was
+	bool m_secondTap; // The current trigger click is the second tap of a double tap (selects the item to combine)
+	bool m_triggerOnItem; // The trigger was pressed on an item in the world (a tap, not magic)
+	EntityHandle m_triggerItem;
+	float m_triggerItemTime;
+	EntityHandle m_lastItemTap; // The item of the last tap in the world, for double taps
+	float m_lastItemTapAge;
 
 	XrFrameState m_frameState;
 	bool m_frameActive;

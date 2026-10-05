@@ -748,6 +748,24 @@ void ARX_INTERFACE_ActivateEntity(Entity & t) {
 
 }
 
+bool ARX_INTERFACE_StartCombine(Entity & item) {
+
+	if(COMBINE || !(item.ioflags & IO_ITEM) || (item.ioflags & IO_MOVABLE)) {
+		return false;
+	}
+
+	Entity * container = locateInInventories(&item).container;
+	if(container && (container->ioflags & IO_SHOP)) {
+		// Cannot combine items in shop inventories
+		return false;
+	}
+
+	COMBINE = &item;
+	updateCombineFlags(COMBINE);
+
+	return true;
+}
+
 long CSEND = 0;
 long MOVE_PRECEDENCE = 0;
 
@@ -1948,19 +1966,7 @@ void ArxGame::manageEditorControls() {
 		
 		// Double Clicked and not already combining.
 		if(eeMouseDoubleClick1() && !COMBINE && FlyingOverIO && (FlyingOverIO->ioflags & IO_ITEM)) {
-			
-			bool accept_combine = true;
-			Entity * container = locateInInventories(FlyingOverIO).container;
-			if(container && (container->ioflags & IO_SHOP)) {
-				// Cannot combine items in shop inventories
-				accept_combine = false;
-			}
-			
-			if(accept_combine && !(FlyingOverIO->ioflags & IO_MOVABLE)) {
-				COMBINE = FlyingOverIO;
-				updateCombineFlags(COMBINE);
-			}
-			
+			ARX_INTERFACE_StartCombine(*FlyingOverIO);
 		}
 		
 		// Checks for Object Dragging

@@ -178,6 +178,9 @@ bool ARX_INTERFACE_OpenCorpse(Entity & npc);
 //! Like a double click on an entity: talk to an NPC, loot a corpse, open a container or use an object (lever, door)
 void ARX_INTERFACE_ActivateEntity(Entity & entity);
 
+//! Like a double click on an item: select it to combine it with the next clicked target, \return false if it cannot
+bool ARX_INTERFACE_StartCombine(Entity & item);
+
 bool ARX_INTERFACE_MouseInBook();
 
 void ARX_INTERFACE_Reset();

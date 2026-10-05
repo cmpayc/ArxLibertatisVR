@@ -50,8 +50,10 @@
 #include <openxr/openxr_loader_negotiation.h>
 
 #include "core/Config.h"
+#include "core/Core.h"
 #include "core/Version.h"
 #include "game/Entity.h"
+#include "game/EntityManager.h"
 #include "game/NPC.h"
 #include "game/Player.h"
 #include "gui/Interface.h"
@@ -334,6 +336,12 @@ VRSystem::VRSystem()
 	, m_gripIsClick(true)
 	, m_clickUseOnTap(false)
 	, m_useTapFrames(0)
+	, m_useTapDelay(-1.f)
+	, m_useTapPosition(0)
+	, m_secondTap(false)
+	, m_triggerOnItem(false)
+	, m_triggerItemTime(0.f)
+	, m_lastItemTapAge(0.f)
 	, m_frameState{ XR_TYPE_FRAME_STATE }
 	, m_frameActive(false)
 	, m_shouldRender(false)
@@ -1779,8 +1787,23 @@ void VRSystem::updatePointer() {
 	 * until the trigger is released, e.g. to drag an item out of the inventory.
 	 */
 	if(hand.wasPressed(VRButtonTrigger)) {
-		m_clickByTrigger = onUI;
-		m_clickUseOnTap = onUI && useOnTap;
+		// While an item is selected to combine, the trigger clicks everywhere: on the target, or elsewhere to cancel
+		m_clickByTrigger = onUI || (COMBINE && onWorld && !isVRGrabbing());
+		m_clickUseOnTap = onUI && useOnTap && !COMBINE;
+		if(m_clickUseOnTap && m_useTapDelay >= 0.f) {
+			m_secondTap = true; // A double tap: select instead of using
+			m_useTapDelay = -1.f;
+		}
+		// On an item in the world the trigger taps (a double tap selects it to combine) instead of starting magic
+		m_triggerOnItem = false;
+		if(!onUI && inGame && !COMBINE && !isVRGrabbing()) {
+			Entity * item = getVRPointedEntity(hand.aim, false);
+			if(item && (item->ioflags & IO_ITEM) && item->show == SHOW_FLAG_IN_SCENE) {
+				m_triggerOnItem = true;
+				m_triggerItem = item->index();
+				m_triggerItemTime = 0.f;
+			}
+		}
 	} else if(!hand.isPressed(VRButtonTrigger)) {
 		m_clickByTrigger = false;
 	}
@@ -1857,14 +1880,54 @@ void VRSystem::updatePointer() {
 	if(m_useTapFrames > 0) {
 		m_useTapFrames--;
 	}
+	/*
+	 * A double tap (like the game's double click) selects the item to combine it with the next target. A single tap
+	 * only uses the item once no second tap followed.
+	 */
+	const float DoubleTapTime = 0.3f;
 	if(tapPending && clickEnded) {
-		m_useTapFrames = 5;
+		if(m_secondTap) {
+			if(FlyingOverIO && (FlyingOverIO->ioflags & IO_ITEM) && ARX_INTERFACE_StartCombine(*FlyingOverIO)) {
+				m_input.vibrate(dominant, 0.5f, 0.08f);
+			}
+		} else {
+			m_useTapDelay = DoubleTapTime;
+			m_useTapPosition = m_clickPosition;
+		}
 	}
 	if(clickEnded) {
 		m_clickUseOnTap = false;
+		m_secondTap = false;
+	}
+	// Taps on items in the world: a double tap selects the item to combine
+	m_lastItemTapAge += getFrameDuration();
+	if(m_triggerOnItem) {
+		if(hand.isPressed(VRButtonTrigger)) {
+			m_triggerItemTime += getFrameDuration();
+		} else {
+			if(m_triggerItemTime < ClickDuration) {
+				Entity * item = entities.get(m_triggerItem);
+				if(item && m_lastItemTap == m_triggerItem && m_lastItemTapAge < DoubleTapTime) {
+					if(ARX_INTERFACE_StartCombine(*item)) {
+						m_input.vibrate(dominant, 0.5f, 0.08f);
+					}
+					m_lastItemTap = EntityHandle();
+				} else {
+					m_lastItemTap = m_triggerItem;
+					m_lastItemTapAge = 0.f;
+				}
+			}
+			m_triggerOnItem = false;
+		}
+	}
+	if(m_useTapDelay >= 0.f) {
+		m_useTapDelay -= getFrameDuration();
+		if(m_useTapDelay < 0.f) {
+			m_useTapFrames = 5;
+		}
 	}
 	if(m_useTapFrames > 0) {
-		mouse = m_clickPosition;
+		mouse = m_useTapPosition;
 		onUI = true;
 		onWorld = false;
 	}
