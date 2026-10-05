@@ -40,6 +40,7 @@ struct Notification {
 };
 
 static std::vector<Notification> g_notifications;
+static Rect g_notificationArea;
 
 extern TextureContainer * arx_logo_tc;
 
@@ -69,6 +70,8 @@ void notification_check() {
 	                                     [](const auto & entry) { return g_gameTime.now() > entry.deadline; }),
 	                      g_notifications.end());
 	
+	g_notificationArea = Rect();
+	
 	if(g_notifications.empty()) {
 		return;
 	}
@@ -95,6 +98,13 @@ void notification_check() {
 		                                    std::string(" ") += getLocalised(notification.text),
 		                                    Color::white, nullptr);
 		
+		Rect area(Vec2i(rect.topLeft()), Vec2i(s32(620.f * g_sizeRatio.x), s32(igrec)));
+		g_notificationArea = g_notificationArea.empty() ? area : (g_notificationArea | area);
+		
 	}
 	
+}
+
+Rect notification_area() {
+	return g_notificationArea;
 }

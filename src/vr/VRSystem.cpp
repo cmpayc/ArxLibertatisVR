@@ -59,6 +59,7 @@
 #include "input/Mouse.h"
 #include "io/log/Logger.h"
 #include "platform/ProgramOptions.h"
+#include "scene/Interactive.h"
 #include "vr/VRBody.h"
 #include "vr/VRCamera.h"
 #include "vr/VRControls.h"
@@ -1278,18 +1279,34 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 		updateUIPlacement(true);
 		addScreenPanel(areas.screen, isVRInterfaceOpen());
 	}
+	if(!areas.subtitles.empty()) {
+		// Subtitles of in-game cutscenes: below the view, where they are on the screen
+		updateUIPlacement(true);
+		addScreenPanel(areas.subtitles, false, true);
+	}
+	if(!areas.info.empty()) {
+		// Names of pointed objects and notifications: above the view, where they are on the screen
+		updateUIPlacement(true);
+		addScreenPanel(areas.info, false, true);
+	}
 	updateWristPanels(areas);
 	updateLootPanel(areas);
+	updateLabelPanel(areas);
 
 }
 
-void VRSystem::addScreenPanel(const Rect & area, bool interactive) {
+void VRSystem::addScreenPanel(const Rect & area, bool interactive, bool keepPosition) {
 
 	// The same pixel size as the whole virtual screen, centered where the screen is
 	float pixelSize = m_uiExtent.width / float(m_uiSize.x);
 	glm::quat orientation(m_uiPose.orientation.w, m_uiPose.orientation.x,
 	                      m_uiPose.orientation.y, m_uiPose.orientation.z);
 	Vec3f position(m_uiPose.position.x, m_uiPose.position.y, m_uiPose.position.z);
+	if(keepPosition) {
+		// As high as the area is on the whole virtual screen (screen y points down), centered
+		float offset = (float(area.center().y) - float(m_uiSize.y) * 0.5f) * pixelSize;
+		position += orientation * Vec3f(0.f, -offset, 0.f);
+	}
 	addUIPanel(area, pixelSize, position, orientation, interactive);
 
 }
@@ -1388,18 +1405,32 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 			continue;
 		}
 
-		// Health and mana side by side, bottoms aligned; the inventory above them
+		// Health, mana and the damaged equipment status in a row, bottoms aligned; the inventory above them
 		float gaugePixelSize = GaugePixelSize / areas.hudScale;
-		Vec2f health = size(areas.health, gaugePixelSize);
-		Vec2f mana = size(areas.mana, gaugePixelSize);
-		float rowWidth = health.x + mana.x + ((health.x > 0.f && mana.x > 0.f) ? Gap : 0.f);
-		float bottom = -0.5f * std::max(health.y, mana.y);
-		add(areas.health, gaugePixelSize, Vec2f(-0.5f * (rowWidth - health.x), bottom + 0.5f * health.y), true);
-		add(areas.mana, gaugePixelSize, Vec2f(0.5f * (rowWidth - mana.x), bottom + 0.5f * mana.y), true);
+		const Rect * row[] = { &areas.health, &areas.mana, &areas.equipment };
+		float rowWidth = 0.f;
+		float rowHeight = 0.f;
+		for(const Rect * area : row) {
+			Vec2f extent = size(*area, gaugePixelSize);
+			if(extent.x > 0.f) {
+				rowWidth += (rowWidth > 0.f ? Gap : 0.f) + extent.x;
+				rowHeight = std::max(rowHeight, extent.y);
+			}
+		}
+		float bottom = -0.5f * rowHeight;
+		float x = -0.5f * rowWidth;
+		for(const Rect * area : row) {
+			Vec2f extent = size(*area, gaugePixelSize);
+			if(extent.x > 0.f) {
+				Vec2f center(x + 0.5f * extent.x, bottom + 0.5f * extent.y);
+				add(*area, gaugePixelSize, center, area != &areas.equipment);
+				x += extent.x + Gap;
+			}
+		}
 		if(!areas.inventory.empty()) {
 			float inventoryPixelSize = InventoryPixelSize / areas.hudScale;
 			Vec2f inventory = size(areas.inventory, inventoryPixelSize);
-			float top = bottom + std::max(health.y, mana.y);
+			float top = bottom + rowHeight;
 			if(add(areas.inventory, inventoryPixelSize, Vec2f(0.f, top + Gap + 0.5f * inventory.y), true)) {
 				m_uiPanels.back().useOnTap = true;
 			}
@@ -1454,6 +1485,53 @@ void VRSystem::updateLootPanel(const VRHudAreas & areas) {
 
 	const float LootPixelSize = 0.0012f; // meters per interface pixel: a sheet of about 30 cm
 	addUIPanel(areas.loot, LootPixelSize / areas.hudScale, position, orientation, true);
+
+}
+
+void VRSystem::updateLabelPanel(const VRHudAreas & areas) {
+
+	if(areas.label.empty() || !areas.labelEntity || m_uiSize.x <= 0) {
+		return;
+	}
+
+	// Just above the object (Arx world: y points down)
+	const Entity & entity = *areas.labelEntity;
+	Vec3f top = entity.pos;
+	if(entity.bbox3D.min.x <= entity.bbox3D.max.x) {
+		top = (entity.bbox3D.min + entity.bbox3D.max) * 0.5f;
+		top.y = entity.bbox3D.min.y;
+	}
+	top.y -= 10.f;
+	Vec3f position;
+	glm::quat unused;
+	if(!worldPoseToTracking(top, glm::quat(1.f, 0.f, 0.f, 0.f), position, unused)) {
+		return;
+	}
+
+	const XrPosef & left = m_views[0].pose;
+	const XrPosef & right = m_views[1].pose;
+	Vec3f head = (Vec3f(left.position.x, left.position.y, left.position.z)
+	              + Vec3f(right.position.x, right.position.y, right.position.z)) * 0.5f;
+
+	// Facing the user, upright
+	Vec3f toHead = head - position;
+	float distance = glm::length(toHead);
+	if(distance < 0.05f) {
+		return;
+	}
+	Vec3f normal = toHead / distance;
+	Vec3f up = Vec3f(0.f, 1.f, 0.f) - normal * normal.y;
+	if(glm::length(up) < 0.01f) {
+		return;
+	}
+	up = glm::normalize(up);
+	Vec3f across = glm::cross(up, normal);
+	glm::quat orientation = glm::quat_cast(glm::mat3x3(across, up, normal));
+
+	// The same angular size as on the virtual screen (60° wide), at any distance
+	float pixelSize = distance * 2.f * std::tan(glm::radians(30.f)) / float(m_uiSize.x);
+	Vec3f center = position + up * (0.5f * float(areas.label.height()) * pixelSize);
+	addUIPanel(areas.label, pixelSize, center, orientation, false);
 
 }
 
@@ -1695,19 +1773,13 @@ void VRSystem::updatePointer() {
 	bool onWorld = !onUI && inGame && getVRWorldPointer(hand.aim, mouse);
 	
 	/*
-	 * The "click" (left mouse button): in the world the grip uses, talks and attacks, on an interface panel the
-	 * trigger or the grip click. Items pointed at in the world are grabbed directly instead (see VRGrab).
-	 * The trigger also clicks in the world on items (to take them) and with an open interface (e.g. the inventory).
+	 * The "click" (left mouse button): in the world the grip uses and activates (levers, doors, containers, talking, see
+	 * below), on an interface panel the trigger or the grip click. Items are taken and grabbed with the grip (VRGrab).
 	 * The trigger is otherwise used for magic (see VRControls). A trigger click started on a panel stays a click
 	 * until the trigger is released, e.g. to drag an item out of the inventory.
 	 */
 	if(hand.wasPressed(VRButtonTrigger)) {
-		bool worldClick = onWorld && !isVRGrabbing();
-		if(worldClick && !isVRInterfaceOpen()) {
-			const Entity * target = getVRPointedEntity(hand.aim, false);
-			worldClick = target && (target->ioflags & IO_ITEM) && (target->gameFlags & GFLAG_INTERACTIVITY);
-		}
-		m_clickByTrigger = onUI || worldClick;
+		m_clickByTrigger = onUI;
 		m_clickUseOnTap = onUI && useOnTap;
 	} else if(!hand.isPressed(VRButtonTrigger)) {
 		m_clickByTrigger = false;
@@ -1715,16 +1787,31 @@ void VRSystem::updatePointer() {
 	if(hand.wasPressed(VRButtonGrip)) {
 		// Touching an object grabs it even while pointing at a panel
 		m_gripIsClick = !isVRGripGrabbing() && !isVRHandAtSheath(); // Not at the sheath (draws the weapon, see VRControls)
-		// The grip on a dead body opens its loot (the game uses a double click), putting a drawn weapon away
+		/*
+		 * The grip activates what it points at like the game's double click: levers, doors, containers, the loot of
+		 * dead bodies, talking to NPCs (not with a drawn weapon). Items are taken and grabbed instead (see VRGrab).
+		 */
+		if(inGame && !onUI && hand.isPressed(VRButtonTrigger)) {
+			m_gripIsClick = false; // A fist punches (see VRCombat)
+		}
 		if(m_gripIsClick && inGame && !onUI) {
-			Entity * target = getVRPointedEntity(hand.aim, false);
-			const float LootDistance = 360.f; // Like the game's clicks on objects
-			if(target && (target->ioflags & IO_NPC) && target->_npcdata->lifePool.current <= 0.f
-			   && glm::distance(player.pos, target->pos) < LootDistance) {
-				if(player.Interface & INTER_COMBATMODE) {
-					ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
+			// The game's own pick at the pointer (like its double click finds objects), else the hand ray
+			Entity * target = onWorld ? InterClick(mouse) : nullptr;
+			const float UseDistance = 360.f; // Like the game's clicks on objects
+			if(!target) {
+				target = getVRPointedEntity(hand.aim, false);
+				if(target && glm::distance(player.pos, target->pos) >= UseDistance) {
+					target = nullptr;
 				}
-				if(ARX_INTERFACE_OpenCorpse(*target)) {
+			}
+			if(target && !(target->ioflags & IO_ITEM)) {
+				bool alive = (target->ioflags & IO_NPC) && target->_npcdata->lifePool.current > 0.f;
+				bool drawn = (player.Interface & INTER_COMBATMODE) != 0;
+				if(!alive || !drawn) {
+					if(drawn) {
+						ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF); // The game closes containers in combat mode
+					}
+					ARX_INTERFACE_ActivateEntity(*target);
 					m_gripIsClick = false;
 					m_input.vibrate(dominant, 0.4f, 0.05f);
 				}
@@ -1733,7 +1820,8 @@ void VRSystem::updatePointer() {
 	} else if(isVRGrabbingDirectly()) {
 		m_gripIsClick = false; // Caught an object after pressing the grip
 	}
-	bool clickPressed = (hand.isPressed(VRButtonGrip) && m_gripIsClick) || m_clickByTrigger;
+	bool fist = inGame && !onUI && isVRFist(dominant); // Punches, it does not click (see VRCombat)
+	bool clickPressed = (hand.isPressed(VRButtonGrip) && m_gripIsClick && !fist) || m_clickByTrigger;
 	bool clickStarted = clickPressed && !m_clickWasPressed;
 	bool clickEnded = !clickPressed && m_clickWasPressed;
 	m_clickWasPressed = clickPressed;

@@ -175,6 +175,9 @@ void ARX_INTERFACE_setCombatMode(ARX_INTERFACE_COMBAT_MODE i);
 //! Open the inventory of a dead NPC (loot), \return false if it is not a corpse with an inventory
 bool ARX_INTERFACE_OpenCorpse(Entity & npc);
 
+//! Like a double click on an entity: talk to an NPC, loot a corpse, open a container or use an object (lever, door)
+void ARX_INTERFACE_ActivateEntity(Entity & entity);
+
 bool ARX_INTERFACE_MouseInBook();
 
 void ARX_INTERFACE_Reset();

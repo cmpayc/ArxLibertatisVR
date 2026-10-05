@@ -21,6 +21,7 @@
 #define ARX_VR_VRCONTROLS_H
 
 #include "math/Types.h"
+#include "vr/VRInput.h"
 
 /*!
  * Gameplay controls from the VR controllers
@@ -62,6 +63,9 @@ void applyVRRoomScale();
 
 //! \return true if a weapon is equipped and the main hand is at its sheath (the opposite hip), to draw or sheathe it
 [[nodiscard]] bool isVRHandAtSheath();
+
+//! \return true while a hand makes a fist, grip and trigger held together: it punches (see VRCombat)
+[[nodiscard]] bool isVRFist(VRHand hand);
 
 /*!
  * Point into the game world with a controller

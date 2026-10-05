@@ -85,6 +85,9 @@ bool worldPoseToTracking(const Vec3f & worldPosition, const glm::quat & worldOri
 //! Project a world position to the window-sized screen of the last prepared VR frame
 bool worldToVRScreen(const Vec3f & position, Vec2f & screen);
 
+//! \return true if the last prepared VR frame was seen from the player (not a cutscene or other camera)
+bool isVRPlayerView();
+
 //! Forget the mapping, e.g. when the game camera is not the player camera
 void invalidateVRTracking();
 

@@ -654,7 +654,12 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 		pose.valid = false;
 	}
 	g_hipsValid = false;
-	
+
+	// Cutscenes and other cameras: the game animates the body (the last head pose would freeze it bent)
+	if(!isVRPlayerView()) {
+		return;
+	}
+
 	// The spine first: it moves the shoulders
 	if(bones.spine.valid()) {
 		solveSpine(skeleton, bones.spine, bones.legs);
@@ -687,7 +692,7 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 
 const std::vector<bool> * getVRUpperLayerBones(const EERIE_3DOBJ & object) {
 	
-	if(!isVRActive() || !object.m_skeleton) {
+	if(!isVRActive() || !object.m_skeleton || !isVRPlayerView()) {
 		return nullptr;
 	}
 	
@@ -795,6 +800,9 @@ bool getVRWristPose(VRHand hand, Vec3f & position, glm::quat & gripOrientation) 
 }
 
 Vec3f getVRModelOffset() {
+	if(!isVRPlayerView()) {
+		return Vec3f(0.f); // Not posed from the headset, see applyVRBodyIK
+	}
 	// The neck of the player model is 5 cm behind its feet: move the model back so that the torso stays upright
 	// when the neck is placed config.vr.bodyOffset behind the eyes, which are above the feet
 	float back = std::max(config.vr.bodyOffset * 100.f - 5.f * getVRBodyScale(), 0.f);

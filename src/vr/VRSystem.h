@@ -170,7 +170,7 @@ private:
 	void destroyUITarget();
 	void updateUIPlacement(bool followHead);
 	//! Show a part of the virtual screen at the screen placement, see \ref updateUIPlacement
-	void addScreenPanel(const Rect & area, bool interactive);
+	void addScreenPanel(const Rect & area, bool interactive, bool keepPosition = false);
 	//! Show a part of the virtual screen as a quad of the given size (metres per pixel)
 	bool addUIPanel(const Rect & area, float pixelSize, const Vec3f & position, const glm::quat & orientation,
 	                bool interactive);
@@ -178,6 +178,8 @@ private:
 	void updateWristPanels(const VRHudAreas & areas);
 	//! Show the loot of a dead NPC like a sheet of paper lying on the body, see \ref VRHudAreas
 	void updateLootPanel(const VRHudAreas & areas);
+	//! Show the name of the pointed object above it, facing the user, see VRHudAreas
+	void updateLabelPanel(const VRHudAreas & areas);
 	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
 	void updatePointer();
 	unsigned acquireSwapchainImage(EyeSwapchain & swapchain);

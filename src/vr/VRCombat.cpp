@@ -297,11 +297,13 @@ void updateFistSwings(Entity & io, float dt) {
 		}
 
 		/*
-		 * Every hand punches, in and outside of the combat mode (user request), except one holding an object; the
-		 * grip on an item still grabs it (see VRGrab). The grip in the world is also a game click, which the game may
-		 * take as a drag (isVRGrabbing): only objects really held count.
+		 * Only a fist punches, in and outside of the combat mode: grip and trigger held together (user request: swinging
+		 * the open hand hit NPCs by accident), and not holding an object. The fist does not grab, click or cast (see
+		 * VRGrab, VRSystem, VRControls). The grip in the world is also a game click, which the game may take as a drag
+		 * (isVRGrabbing): only objects really held count.
 		 */
-		bool free = !((hand == mainHand()) ? isVRGrabbingDirectly() : isVROffHandGrabbing());
+		bool holding = (hand == mainHand()) ? isVRGrabbingDirectly() : isVROffHandGrabbing();
+		bool free = isVRFist(hand) && !holding;
 		if(updateSwing(swing, state.grip.position, dt)) {
 			if(free) {
 				startStrike(io, WEAPON_BARE, hand);

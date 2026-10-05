@@ -254,6 +254,30 @@ Speech * ARX_SPEECH_AddSpeech(Entity & speaker, std::string_view data, long mood
 	return &speech;
 }
 
+Rect ARX_SPEECH_GetSubtitleArea() {
+
+	// Same conditions and area as the subtitles drawn by ARX_SPEECH_Update
+	if(!cinematicBorder.isActive() || cinematicBorder.CINEMA_DECAL < 100.f) {
+		return Rect();
+	}
+
+	bool text = std::any_of(g_speech.begin(), g_speech.end(), [](const Speech & speech) {
+		return !speech.text.empty();
+	});
+	if(!text) {
+		return Rect();
+	}
+
+	Rect area(0, g_size.height() - s32(100 * g_sizeRatio.y), g_size.width(), g_size.height());
+	if(config.interface.limitSpeechWidth) {
+		s32 w = std::min(g_size.width(), s32(640 * g_sizeRatio.y));
+		area.left = (g_size.width() - w) / 2;
+		area.right = (g_size.width() + w) / 2;
+	}
+
+	return area;
+}
+
 void ARX_SPEECH_Update() {
 	
 	GameInstant now = g_gameTime.now();

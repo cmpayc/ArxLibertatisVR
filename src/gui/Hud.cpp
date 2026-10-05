@@ -64,6 +64,12 @@
 
 #include "util/Cast.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 
 extern bool WILLRETURNTOFREELOOK;
 
@@ -1204,7 +1210,16 @@ void DamagedEquipmentGui::update() {
 }
 
 void DamagedEquipmentGui::draw() {
-	
+
+	#if ARX_HAVE_OPENXR
+	bool damaged = std::any_of(std::begin(m_colors), std::end(m_colors), [](Color c) { return c != Color::black; });
+	if(isVRActive() && damaged) {
+		// VR: additive icons have no coverage in the interface layer, give them a dark backing to be visible
+		UseRenderState backing(render2D().blend());
+		EERIEDrawBitmap(m_rect, 0.001f, nullptr, Color(0, 0, 0, 160));
+	}
+	#endif
+
 	UseRenderState state(render2D().blendAdditive());
 	
 	for(long i = 0; i < 5; i++) {

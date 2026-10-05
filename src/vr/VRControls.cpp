@@ -243,10 +243,12 @@ void updateVRControls() {
 		g_weaponToggleFrames--;
 	}
 	// While the off hand holds an object its trigger stores it instead (see VRGrab)
-	press(CONTROLS_CUST_USE, (off.isPressed(VRButtonTrigger) && !isVROffHandGrabbing()) || g_vr->isUseTapPressed());
+	// A fist (grip and trigger) punches instead (see VRCombat)
+	press(CONTROLS_CUST_USE, (off.isPressed(VRButtonTrigger) && !isVROffHandGrabbing() && !isVRFist(offHand()))
+	                         || g_vr->isUseTapPressed());
 	// While holding an object the trigger stores it instead (see VRGrab)
 	press(CONTROLS_CUST_MAGICMODE, main.isPressed(VRButtonTrigger) && !g_vr->isTriggerClicking()
-	                               && !g_vr->isPointingAtUI() && !isVRGrabbing());
+	                               && !g_vr->isPointingAtUI() && !isVRGrabbing() && !isVRFist(dominantHand()));
 	// The menu button is often reserved by the system (e.g. Quest through Virtual Desktop)
 	if(off.isPressed(VRButtonSecondary) || off.isPressed(VRButtonMenu) || main.isPressed(VRButtonMenu)) {
 		keys.push_back(Keyboard::Key_Escape);
@@ -305,6 +307,14 @@ float takeVRTurn() {
 	float turn = g_pendingTurn;
 	g_pendingTurn = 0.f;
 	return turn;
+}
+
+bool isVRFist(VRHand hand) {
+	if(!g_vr) {
+		return false;
+	}
+	const VRHandState & state = g_vr->getInput().getHand(hand);
+	return state.isPressed(VRButtonGrip) && state.isPressed(VRButtonTrigger);
 }
 
 bool isVRHandAtSheath() {

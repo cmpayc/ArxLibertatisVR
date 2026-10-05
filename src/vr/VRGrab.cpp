@@ -140,15 +140,19 @@ void holdEntity(GrabHand & hand, Entity & entity) {
 	hand.state = GrabHeld;
 }
 
-//! Start grabbing: objects within reach go into the hand, distant ones are selected for pulling
-void startGrab(GrabHand & hand, Entity & entity) {
+/*!
+ * Start grabbing: objects within reach go into the hand, distant ones are selected for pulling
+ *
+ * \param fromInterface Taken out of an inventory or the equipment: put it into the hand
+ */
+void startGrab(GrabHand & hand, Entity & entity, bool fromInterface = false) {
 	hand.resetGrab();
 	hand.entity = entity.index();
 	if(entity.obj && entity.obj->pbox) {
 		entity.obj->pbox->active = 0;
 	}
 	Vec3f center = entity.pos + getEntityCenterOffset(entity);
-	if(entity.show != SHOW_FLAG_IN_SCENE) {
+	if(entity.show != SHOW_FLAG_IN_SCENE || fromInterface) {
 		// Taken out of an inventory: put it into the hand
 		entity.show = SHOW_FLAG_IN_SCENE;
 		ARX_INTERACTIVE_Teleport(&entity, hand.position - getEntityCenterOffset(entity), true);
@@ -397,14 +401,24 @@ bool updateVRDraggedEntity(Entity & entity) {
 		return false;
 	}
 
-	// Items dragged out of an inventory use the normal drag and drop while pointing at an interface
+	/*
+	 * Items dragged out of an inventory or the equipment use the normal drag and drop while pointing at an interface.
+	 * Leaving it they go into the hand: also an unequipped weapon, which is in the scene but still at the place where
+	 * it was picked up.
+	 */
+	static EntityHandle s_draggedFromInterface;
+	static unsigned long s_draggedFromInterfaceFrame = 0;
 	bool newGrab = (hand.entity != entity.index() || hand.state == GrabNone || hand.lastFrame + 2 < g_frame);
-	if(newGrab && entity.show != SHOW_FLAG_IN_SCENE && g_vr->isPointingAtUI()) {
+	if(newGrab && g_vr->isPointingAtUI()) {
+		s_draggedFromInterface = entity.index();
+		s_draggedFromInterfaceFrame = g_frame;
 		return false;
 	}
 
 	if(newGrab) {
-		startGrab(hand, entity);
+		bool fromInterface = s_draggedFromInterface == entity.index() && s_draggedFromInterfaceFrame + 2 >= g_frame;
+		startGrab(hand, entity, fromInterface);
+		s_draggedFromInterface = EntityHandle();
 	}
 	hand.lastFrame = g_frame;
 
@@ -491,9 +505,10 @@ void updateDirectGrab(VRHand handId) {
 	 * To catch thrown objects, one that touches the hand shortly after pressing the grip is grabbed too.
 	 */
 	const float CatchWindow = 0.3f;
+	bool fist = input.isPressed(VRButtonTrigger); // With the grip: punches instead (see VRCombat)
 	bool catching = touching && input.isPressed(VRButtonGrip) && hand.gripTime < CatchWindow
-	                && hand.pressed == EntityHandle();
-	if((input.wasPressed(VRButtonGrip) && target) || catching) {
+	                && hand.pressed == EntityHandle() && !fist;
+	if((input.wasPressed(VRButtonGrip) && target && !fist) || catching) {
 		if(touching) {
 			startGrab(hand, *target);
 			hand.direct = true;

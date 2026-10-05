@@ -54,6 +54,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "game/GameTypes.h"
 #include "audio/AudioTypes.h"
 #include "math/Angle.h"
+#include "math/Rectangle.h"
 #include "platform/Platform.h"
 
 
@@ -133,5 +134,8 @@ void ARX_SPEECH_ReleaseIOSpeech(const Entity & entity);
 void ARX_SPEECH_ClearIOSpeech(const Entity & entity);
 
 Speech * getCinematicSpeech();
+
+//! \return the screen area where subtitles are drawn in this frame (in-game cutscenes), or an empty rectangle
+Rect ARX_SPEECH_GetSubtitleArea();
 
 #endif // ARX_GUI_SPEECH_H

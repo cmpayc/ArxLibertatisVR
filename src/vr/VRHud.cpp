@@ -31,6 +31,10 @@
 #include "gui/Interface.h"
 #include "gui/Menu.h"
 #include "gui/MiniMap.h"
+#include "gui/Notification.h"
+#include "gui/Speech.h"
+#include "gui/Text.h"
+#include "gui/TextManager.h"
 #include "gui/book/Book.h"
 #include "gui/hud/PlayerInventory.h"
 #include "gui/hud/SecondaryInventory.h"
@@ -95,6 +99,20 @@ VRHudAreas getVRHudAreas() {
 		}
 	}
 	
+	areas.subtitles = ARX_SPEECH_GetSubtitleArea();
+	if(pTextManage && !pTextManage->Empty()) {
+		// The name of an object pointed at in the world (see manageEntityDescription) is shown above it
+		if(FlyingOverIO && FlyingOverIO->show == SHOW_FLAG_IN_SCENE && notification_area().empty()) {
+			areas.label = pTextManage->area();
+			areas.labelEntity = FlyingOverIO;
+		} else {
+			areas.info = pTextManage->area();
+		}
+	}
+	if(Rect notifications = notification_area(); !notifications.empty()) {
+		areas.info = areas.info.empty() ? notifications : (areas.info | notifications);
+	}
+	
 	bool cinematic = !cinematicIsStopped() || cinematicBorder.isActive();
 	if(cinematic || player.lifePool.current <= 0.f) {
 		return areas;
@@ -103,6 +121,7 @@ VRHudAreas getVRHudAreas() {
 	if(player.Interface & INTER_LIFE_MANA) {
 		areas.health = toPixels(g_hudRoot.healthGaugeArea());
 		areas.mana = toPixels(g_hudRoot.manaGaugeArea());
+		areas.equipment = toPixels(g_hudRoot.damagedEquipmentArea());
 	}
 	
 	if(player.Interface & (INTER_INVENTORY | INTER_INVENTORYALL)) {

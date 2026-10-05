@@ -465,6 +465,10 @@ void invalidateVRTracking() {
 	g_trackingToWorld.valid = false;
 }
 
+bool isVRPlayerView() {
+	return g_trackingToWorld.valid;
+}
+
 bool isVRPhysicallyCrouching() {
 	return g_physicallyCrouching;
 }

@@ -705,6 +705,49 @@ bool ARX_INTERFACE_OpenCorpse(Entity & npc) {
 	return true;
 }
 
+void ARX_INTERFACE_ActivateEntity(Entity & t) {
+
+	if(t.ioflags & IO_NPC) {
+		if(t.script.valid) {
+			if(t._npcdata->lifePool.current > 0.f) {
+				SendIOScriptEvent(entities.player(), &t, SM_CHAT);
+				DRAGGING = false;
+			} else {
+				ARX_INTERFACE_OpenCorpse(t);
+			}
+		}
+		return;
+	}
+
+	if(t.inventory) {
+
+		if(player.Interface & INTER_STEAL) {
+			if(ioSteal && &t != ioSteal) {
+				SendIOScriptEvent(entities.player(), ioSteal, SM_STEAL, "off");
+				player.Interface &= ~INTER_STEAL;
+			}
+		}
+
+		g_secondaryInventoryHud.open(&t);
+
+		if(player.Interface & INTER_INVENTORYALL) {
+			ARX_SOUND_PlayInterface(g_snd.BACKPACK, Random::getf(0.9f, 1.1f));
+			g_playerInventoryHud.close();
+		}
+
+		if(g_secondaryInventoryHud.isOpen()) {
+			bForceEscapeFreeLook = true;
+			lOldTruePlayerMouseLook = !TRUE_PLAYER_MOUSELOOK_ON;
+		}
+
+	} else if(t.script.valid) {
+		SendIOScriptEvent(entities.player(), &t, SM_ACTION);
+	}
+
+	DRAGGING = false;
+
+}
+
 long CSEND = 0;
 long MOVE_PRECEDENCE = 0;
 
@@ -721,43 +764,7 @@ void ArxGame::managePlayerControls() {
 		Entity * t = InterClick(DANAEMouse);
 
 		if(t) {
-			if(t->ioflags & IO_NPC) {
-				if(t->script.valid) {
-					if(t->_npcdata->lifePool.current > 0.f) {
-						SendIOScriptEvent(entities.player(), t, SM_CHAT);
-						DRAGGING = false;
-					} else {
-						ARX_INTERFACE_OpenCorpse(*t);
-					}
-				}
-			} else {
-				if(t->inventory) {
-					
-					if(player.Interface & INTER_STEAL) {
-						if(ioSteal && t != ioSteal) {
-							SendIOScriptEvent(entities.player(), ioSteal, SM_STEAL, "off");
-							player.Interface &= ~INTER_STEAL;
-						}
-					}
-					
-					g_secondaryInventoryHud.open(t);
-					
-					if(player.Interface & INTER_INVENTORYALL) {
-						ARX_SOUND_PlayInterface(g_snd.BACKPACK, Random::getf(0.9f, 1.1f));
-						g_playerInventoryHud.close();
-					}
-					
-					if(g_secondaryInventoryHud.isOpen()) {
-						bForceEscapeFreeLook = true;
-						lOldTruePlayerMouseLook = !TRUE_PLAYER_MOUSELOOK_ON;
-					}
-					
-				} else if(t->script.valid) {
-					SendIOScriptEvent(entities.player(), t, SM_ACTION);
-				}
-				
-				DRAGGING = false;
-			}
+			ARX_INTERFACE_ActivateEntity(*t);
 		}
 	}
 	

@@ -142,3 +142,23 @@ void TextManager::Clear() {
 bool TextManager::Empty() const {
 	return m_entries.empty();
 }
+
+Rect TextManager::area() const {
+
+	Rect result;
+	for(const ManagedText & entry : m_entries) {
+		Rect bounds(entry.bounds);
+		if(entry.font) {
+			// Only the text itself if it fits on one line
+			Font::TextSize size = entry.font->getTextSize(entry.text);
+			if(size.advance() <= bounds.width()) {
+				bounds.right = bounds.left + size.advance() + 2;
+				s32 height = std::max(size.height(), s32(entry.font->getLineHeight()));
+				bounds.bottom = std::min(bounds.bottom, bounds.top + height + 2);
+			}
+		}
+		result = result.empty() ? bounds : (result | bounds);
+	}
+
+	return result;
+}

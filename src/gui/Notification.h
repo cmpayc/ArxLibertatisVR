@@ -22,6 +22,8 @@
 
 #include <string>
 
+#include "math/Rectangle.h"
+
 void notification_ClearAll();
 
 /*!
@@ -31,5 +33,8 @@ void notification_ClearAll();
 void notification_add(std::string && text);
 
 void notification_check();
+
+//! \return the screen area where notifications were drawn in this frame, or an empty rectangle
+Rect notification_area();
 
 #endif // ARX_GUI_NOTIFICATION_H

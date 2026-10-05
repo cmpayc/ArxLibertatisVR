@@ -425,6 +425,8 @@ public:
 	Rectf healthGaugeArea() { return healthGauge.rect(); }
 	//! Screen area of the mana gauge, as laid out in the last frame
 	Rectf manaGaugeArea() { return manaGauge.rect(); }
+	//! Screen area of the damaged equipment icons (weapon and armor status), as laid out in the last frame
+	Rectf damagedEquipmentArea() { return damagedEquipmentGui.rect(); }
 };
 
 extern HudRoot g_hudRoot;

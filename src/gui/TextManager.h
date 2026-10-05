@@ -49,6 +49,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #include "core/TimeTypes.h"
 #include "graphics/Color.h"
+#include "math/Rectangle.h"
 #include "math/Types.h"
 
 class Font;
@@ -65,6 +66,8 @@ public:
 	void Render();
 	void Clear();
 	bool Empty() const;
+	//! \return the screen area of all texts (only the text of single lines), or an empty rectangle
+	Rect area() const;
 	
 private:
 	
