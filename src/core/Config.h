@@ -227,6 +227,7 @@ public:
 		std::string runtime;
 
 		float worldScale;
+		//! Raise the view above the eyes of the player model (meters)
 		float heightOffset;
 
 		bool snapTurn;

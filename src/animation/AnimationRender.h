@@ -124,4 +124,7 @@ void animateSkeleton(Entity * entity, AnimLayer * animlayer, Skeleton & skeleton
  */
 extern void (*g_playerSkeletonHook)(Entity & player, Skeleton & skeleton);
 
+//! Extra scale for drawing the player model (VR: matches the user's height), does not affect movement
+extern float g_playerModelScale;
+
 #endif // ARX_ANIMATION_ANIMATIONRENDER_H

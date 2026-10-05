@@ -21,7 +21,6 @@
 
 #include <algorithm>
 #include <map>
-#include <sstream>
 #include <string_view>
 
 #include <glm/gtc/constants.hpp>
@@ -33,6 +32,7 @@
 #include "game/Player.h"
 #include "graphics/GraphicsTypes.h"
 #include "graphics/Math.h"
+#include "graphics/Raycast.h"
 #include "io/log/Logger.h"
 #include "vr/VRCamera.h"
 #include "vr/VRControls.h"
@@ -41,13 +41,6 @@
 
 
 namespace {
-
-std::string formatBodyVector(const Vec3f & v) {
-	std::ostringstream oss;
-	oss.precision(1);
-	oss << std::fixed << '(' << v.x << ", " << v.y << ", " << v.z << ')';
-	return oss.str();
-}
 
 //! The bones of one arm of the player model
 struct ArmBones {
@@ -70,10 +63,18 @@ struct SpineBones {
 	[[nodiscard]] bool valid() const { return belt && chest && neck; }
 };
 
+struct LegBones {
+	VertexGroupId hip;
+	VertexGroupId knee;
+	VertexGroupId ankle;
+	[[nodiscard]] bool valid() const { return hip && knee && ankle; }
+};
+
 struct BodyBones {
 	const EERIE_3DOBJ * object = nullptr;
 	SpineBones spine;
 	ArmBones arms[VRHandCount];
+	LegBones legs[VRHandCount]; //!< Left and right
 };
 BodyBones g_bones;
 
@@ -98,6 +99,12 @@ const BodyBones & getBodyBones(const EERIE_3DOBJ & object) {
 		g_bones.spine.belt = findBodyGroup(object, "belt");
 		g_bones.spine.chest = findBodyGroup(object, "chest");
 		g_bones.spine.neck = findBodyGroup(object, "neck");
+		const char * const legSides[VRHandCount] = { "left", "right" };
+		for(size_t leg = 0; leg < VRHandCount; leg++) {
+			g_bones.legs[leg].hip = findBodyGroup(object, std::string(legSides[leg]) + "_hip");
+			g_bones.legs[leg].knee = findBodyGroup(object, std::string(legSides[leg]) + "_knee");
+			g_bones.legs[leg].ankle = findBodyGroup(object, std::string(legSides[leg]) + "_ankle");
+		}
 		if(!g_bones.spine.valid()) {
 			LogWarning << "VR: the player model has no complete spine, it will not lean";
 		}
@@ -190,22 +197,124 @@ void aimBonePartially(Skeleton & skeleton, VertexGroupId bone, VertexGroupId chi
 }
 
 /*!
- * Bend the spine so that the neck of the model is below and behind the eyes of the user:
- * leaning and peeking tilt the torso instead of moving the feet. The lower spine and the chest share the bend.
+ * Lower the hips of the model (squatting) while the feet stay where the animation put them: two-bone IK for the
+ * legs, with the knees bending forwards and a little outwards. The drop is limited to how far the legs can fold.
  */
-void solveSpine(Skeleton & skeleton, const SpineBones & spine) {
+void lowerHips(Skeleton & skeleton, const LegBones (&legs)[VRHandCount], float drop) {
 	
-	Vec3f eyes;
-	if(!getVREyeCenter(eyes)) {
+	const float MinFold = 0.3f; // Shortest hip to ankle distance, relative to the length of the leg
+	
+	struct Foot {
+		Vec3f position;
+		glm::quat orientation;
+	};
+	Foot feet[VRHandCount];
+	for(size_t leg = 0; leg < VRHandCount; leg++) {
+		if(!legs[leg].valid()) {
+			return;
+		}
+		const Bone & hip = skeleton.bones[legs[leg].hip];
+		const Bone & knee = skeleton.bones[legs[leg].knee];
+		const Bone & ankle = skeleton.bones[legs[leg].ankle];
+		feet[leg] = { ankle.anim.trans, ankle.anim.quat };
+		float length = glm::distance(hip.anim.trans, knee.anim.trans) + glm::distance(knee.anim.trans, ankle.anim.trans);
+		drop = std::min(drop, std::max(ankle.anim.trans.y - hip.anim.trans.y - length * MinFold, 0.f)); // y down
+	}
+	if(drop <= 0.f) {
 		return;
 	}
 	
+	for(VertexGroupId bone : skeleton.bones.handles()) {
+		if(!skeleton.bones[bone].father) {
+			skeleton.bones[bone].anim.trans.y += drop;
+			updateBoneDescendants(skeleton, bone);
+		}
+	}
+	
+	const Vec3f forward = angleToVectorXZ(player.angle.getYaw());
+	const Vec3f right = angleToVectorXZ(player.angle.getYaw() - 90.f);
+	for(size_t leg = 0; leg < VRHandCount; leg++) {
+		const LegBones & bones = legs[leg];
+		const Vec3f hip = skeleton.bones[bones.hip].anim.trans;
+		float upper = glm::distance(hip, skeleton.bones[bones.knee].anim.trans);
+		float lower = glm::distance(skeleton.bones[bones.knee].anim.trans, skeleton.bones[bones.ankle].anim.trans);
+		Vec3f toFoot = feet[leg].position - hip;
+		float distance = glm::length(toFoot);
+		if(distance < 0.001f) {
+			continue;
+		}
+		Vec3f direction = toFoot / distance;
+		distance = glm::clamp(distance, std::abs(upper - lower) + 0.1f, upper + lower - 0.1f);
+		Vec3f outwards = (leg == VRHandRight) ? right : -right;
+		Vec3f pole = forward + outwards * 0.3f;
+		Vec3f bend = pole - direction * glm::dot(pole, direction);
+		if(glm::length(bend) < 0.001f) {
+			bend = forward;
+		}
+		bend = glm::normalize(bend);
+		float cosAngle = glm::clamp((upper * upper + distance * distance - lower * lower) / (2.f * upper * distance),
+		                            -1.f, 1.f);
+		float sinAngle = std::sqrt(1.f - cosAngle * cosAngle);
+		Vec3f knee = hip + (direction * cosAngle + bend * sinAngle) * upper;
+		aimBone(skeleton, bones.hip, bones.knee, knee);
+		aimBone(skeleton, bones.knee, bones.ankle, hip + direction * distance);
+		// Keep the foot flat on the floor
+		skeleton.bones[bones.ankle].anim.quat = feet[leg].orientation;
+		updateBoneDescendants(skeleton, bones.ankle);
+	}
+	
+}
+
+/*!
+ * Bend the spine so that the neck of the model is below and behind the eyes of the user:
+ * leaning and peeking tilt the torso instead of moving the feet. The lower spine and the chest share the bend.
+ */
+void solveSpine(Skeleton & skeleton, const SpineBones & spine, const LegBones (&legs)[VRHandCount]) {
+	
+	Vec3f eyes;
+	glm::mat3x3 head;
+	if(!getVRHeadPose(eyes, head)) {
+		return;
+	}
+
 	/*
-	 * The neck joint is 17 cm below the eyes. It is placed further behind the eyes than in the player model
+	 * The head turns around a pivot at the top of the neck, below and behind the eyes: looking down moves the
+	 * eyes down and forwards, but not the neck. Place the neck relative to that pivot (real size, from the
+	 * tracking) instead of the eyes, so that only moving the head lowers the body.
+	 */
+	const float trackingScale = 100.f * config.vr.worldScale;
+	const Vec3f PivotFromEyes = Vec3f(0.f, 10.f, -8.f) * trackingScale / 100.f; // head space, cm
+	Vec3f pivot = eyes + head * PivotFromEyes;
+
+	/*
+	 * The neck joint is 17 cm below the eyes of the (scaled) model, plus the height_offset the view is raised by.
+	 * It is placed further behind the eyes than in the player model
 	 * (6.6 cm) so that the view is not inside the neck opening of the hidden head.
 	 */
 	Vec3f forward = angleToVectorXZ(player.angle.getYaw());
-	Vec3f neck = eyes + Vec3f(0.f, 17.f, 0.f) - forward * (config.vr.bodyOffset * 100.f);
+	// Looking straight ahead, the pivot is level with the head: this gives the same neck as relative to the eyes
+	Vec3f neck = pivot + Vec3f(0.f, 17.f * getVRBodyScale() - PivotFromEyes.y + config.vr.heightOffset * 100.f, 0.f)
+	             - forward * (config.vr.bodyOffset * 100.f + PivotFromEyes.z);
+	
+	/*
+	 * The crouch animation cannot go as low as a real squat: lower the hips (the whole model, before bending the
+	 * spine, so that the torso does not tip down towards a neck target below the hips) and bend the knees so that
+	 * the feet stay on the floor.
+	 */
+	const float Tolerance = 5.f;
+	{
+		// Leaning keeps the neck at the length of the spine from the hips: only drop when it is closer
+		const Vec3f belt = skeleton.bones[spine.belt].anim.trans;
+		float spineLength = glm::distance(belt, skeleton.bones[spine.neck].anim.trans);
+		float horizontal = glm::length(Vec2f(neck.x - belt.x, neck.z - belt.z));
+		float vertical = std::sqrt(std::max(spineLength * spineLength - horizontal * horizontal, 0.f));
+		// Standing still the head is often a few cm below the highest it has been: do not squat for that
+		const float SquatTolerance = 15.f;
+		float drop = neck.y + vertical - belt.y - SquatTolerance; // y points down
+		if(drop > 0.f) {
+			lowerHips(skeleton, legs, drop);
+		}
+	}
 	
 	aimBonePartially(skeleton, spine.belt, spine.neck, neck, 0.5f);
 	aimBone(skeleton, spine.chest, spine.neck, neck);
@@ -215,7 +324,6 @@ void solveSpine(Skeleton & skeleton, const SpineBones & spine) {
 	 * crouching while the player sits), the shoulders would stay out of reach of the hands. Move the upper body
 	 * so that the neck reaches its place, ignoring small differences so that standing looks the same.
 	 */
-	const float Tolerance = 5.f;
 	const float MaxShift = 60.f;
 	Vec3f error = neck - skeleton.bones[spine.neck].anim.trans;
 	float length = glm::length(error);
@@ -240,6 +348,8 @@ glm::mat3x3 makeBodyFrame(const Vec3f & primary, const Vec3f & secondary) {
  * The wrist joint position relative to the grip pose is configurable: config.vr.handOffset.
  * TODO(vr) Calibrate per controller type
  */
+bool g_handInWall[VRHandCount] = { false, false };
+
 const Vec3f FingerDirection(0.f, -0.5f, -1.f); //!< From the wrist to the knuckles
 const Vec3f ThumbDirection(0.f, 1.f, 0.f);     //!< The thumb rests on top of the controller
 
@@ -314,6 +424,25 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 		return;
 	}
 	Vec3f direction = toTarget / distance;
+
+	/*
+	 * Walls stop the hand: the wrist stays far enough in front of them for the palm and fingers, with a short
+	 * vibration when the hand hits a wall. Objects do not stop the hand (they can be grabbed).
+	 */
+	const float HandLength = 5.f; // cm from the wrist to the wall: the palm usually faces the wall, not the fingers
+	bool inWall = false;
+	if(RaycastResult hit = raycastScene(shoulder, target + direction * HandLength, POLY_TRANS, RaycastIgnorePlayer)) {
+		float allowed = std::max(glm::distance(shoulder, hit.pos) - HandLength, 0.f);
+		if(allowed < distance) {
+			distance = allowed;
+			inWall = true;
+		}
+	}
+	if(inWall && !g_handInWall[hand]) {
+		g_vr->getInput().vibrate(hand, 0.2f, 0.03f);
+	}
+	g_handInWall[hand] = inWall;
+
 	distance = glm::clamp(distance, std::abs(upperLength - lowerLength) + 0.1f, upperLength + lowerLength - 0.1f);
 	target = shoulder + direction * distance;
 
@@ -468,7 +597,7 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 	
 	// The spine first: it moves the shoulders
 	if(bones.spine.valid()) {
-		solveSpine(skeleton, bones.spine);
+		solveSpine(skeleton, bones.spine, bones.legs);
 	}
 
 	for(size_t hand = 0; hand < VRHandCount; hand++) {
@@ -489,62 +618,9 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 
 }
 
-void logVRPlayerSkeleton(const Entity & entity) {
-
-	static bool logged = false;
-	if(logged || !entity.obj || !entity.obj->m_skeleton) {
-		return;
-	}
-	logged = true;
-
-	const EERIE_3DOBJ & obj = *entity.obj;
-	const Skeleton & skeleton = *obj.m_skeleton;
-
-	// Positions in the body frame: x right, y down, z forward, relative to the player position
-	glm::mat3x3 toBody = glm::mat3x3(toRotationMatrix(Anglef(0.f, entity.angle.getYaw(), 0.f)));
-	auto bodyPosition = [&](VertexId vertex) {
-		return formatBodyVector(toBody * (obj.vertexWorldPositions[vertex].v - entity.pos));
-	};
-
-	LogInfo << "VR skeleton of " << obj.file << ": " << obj.grouplist.size() << " groups, "
-	        << obj.vertexlist.size() << " vertices, " << obj.facelist.size() << " faces";
-
-	for(VertexGroupId group : obj.grouplist.handles()) {
-		const VertexGroup & info = obj.grouplist[group];
-		const Bone & bone = skeleton.bones[group];
-		LogInfo << "VR skeleton:  group " << size_t(group) << " \"" << info.name << "\" parent "
-		        << (bone.father ? std::to_string(size_t(bone.father)) : std::string("-"))
-		        << ", " << info.indexes.size() << " vertices, rest " << formatBodyVector(bone.transinit_global)
-		        << ", now " << bodyPosition(info.origin);
-	}
-
-	for(VertexSelectionId selection : obj.selections.handles()) {
-		LogInfo << "VR skeleton:  selection " << size_t(selection) << " \"" << obj.selections[selection].name
-		        << "\", " << obj.selections[selection].selected.size() << " vertices";
-	}
-
-	for(const EERIE_ACTIONLIST & action : obj.actionlist) {
-		LogInfo << "VR skeleton:  action point \"" << action.name << "\" vertex " << size_t(action.idx)
-		        << " now " << bodyPosition(action.idx);
-	}
-
-	const EERIE_FASTACCESS & fast = obj.fastaccess;
-	auto logAttach = [&](const char * name, VertexId vertex) {
-		if(vertex) {
-			LogInfo << "VR skeleton:  " << name << " vertex " << size_t(vertex) << " now " << bodyPosition(vertex);
-		}
-	};
-	logAttach("view_attach", fast.view_attach);
-	logAttach("primary_attach", fast.primary_attach);
-	logAttach("left_attach", fast.left_attach);
-	logAttach("weapon_attach", fast.weapon_attach);
-	logAttach("head_group_origin", fast.head_group_origin);
-
-}
-
 Vec3f getVRModelOffset() {
 	// The neck of the player model is 5 cm behind its feet: move the model back so that the torso stays upright
 	// when the neck is placed config.vr.bodyOffset behind the eyes, which are above the feet
-	float back = std::max(config.vr.bodyOffset * 100.f - 5.f, 0.f);
+	float back = std::max(config.vr.bodyOffset * 100.f - 5.f * getVRBodyScale(), 0.f);
 	return -angleToVectorXZ(player.angle.getYaw()) * back;
 }

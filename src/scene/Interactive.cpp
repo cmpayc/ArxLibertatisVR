@@ -123,6 +123,13 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #include "util/Range.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "animation/Skeleton.h"
+#include "vr/VRControls.h"
+#endif
+
 
 long HERO_SHOW_1ST = 1;
 
@@ -245,7 +252,51 @@ void ARX_INTERACTIVE_Show_Hide_1st(Entity * io, bool hide1st) {
 	}
 	
 	HERO_SHOW_1ST = long(hide1st);
-	
+
+	#if ARX_HAVE_OPENXR
+	/*
+	 * In VR the user can look down at the body: the "1st" selection would hide the whole upper body. Only hide the
+	 * neck and the head (the bones below the neck: head, jaw, eyes, ...), which could block the view.
+	 */
+	if(isVRActive() && io == entities.player() && io->obj && io->obj->m_skeleton) {
+		const Skeleton & skeleton = *io->obj->m_skeleton;
+		VertexGroupId neck = EERIE_OBJECT_GetGroup(io->obj, "neck");
+		if(neck) {
+			// The most specific group of each vertex: child bones come after their parents
+			util::HandleVector<VertexId, VertexGroupId> vertexGroups(io->obj->vertexlist.size());
+			for(VertexGroupId group : io->obj->grouplist.handles()) {
+				for(VertexId vertex : io->obj->grouplist[group].indexes) {
+					vertexGroups[vertex] = group;
+				}
+			}
+			VertexSelectionId selection = EERIE_OBJECT_GetSelection(io->obj, "1st");
+			auto isHeadOrNeck = [&](VertexGroupId group) {
+				for(; group; group = skeleton.bones[group].father) {
+					if(group == neck) {
+						return true;
+					}
+				}
+				return false;
+			};
+			for(EERIE_FACE & face : io->obj->facelist) {
+				bool head = false;
+				bool firstPerson = false;
+				for(VertexId vertex : face.vid) {
+					head = head || isHeadOrNeck(vertexGroups[vertex]);
+					firstPerson = firstPerson || (selection && IsInSelection(io->obj, vertex, selection));
+				}
+				if(head && hide1st) {
+					face.facetype |= POLY_HIDE;
+				} else if(head || firstPerson) {
+					face.facetype &= ~POLY_HIDE;
+				}
+			}
+			ARX_INTERACTIVE_HideGore(entities.player(), false);
+			return;
+		}
+	}
+	#endif
+
 	if(VertexSelectionId selection = EERIE_OBJECT_GetSelection(io->obj, "1st")) {
 		for(EERIE_FACE & face : io->obj->facelist) {
 			for(VertexId vertex : face.vid) {

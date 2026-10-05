@@ -65,10 +65,13 @@ int g_previousHands = 0;
 Vec2f g_headVelocity(0.f); // horizontal, m/s
 Vec2f g_handsVelocity(0.f);
 float g_settleTime = 0.f; // how long the head has been offset without leaning
-bool g_standingEyeValid = false;
-float g_standingEyeOffset = 0.f; // eye height above player.pos while standing (game units, y down)
+bool g_userEyeHeightValid = false;
+float g_userEyeHeight = 0.f; // highest the head has been: the user's standing eye height (stage space, meters)
+float g_bodyScale = 1.f; // scale of the player model to match the user's height
+const float ModelEyeHeight = 169.f; // eye height of the standing player model (human_base) above its feet, cm
 Vec3f g_eyeCenter(0.f); // world position of the eyes in the last prepared player frame
 bool g_eyeCenterValid = false;
+glm::mat3x3 g_headRotation(1.f); // head orientation (Arx basis: x right, y down, z forward) to world
 // Mapping from the tracking space to the game world for the last prepared frame
 struct TrackingToWorld {
 	bool valid = false;
@@ -132,6 +135,11 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	} else {
 		g_standingHeight = std::max(g_standingHeight - 0.002f * g_vr->getFrameDuration(), headStage.y);
 	}
+	// The user's height does not adapt to sitting down: the player model keeps its size
+	if(!g_userEyeHeightValid || headStage.y > g_userEyeHeight) {
+		g_userEyeHeight = headStage.y;
+		g_userEyeHeightValid = true;
+	}
 	
 	if(g_recenterRequested) {
 		// Keep the current lean: the feet of the player do not move when recentering
@@ -168,21 +176,25 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 		g_playSpaceYaw = MAKEANGLE(g_playSpaceYaw + vr::wrapDegrees(bodyYaw - g_lastBodyYaw));
 		heading = g_playSpaceYaw;
 		/*
-		 * Above the body center at eye height: the head vertex of the player model swings around when it turns.
-		 * While crouching, keep the standing eye height: the real head already lowers the view.
+		 * Scale the player model (from its feet) so that its eyes are at the user's real eye height: the arms and
+		 * shoulders then match the user's reach. The view is at the eyes of the scaled model.
 		 */
-		float eyeOffset = g_playerCameraStablePos.y - player.pos.y;
-		if(!(player.m_currentMovement & PLAYER_CROUCH)) {
-			if(!g_standingEyeValid || std::abs(eyeOffset - g_standingEyeOffset) > 50.f) {
-				// First frame or a large change (level load, teleport): take the value directly
-				g_standingEyeOffset = eyeOffset;
-				g_standingEyeValid = true;
-			} else {
-				// Smoothed, so that the stand-up animation does not cause a dip
-				g_standingEyeOffset += (eyeOffset - g_standingEyeOffset) * (1.f - std::exp(-g_vr->getFrameDuration() * 2.f));
-			}
+		const float MinBodyScale = 0.85f;
+		const float MaxBodyScale = 1.25f;
+		/*
+		 * The eye height of the standing player model (measured, about 169 cm above its feet). It is a constant:
+		 * measuring it from the animation picks up jumps, crouching and standing up.
+		 */
+		const float modelEyeHeight = ModelEyeHeight;
+		float targetScale = 1.f;
+		if(g_userEyeHeight > 0.5f) {
+			targetScale = glm::clamp(g_userEyeHeight * scale / modelEyeHeight, MinBodyScale, MaxBodyScale);
 		}
-		origin = Vec3f(player.pos.x, player.pos.y + (g_standingEyeValid ? g_standingEyeOffset : eyeOffset), player.pos.z);
+		g_bodyScale += (targetScale - g_bodyScale) * (1.f - std::exp(-g_vr->getFrameDuration() * 2.f));
+
+		origin = Vec3f(player.pos.x, player.pos.y - player.baseHeight() - g_bodyScale * modelEyeHeight, player.pos.z);
+		// Optionally raise the view further (y points down)
+		origin.y -= config.vr.heightOffset * 100.f;
 	} else {
 		// Scripted cameras: the camera defines the origin and heading
 		heading = cam.angle.getYaw();
@@ -364,6 +376,7 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 
 	if(isPlayer) {
 		g_eyeCenter = center;
+		g_headRotation = eyeRotation[0];
 		g_eyeCenterValid = true;
 		setVRHeadYaw(cam.angle.getYaw());
 		updateBodyYaw(cam.angle.getYaw());
@@ -442,8 +455,18 @@ bool isVRPhysicallyCrouching() {
 	return g_physicallyCrouching;
 }
 
+float getVRBodyScale() {
+	return g_bodyScale;
+}
+
 bool getVREyeCenter(Vec3f & position) {
 	position = g_eyeCenter;
+	return g_eyeCenterValid;
+}
+
+bool getVRHeadPose(Vec3f & position, glm::mat3x3 & rotation) {
+	position = g_eyeCenter;
+	rotation = g_headRotation;
 	return g_eyeCenterValid;
 }
 

@@ -39,7 +39,4 @@ void applyVRBodyIK(Entity & player, Skeleton & skeleton);
 //! \return where the player model is drawn relative to the player position in VR
 Vec3f getVRModelOffset();
 
-//! Write the player skeleton (bones, hierarchy, attach points) to the log once, for development
-void logVRPlayerSkeleton(const Entity & player);
-
 #endif // ARX_VR_VRBODY_H

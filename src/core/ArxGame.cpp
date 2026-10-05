@@ -1758,6 +1758,7 @@ void ArxGame::updateLevel() {
 			
 			Vec3f bodyPosition = entity->pos;
 			#if ARX_HAVE_OPENXR
+			g_playerModelScale = isVRActive() ? getVRBodyScale() : 1.f;
 			if(isVRActive()) {
 				bodyPosition += getVRModelOffset();
 			}
@@ -1770,12 +1771,6 @@ void ArxGame::updateLevel() {
 			                        framedelay,
 			                        entity,
 			                        true);
-			
-			#if ARX_HAVE_OPENXR
-			if(isVRActive()) {
-				logVRPlayerSkeleton(*entity);
-			}
-			#endif
 		}
 		
 		if((player.Interface & INTER_COMBATMODE) && entities.player()->animlayer[1].cur_anim)

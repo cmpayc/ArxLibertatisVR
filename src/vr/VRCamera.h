@@ -53,6 +53,12 @@ bool isVRPhysicallyCrouching();
 //! \return the world position between the eyes in the last prepared player frame
 bool getVREyeCenter(Vec3f & position);
 
+//! The eye center and the head orientation (Arx basis: x right, y down, z forward, to world) in the last frame
+bool getVRHeadPose(Vec3f & position, glm::mat3x3 & rotation);
+
+//! \return the scale of the player model, so that its eyes are at the user's real eye height
+float getVRBodyScale();
+
 /*!
  * Convert a ray in the tracking space (OpenXR stage space, e.g. a controller aim pose) to the game world,
  * using the mapping of the last frame prepared by \ref prepareVRCamera.
