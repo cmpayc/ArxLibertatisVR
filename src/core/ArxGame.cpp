@@ -172,6 +172,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #if ARX_HAVE_OPENXR
 #include "vr/VRBody.h"
 #include "vr/VRCamera.h"
+#include "vr/VRCombat.h"
 #include "vr/VRControls.h"
 #include "vr/VRGrab.h"
 #include "vr/VRSystem.h"
@@ -1775,7 +1776,16 @@ void ArxGame::updateLevel() {
 			                        true);
 		}
 		
-		if((player.Interface & INTER_COMBATMODE) && entities.player()->animlayer[1].cur_anim)
+		bool vrMelee = false;
+		#if ARX_HAVE_OPENXR
+		// VR: swinging the weapon strikes instead of the strike animations
+		vrMelee = isVRMeleeActive();
+		if(vrMelee) {
+			updateVRCombat();
+		}
+		#endif
+
+		if(!vrMelee && (player.Interface & INTER_COMBATMODE) && entities.player()->animlayer[1].cur_anim)
 			ManageCombatModeAnimations();
 
 		if(entities.player()->animlayer[1].cur_anim)

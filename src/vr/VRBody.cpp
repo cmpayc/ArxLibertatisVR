@@ -351,6 +351,7 @@ glm::mat3x3 makeBodyFrame(const Vec3f & primary, const Vec3f & secondary) {
  * TODO(vr) Calibrate per controller type
  */
 bool g_handInWall[VRHandCount] = { false, false };
+bool g_weaponInWall[VRHandCount] = { false, false };
 
 // The wrist joint and the controller orientation of each hand of the posed model, in the world
 struct WristPose {
@@ -416,7 +417,10 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 	updateBoneDescendants(skeleton, arm.hand);
 }
 
-void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPose & grip) {
+/*!
+ * \param reach Length of the held item (weapon) from the fist, 0 if the hand is empty: it is stopped by walls too
+ */
+void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPose & grip, float reach) {
 
 	Vec3f gripPosition;
 	glm::quat gripOrientation;
@@ -426,6 +430,25 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 
 	const float scale = 100.f * config.vr.worldScale;
 	Vec3f target = gripPosition + gripOrientation * (vr::toArxBasis(config.vr.handOffset) * scale);
+
+	/*
+	 * A held weapon stops at walls: the hand is pulled back along the blade (which points through the fist, see
+	 * alignHeldItem) so that the tip rests on the wall, with a short vibration on contact.
+	 */
+	bool weaponInWall = false;
+	if(reach > 0.f) {
+		const float WristToFist = 8.f; // cm, the item is held in front of the wrist
+		Vec3f blade = glm::normalize(gripOrientation * Vec3f(0.f, 0.f, 1.f));
+		Vec3f tip = target + blade * (WristToFist + reach);
+		if(RaycastResult hit = raycastScene(target, tip, POLY_TRANS, RaycastIgnorePlayer)) {
+			target -= blade * glm::distance(hit.pos, tip);
+			weaponInWall = true;
+		}
+	}
+	if(weaponInWall && !g_weaponInWall[hand]) {
+		g_vr->getInput().vibrate(hand, 0.4f, 0.05f);
+	}
+	g_weaponInWall[hand] = weaponInWall;
 
 	const Vec3f shoulder = skeleton.bones[arm.shoulder].anim.trans;
 	const float upperLength = glm::distance(shoulder, skeleton.bones[arm.elbow].anim.trans);
@@ -536,16 +559,16 @@ bool isHoldingItem(const EERIE_3DOBJ & object, VRHand hand) {
 	return false;
 }
 
-//! Direction of the longest extent of an object from its attach point (the blade of a weapon), in object space
-Vec3f getHeldItemAxis(const EERIE_3DOBJ & object, VertexId attach) {
-	
-	static std::map<const EERIE_3DOBJ *, Vec3f> s_axes;
-	auto it = s_axes.find(&object);
-	if(it != s_axes.end()) {
+//! The longest extent of an object from its attach point (the blade of a weapon), in object space
+Vec3f getHeldItemExtent(const EERIE_3DOBJ & object, VertexId attach) {
+
+	static std::map<const EERIE_3DOBJ *, Vec3f> s_extents;
+	auto it = s_extents.find(&object);
+	if(it != s_extents.end()) {
 		return it->second;
 	}
-	
-	Vec3f axis(0.f);
+
+	Vec3f extent(0.f);
 	if(attach && size_t(attach) < object.vertexlist.size()) {
 		const Vec3f origin = object.vertexlist[attach].v;
 		float farthest = 0.f;
@@ -553,16 +576,30 @@ Vec3f getHeldItemAxis(const EERIE_3DOBJ & object, VertexId attach) {
 			float distance = glm::distance(vertex.v, origin);
 			if(distance > farthest) {
 				farthest = distance;
-				axis = vertex.v - origin;
+				extent = vertex.v - origin;
 			}
 		}
-		if(farthest > 0.001f) {
-			axis = glm::normalize(axis);
+	}
+
+	s_extents[&object] = extent;
+	return extent;
+}
+
+//! Direction of the longest extent of an object from its attach point (the blade of a weapon), in object space
+Vec3f getHeldItemAxis(const EERIE_3DOBJ & object, VertexId attach) {
+	Vec3f extent = getHeldItemExtent(object, attach);
+	return (glm::length(extent) > 0.001f) ? glm::normalize(extent) : Vec3f(0.f);
+}
+
+//! Length of the item held in a hand of the player model from the hand (its blade), 0 if the hand is empty
+float getHeldItemReach(const EERIE_3DOBJ & object, VRHand hand) {
+	VertexId vertex = getHoldVertex(object, hand);
+	for(const EERIE_LINKED & link : object.linked) {
+		if(vertex && link.lidx == vertex && link.obj) {
+			return glm::length(getHeldItemExtent(*link.obj, link.lidx2)) * (link.io ? link.io->scale : 1.f);
 		}
 	}
-	
-	s_axes[&object] = axis;
-	return axis;
+	return 0.f;
 }
 
 /*!
@@ -627,7 +664,7 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 		const ArmBones & arm = bones.arms[hand];
 		if(arm.valid()) {
 			const VRHandState & state = input.getHand(VRHand(hand));
-			solveArm(skeleton, arm, VRHand(hand), state.grip);
+			solveArm(skeleton, arm, VRHand(hand), state.grip, getHeldItemReach(*entity.obj, VRHand(hand)));
 			if(state.grip.valid) {
 				if(isHoldingItem(*entity.obj, VRHand(hand))) {
 					// The animation of the game wraps the fingers around the handle: keep it, only aim the item
@@ -671,6 +708,10 @@ const std::vector<bool> * getVRUpperLayerBones(const EERIE_3DOBJ & object) {
 	}
 	
 	return &s_mask;
+}
+
+bool isVRWeaponInWall(VRHand hand) {
+	return isVRActive() && g_weaponInWall[hand];
 }
 
 bool getVRHipPosition(VRHand side, Vec3f & position) {

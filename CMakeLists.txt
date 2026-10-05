@@ -1060,6 +1060,7 @@ set(GRAPHICS_OPENGL_SOURCES
 set(VR_OPENXR_SOURCES
 	src/vr/VRBody.cpp
 	src/vr/VRCamera.cpp
+	src/vr/VRCombat.cpp
 	src/vr/VRControls.cpp
 	src/vr/VRGrab.cpp
 	src/vr/VRHud.cpp

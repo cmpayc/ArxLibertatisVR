@@ -53,6 +53,9 @@ bool getVRWristPose(VRHand hand, Vec3f & position, glm::quat & gripOrientation);
 //! The hip joint of the posed player model on the given side, in the world, in the last frame
 bool getVRHipPosition(VRHand side, Vec3f & position);
 
+//! \return true while the item held in a hand of the player model (weapon) is stopped by a wall
+bool isVRWeaponInWall(VRHand hand);
+
 /*!
  * The bones that animation layers above the base layer (combat, spells) may move: only the hands and fingers, so that
  * the body keeps its normal pose and the fingers still hold the weapon. The arms follow the controllers.
