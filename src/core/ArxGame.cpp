@@ -173,6 +173,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "vr/VRBody.h"
 #include "vr/VRCamera.h"
 #include "vr/VRControls.h"
+#include "vr/VRGrab.h"
 #include "vr/VRSystem.h"
 #endif
 
@@ -1699,6 +1700,12 @@ void ArxGame::updateLevel() {
 			}
 			
 			// Highlight entity
+			#if ARX_HAVE_OPENXR
+			// The game only pulses the highlight for the cursor: VR hand targets use full intensity
+			if(isVRGrabTarget(entity)) {
+				entity.highlightColor = Color3f::gray(100.f);
+			} else
+			#endif
 			if(&entity == FlyingOverIO && !(entity.ioflags & IO_NPC)) {
 				entity.highlightColor = Color3f::gray(float(iHighLight));
 			} else {
@@ -1732,6 +1739,7 @@ void ArxGame::updateLevel() {
 	// Physical (room-scale) head movement moves the player with collision
 	if(isVRActive()) {
 		applyVRRoomScale();
+		updateVRHandGrabs();
 	}
 	#endif
 

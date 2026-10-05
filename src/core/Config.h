@@ -243,6 +243,17 @@ public:
 		//! How far the neck of the player model is behind the eyes (meters)
 		float bodyOffset;
 
+		//! Radius of the player collision cylinder in VR (meters, the game uses 0.52)
+		float bodyRadius;
+		
+		//! Multiplier for the speed of thrown objects
+		float throwStrength;
+		
+		//! Show the in-game HUD panel (otherwise only open interfaces are shown)
+		bool showHud;
+		//! Draw the in-world hand ray for debugging
+		bool debugRay;
+
 	} vr;
 	
 	// section 'key'

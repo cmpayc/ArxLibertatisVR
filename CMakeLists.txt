@@ -1061,6 +1061,7 @@ set(VR_OPENXR_SOURCES
 	src/vr/VRBody.cpp
 	src/vr/VRCamera.cpp
 	src/vr/VRControls.cpp
+	src/vr/VRGrab.cpp
 	src/vr/VRInput.cpp
 	src/vr/VRSystem.cpp
 )

@@ -1748,10 +1748,15 @@ void ArxGame::manageEditorControls() {
 	
 	if(eeMousePressed1()) {
 		static float s_dragDistance = 0.f;
+		static PlatformInstant s_pressStart = 0;
 		if(eeMouseDown1()) {
 			g_dragStartPos = DANAEMouse;
 			DRAGGING = false;
 			s_dragDistance = 0.f;
+			s_pressStart = g_platformTime.frameStart();
+		} else if(!DRAGGING && isVRModeActive() && g_platformTime.frameStart() - s_pressStart > 300ms) {
+			// VR: holding the trigger on an object grabs it, a quick click takes it
+			DRAGGING = true;
 		} else if(!DRAGGING) {
 			s_dragDistance += 5.f * glm::length(GInput->getRelativeMouseMovement());
 			// A VR laser pointer always moves a little while the trigger is pulled

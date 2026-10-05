@@ -132,6 +132,13 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #include "script/Script.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "core/Config.h"
+#include "vr/VRControls.h"
+#endif
+
 extern bool REQUEST_SPEECH_SKIP;
 extern bool DONT_ERASE_PLAYER;
 extern bool GLOBAL_MAGIC_MODE;
@@ -1576,6 +1583,15 @@ void ARX_PLAYER_Manage_Visual() {
 	
 	ARX_PLAYER_Manage_Visual_End(request0_anim, request3_anim, request0_loop, false);
 
+}
+
+float ARXCHARACTER::baseRadius() {
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		return config.vr.bodyRadius * 100.f;
+	}
+	#endif
+	return 52.f;
 }
 
 /*!

@@ -135,6 +135,9 @@ public:
 	[[nodiscard]] const VRInput & getInput() const { return m_input; }
 	[[nodiscard]] VRInput & getInput() { return m_input; }
 	
+	//! \return true while the trigger is used to click on an interface panel (and not for magic)
+	[[nodiscard]] bool isTriggerClicking() const { return m_clickByTrigger; }
+	
 	//! \return true if the laser pointer currently points at the virtual screen
 	[[nodiscard]] bool isPointingAtUI() const { return m_pointerOnUI; }
 
@@ -202,6 +205,7 @@ private:
 	Vec2i m_uiSize;
 	bool m_uiActive;
 	bool m_uiSubmitted;
+	bool m_uiRendered; // The virtual screen was rendered this frame (even if not shown)
 	bool m_uiPlaced;
 	bool m_uiFollowHead;
 	bool m_uiTurning;
@@ -219,6 +223,9 @@ private:
 	Vec2s m_clickPosition;
 	bool m_clickOnTarget;
 	bool m_clickOnUI;
+	bool m_clickByTrigger; // The trigger is used as the click (started on a panel)
+	bool m_clickWasPressed;
+	bool m_gripIsClick; // The grip press is a game click (not grabbing directly, see VRGrab)
 
 	XrFrameState m_frameState;
 	bool m_frameActive;

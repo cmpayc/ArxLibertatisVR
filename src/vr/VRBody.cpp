@@ -209,7 +209,22 @@ void solveSpine(Skeleton & skeleton, const SpineBones & spine) {
 	
 	aimBonePartially(skeleton, spine.belt, spine.neck, neck, 0.5f);
 	aimBone(skeleton, spine.chest, spine.neck, neck);
-	
+
+	/*
+	 * Aiming does not change the length of the spine: when the animation puts the torso far from the head (e.g.
+	 * crouching while the player sits), the shoulders would stay out of reach of the hands. Move the upper body
+	 * so that the neck reaches its place, ignoring small differences so that standing looks the same.
+	 */
+	const float Tolerance = 5.f;
+	const float MaxShift = 60.f;
+	Vec3f error = neck - skeleton.bones[spine.neck].anim.trans;
+	float length = glm::length(error);
+	if(length > Tolerance) {
+		Vec3f shift = error * (std::min(length - Tolerance, MaxShift) / length);
+		skeleton.bones[spine.belt].anim.trans += shift;
+		updateBoneDescendants(skeleton, spine.belt);
+	}
+
 }
 
 //! Orthonormal frame from a primary direction and a secondary direction

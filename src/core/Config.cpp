@@ -119,7 +119,9 @@ constexpr const bool
 	vrEnabled = false,
 	vrSnapTurn = true,
 	vrHandOrientedMovement = false,
-	vrLeftHanded = false;
+	vrLeftHanded = false,
+	vrShowHud = false,
+	vrDebugRay = false;
 
 #ifdef ARX_DEBUG
 const bool allowConsole = true;
@@ -146,7 +148,9 @@ constexpr const float
 	vrHandOffsetX = 0.f,
 	vrHandOffsetY = 0.06f,
 	vrHandOffsetZ = 0.07f,
-	vrBodyOffset = 0.22f;
+	vrBodyOffset = 0.22f,
+	vrBodyRadius = 0.3f,
+	vrThrowStrength = 1.f;
 
 constexpr const ActionKey actions[NUM_ACTION_KEY] = {
 	ActionKey(Keyboard::Key_Spacebar), // JUMP
@@ -304,7 +308,11 @@ constexpr const std::string_view
 	vrHandOffsetX = "hand_offset_x",
 	vrHandOffsetY = "hand_offset_y",
 	vrHandOffsetZ = "hand_offset_z",
-	vrBodyOffset = "body_offset";
+	vrBodyOffset = "body_offset",
+	vrBodyRadius = "body_radius",
+	vrThrowStrength = "throw_strength",
+	vrShowHud = "show_hud",
+	vrDebugRay = "debug_ray";
 
 // Input key options
 constexpr const std::string_view actions[NUM_ACTION_KEY] = {
@@ -588,6 +596,10 @@ bool Config::save() {
 	writer.writeKey(Key::vrHandOffsetY, vr.handOffset.y);
 	writer.writeKey(Key::vrHandOffsetZ, vr.handOffset.z);
 	writer.writeKey(Key::vrBodyOffset, vr.bodyOffset);
+	writer.writeKey(Key::vrBodyRadius, vr.bodyRadius);
+	writer.writeKey(Key::vrThrowStrength, vr.throwStrength);
+	writer.writeKey(Key::vrShowHud, vr.showHud);
+	writer.writeKey(Key::vrDebugRay, vr.debugRay);
 
 	// key
 	writer.beginSection(Section::Key);
@@ -745,6 +757,10 @@ bool Config::init(const fs::path & file) {
 	vr.handOffset.y = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetY, Default::vrHandOffsetY), -0.2f, 0.2f);
 	vr.handOffset.z = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetZ, Default::vrHandOffsetZ), -0.2f, 0.2f);
 	vr.bodyOffset = glm::clamp(reader.getKey(Section::VR, Key::vrBodyOffset, Default::vrBodyOffset), 0.f, 0.4f);
+	vr.bodyRadius = glm::clamp(reader.getKey(Section::VR, Key::vrBodyRadius, Default::vrBodyRadius), 0.15f, 0.52f);
+	vr.throwStrength = glm::clamp(reader.getKey(Section::VR, Key::vrThrowStrength, Default::vrThrowStrength), 0.f, 5.f);
+	vr.showHud = reader.getKey(Section::VR, Key::vrShowHud, Default::vrShowHud);
+	vr.debugRay = reader.getKey(Section::VR, Key::vrDebugRay, Default::vrDebugRay);
 
 	// Get action key settings
 	for(size_t i = 0; i < NUM_ACTION_KEY; i++) {

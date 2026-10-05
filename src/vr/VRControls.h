@@ -79,4 +79,7 @@ void setVRPointerBeamToUI(const Vec3f & start, const Vec3f & end);
 //! Draw the laser beam into the 3D scene (only while it points at the virtual screen)
 void drawVRPointerBeam();
 
+//! \return the interactive object a controller points at (with aim assist), or nullptr; optionally shows the debug ray
+class Entity * getVRPointedEntity(const struct VRPose & aim, bool debugRay);
+
 #endif // ARX_VR_VRCONTROLS_H

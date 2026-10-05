@@ -44,6 +44,12 @@
 #include "scene/GameSound.h"
 #include "scene/Interactive.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRGrab.h"
+#endif
+
 EntityDragStatus g_dragStatus = EntityDragStatus_Invalid;
 Entity * g_draggedEntity = nullptr;
 InventoryPos g_draggedItemPreviousPosition;
@@ -195,6 +201,13 @@ void updateDraggedEntity() {
 	ARX_PROFILE_FUNC();
 	
 	arx_assert(!locateInInventories(entity));
+	
+	#if ARX_HAVE_OPENXR
+	// In VR the entity is held by the hand
+	if(updateVRDraggedEntity(*entity)) {
+		return;
+	}
+	#endif
 	
 	bool drop = eeMouseUp1();
 	

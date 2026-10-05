@@ -382,7 +382,7 @@ struct ARXCHARACTER {
 	}
 	[[nodiscard]] bool hasAllRunes(const std::array<Rune, 6> & runes) const noexcept;
 	
-	[[nodiscard]] static float baseRadius() { return 52.f; }
+	[[nodiscard]] static float baseRadius(); // Smaller in VR, to match the player's real body
 	[[nodiscard]] static float baseHeight() { return -170.f; }
 	[[nodiscard]] static float crouchHeight() { return -120.f; }
 	[[nodiscard]] static float levitateHeight() { return -220.f; }

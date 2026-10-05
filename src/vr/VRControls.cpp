@@ -43,6 +43,7 @@
 #include "input/Keyboard.h"
 #include "input/Mouse.h"
 #include "vr/VRCamera.h"
+#include "vr/VRGrab.h"
 #include "vr/VRMath.h"
 #include "vr/VRSystem.h"
 
@@ -54,7 +55,7 @@ float g_pendingTurn = 0.f;
 bool g_snapTurnReady = true;
 std::vector<InputKeyId> g_pressedKeys;
 
-//! The laser pointer beam, in world space - only shown when pointing at a 2D interface, the world ray is invisible
+//! The laser pointer beam, in world space - shown when pointing at a 2D interface, the world ray only for debugging
 struct PointerBeam {
 	bool visible = false;
 	bool hit = false; //!< The beam ends on something: draw a dot there
@@ -62,6 +63,8 @@ struct PointerBeam {
 	Vec3f end = Vec3f(0.f);
 };
 PointerBeam g_beam;
+PointerBeam g_offHandBeam; //!< Only for debugging
+
 const float StickDeadZone = 0.2f;
 
 VRHand dominantHand() {
@@ -98,6 +101,57 @@ InputKeyId getActionKey(ControlAction action) {
 	return -1;
 }
 
+/*!
+ * Find the interactive object that the hand points at most closely: within about 8 degrees or 15 cm of the ray,
+ * in reach and not behind a wall
+ */
+Entity * findVRAimAssistTarget(const Vec3f & origin, const Vec3f & direction) {
+	
+	const float MaxAngle = 0.14f; // tan(8 degrees)
+	const float MinRadius = 15.f; // cm
+	const float Range = 360.f;    // cm, the pick range of the game
+	
+	Entity * best = nullptr;
+	float bestScore = 0.f;
+	for(Entity & entity : entities) {
+		
+		if(&entity == entities.player() || entity.show != SHOW_FLAG_IN_SCENE || !entity.obj
+		   || !(entity.gameFlags & GFLAG_INTERACTIVITY) || !(entity.gameFlags & GFLAG_ISINTREATZONE)
+		   || !(entity.ioflags & (IO_ITEM | IO_FIX | IO_NPC))) {
+			continue;
+		}
+		
+		const EERIE_3D_BBOX & bbox = entity.bbox3D;
+		Vec3f center = (bbox.min.x <= bbox.max.x) ? (bbox.min + bbox.max) * 0.5f : entity.pos;
+		Vec3f toCenter = center - origin;
+		float along = glm::dot(toCenter, direction);
+		if(along < 5.f || along > Range) {
+			continue;
+		}
+		float offset = glm::length(toCenter - direction * along);
+		if(offset > std::max(MinRadius, along * MaxAngle)) {
+			continue;
+		}
+		
+		float score = offset / along;
+		if(best && score >= bestScore) {
+			continue;
+		}
+		
+		// Not behind a wall
+		if(RaycastResult wall = raycastScene(origin, center, POLY_TRANS, RaycastIgnorePlayer)) {
+			if(glm::distance(origin, wall.pos) < along - 20.f) {
+				continue;
+			}
+		}
+		
+		best = &entity;
+		bestScore = score;
+	}
+	
+	return best;
+}
+
 } // anonymous namespace
 
 bool isVRActive() {
@@ -120,8 +174,8 @@ void updateVRControls() {
 
 	/*
 	 * Buttons are mapped to the keys bound to the game actions, so they also work in places that read keys.
-	 * Main hand (right): A = jump, B = inventory, stick click = crouch toggle, grip = magic mode,
-	 *                    trigger = left click (see the laser pointer in VRSystem)
+	 * Main hand (right): A = jump, B = inventory, stick click = crouch toggle, trigger = magic mode,
+	 *                    grip = take, grab and attack (left click, see the laser pointer in VRSystem)
 	 * Off hand (left):   X = book, Y = game menu, stick click = ready weapon,
 	 *                    trigger = use (interaction cursor), grip = right click
 	 */
@@ -137,8 +191,11 @@ void updateVRControls() {
 	press(CONTROLS_CUST_CROUCHTOGGLE, main.isPressed(VRButtonStick));
 	press(CONTROLS_CUST_BOOK, off.isPressed(VRButtonPrimary));
 	press(CONTROLS_CUST_WEAPON, off.isPressed(VRButtonStick));
-	press(CONTROLS_CUST_USE, off.isPressed(VRButtonTrigger));
-	press(CONTROLS_CUST_MAGICMODE, main.isPressed(VRButtonGrip));
+	// While the off hand holds an object its trigger stores it instead (see VRGrab)
+	press(CONTROLS_CUST_USE, off.isPressed(VRButtonTrigger) && !isVROffHandGrabbing());
+	// While holding an object the trigger stores it instead (see VRGrab)
+	press(CONTROLS_CUST_MAGICMODE, main.isPressed(VRButtonTrigger) && !g_vr->isTriggerClicking()
+	                               && !g_vr->isPointingAtUI() && !isVRGrabbing());
 	// The menu button is often reserved by the system (e.g. Quest through Virtual Desktop)
 	if(off.isPressed(VRButtonSecondary) || off.isPressed(VRButtonMenu) || main.isPressed(VRButtonMenu)) {
 		keys.push_back(Keyboard::Key_Escape);
@@ -217,18 +274,44 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 		return false;
 	}
 	
+	// The world ray is invisible, except for debugging
+	if(config.vr.debugRay) {
+		g_beam.visible = true;
+		g_beam.hit = false;
+		g_beam.start = origin;
+		g_beam.end = origin + direction * 200.f;
+	}
+	
 	// Start a little in front of the controller so that the player's own hand and weapon are not hit
 	origin += direction * 10.f;
 	const float range = 1000.f;
 	Vec3f target = origin + direction * range;
 	
+	bool hitSomething = false;
 	if(RaycastResult hit = raycastScene(origin, target, POLY_TRANS, RaycastIgnorePlayer)) {
 		target = hit.pos;
+		hitSomething = true;
 	}
+	Entity * hitEntity = nullptr;
 	if(EntityRaycastResult hit = raycastEntities(origin, target, POLY_TRANS, RaycastIgnorePlayer)) {
 		target = hit.pos;
-	}	
-	// The game picks objects by casting a ray from the camera through the cursor: put the cursor on the target
+		hitSomething = true;
+		hitEntity = hit.entity;
+	}
+	
+	// Aim assist: without a direct hit on an interactive object, take the one closest to the ray
+	if(!hitEntity || !(hitEntity->gameFlags & GFLAG_INTERACTIVITY)) {
+		if(Entity * assisted = findVRAimAssistTarget(origin, direction)) {
+			const EERIE_3D_BBOX & bbox = assisted->bbox3D;
+			target = (bbox.min.x <= bbox.max.x) ? (bbox.min + bbox.max) * 0.5f : assisted->pos;
+			hitSomething = true;
+		}
+	}
+	if(config.vr.debugRay && hitSomething) {
+		g_beam.end = target;
+		g_beam.hit = true;
+	}
+		// The game picks objects by casting a ray from the camera through the cursor: put the cursor on the target
 	Vec2f screen;
 	if(!worldToVRScreen(target, screen)) {
 		return false;
@@ -243,6 +326,7 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 }
 void clearVRPointerBeam() {
 	g_beam.visible = false;
+	g_offHandBeam.visible = false;
 }
 
 void setVRPointerBeamToUI(const Vec3f & start, const Vec3f & end) {
@@ -260,38 +344,45 @@ void setVRPointerBeamToUI(const Vec3f & start, const Vec3f & end) {
 	g_beam.end = worldEnd;
 }
 
+static void drawPointerBeam(const PointerBeam & beam);
+
 void drawVRPointerBeam() {
-	
-	if(!g_beam.visible || g_beam.start == g_beam.end) {
+	drawPointerBeam(g_beam);
+	drawPointerBeam(g_offHandBeam);
+}
+
+static void drawPointerBeam(const PointerBeam & beam) {
+
+	if(!beam.visible || beam.start == beam.end) {
 		return;
 	}
-	
+
 	const Vec3f eye = Vec3f(g_preparedCamera.m_viewToWorld[3]);
-	const Vec3f direction = glm::normalize(g_beam.end - g_beam.start);
+	const Vec3f direction = glm::normalize(beam.end - beam.start);
 	
 	UseRenderState state(render3D().depthWrite(false).blendAdditive());
 	GRenderer->ResetTexture(0);
 	
 	// A thin ribbon facing the viewer, brighter at the hand
-	Vec3f toEye = eye - g_beam.start;
+	Vec3f toEye = eye - beam.start;
 	Vec3f side = glm::cross(direction, toEye);
 	if(glm::length(side) > 0.001f) {
 		side = glm::normalize(side) * 0.3f;
 		const Color startColor = Color::rgb(0.35f, 0.6f, 1.f);
 		const Color endColor = Color::rgb(0.1f, 0.2f, 0.4f);
-		TexturedVertex beam[4];
-		worldToClipSpace(g_beam.start - side, beam[0]);
-		worldToClipSpace(g_beam.start + side, beam[1]);
-		worldToClipSpace(g_beam.end - side, beam[2]);
-		worldToClipSpace(g_beam.end + side, beam[3]);
-		beam[0].color = beam[1].color = startColor.toRGBA();
-		beam[2].color = beam[3].color = endColor.toRGBA();
-		EERIEDRAWPRIM(Renderer::TriangleStrip, beam, 4);
+		TexturedVertex ribbon[4];
+		worldToClipSpace(beam.start - side, ribbon[0]);
+		worldToClipSpace(beam.start + side, ribbon[1]);
+		worldToClipSpace(beam.end - side, ribbon[2]);
+		worldToClipSpace(beam.end + side, ribbon[3]);
+		ribbon[0].color = ribbon[1].color = startColor.toRGBA();
+		ribbon[2].color = ribbon[3].color = endColor.toRGBA();
+		EERIEDRAWPRIM(Renderer::TriangleStrip, ribbon, 4);
 	}
 	
 	// A dot where the beam hits, kept about the same apparent size at any distance
-	if(g_beam.hit) {
-		Vec3f center = g_beam.end - direction * 1.f;
+	if(beam.hit) {
+		Vec3f center = beam.end - direction * 1.f;
 		float size = 0.6f + 0.006f * glm::distance(eye, center);
 		Vec3f right = Vec3f(g_preparedCamera.m_viewToWorld[0]) * size;
 		Vec3f down = Vec3f(g_preparedCamera.m_viewToWorld[1]) * size;
@@ -311,6 +402,9 @@ void applyVRRoomScale() {
 		return;
 	}
 	
+	// The game sets the collision radius once; keep it at the VR body size (e.g. after changing the config)
+	player.physics.cyl.radius = player.baseRadius();
+
 	Vec3f movement = takeVRRoomScaleMovement();
 	Vec3f moved(0.f);
 	if(movement != Vec3f(0.f)) {
@@ -362,4 +456,50 @@ void applyVRRoomScale() {
 		}
 	}
 	
+}
+
+Entity * getVRPointedEntity(const VRPose & aim, bool debugRay) {
+	
+	Vec3f origin;
+	Vec3f direction;
+	if(!aim.valid || !trackingRayToWorld(aim.position, aim.orientation, origin, direction)) {
+		return nullptr;
+	}
+	
+	// The ray is invisible, except for debugging
+	const Vec3f start = origin;
+	
+	// Start a little in front of the controller so that the player's own hand is not hit
+	origin += direction * 10.f;
+	Vec3f target = origin + direction * 1000.f;
+	bool hitSomething = false;
+	if(RaycastResult hit = raycastScene(origin, target, POLY_TRANS, RaycastIgnorePlayer)) {
+		target = hit.pos;
+		hitSomething = true;
+	}
+	Entity * result = nullptr;
+	if(EntityRaycastResult hit = raycastEntities(origin, target, POLY_TRANS, RaycastIgnorePlayer)) {
+		target = hit.pos;
+		hitSomething = true;
+		if(hit.entity->gameFlags & GFLAG_INTERACTIVITY) {
+			result = hit.entity;
+		}
+	}
+	if(!result) {
+		result = findVRAimAssistTarget(origin, direction);
+		if(result) {
+			const EERIE_3D_BBOX & bbox = result->bbox3D;
+			target = (bbox.min.x <= bbox.max.x) ? (bbox.min + bbox.max) * 0.5f : result->pos;
+			hitSomething = true;
+		}
+	}
+	
+	if(debugRay && config.vr.debugRay) {
+		g_offHandBeam.visible = true;
+		g_offHandBeam.hit = hitSomething;
+		g_offHandBeam.start = start;
+		g_offHandBeam.end = hitSomething ? target : start + direction * 200.f;
+	}
+	
+	return result;
 }

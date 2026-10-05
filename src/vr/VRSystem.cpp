@@ -55,6 +55,7 @@
 #include "io/log/Logger.h"
 #include "platform/ProgramOptions.h"
 #include "vr/VRControls.h"
+#include "vr/VRGrab.h"
 
 
 VRSystem * g_vr = nullptr;
@@ -305,6 +306,7 @@ VRSystem::VRSystem()
 	, m_uiSize(0)
 	, m_uiActive(false)
 	, m_uiSubmitted(false)
+	, m_uiRendered(false)
 	, m_uiPlaced(false)
 	, m_uiFollowHead(false)
 	, m_uiTurning(false)
@@ -319,6 +321,9 @@ VRSystem::VRSystem()
 	, m_clickPosition(0)
 	, m_clickOnTarget(false)
 	, m_clickOnUI(false)
+	, m_clickByTrigger(false)
+	, m_clickWasPressed(false)
+	, m_gripIsClick(true)
 	, m_frameState{ XR_TYPE_FRAME_STATE }
 	, m_frameActive(false)
 	, m_shouldRender(false)
@@ -737,6 +742,7 @@ bool VRSystem::beginFrame() {
 	m_stereoRendered = false;
 	m_stereoViews.clear();
 	m_uiSubmitted = false;
+	m_uiRendered = false;
 
 	if(!m_sessionRunning) {
 		return false;
@@ -756,6 +762,8 @@ bool VRSystem::beginFrame() {
 
 	// Controllers are read for every frame, also when nothing is rendered
 	m_input.update(m_frameState.predictedDisplayTime, m_stageSpace);
+	// The hand motion first: the pointer checks whether the main hand touches an object (see VRGrab)
+	updateVRHandMotion();
 	updatePointer();
 	updateVRControls();
 
@@ -1204,6 +1212,7 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 	renderer->setPremultipliedAlphaOutput(false);
 	renderer->setRenderTarget(0, Vec2i(0));
 	m_uiActive = false;
+	m_uiRendered = true;
 
 	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
 	glDisable(GL_SCISSOR_TEST);
@@ -1227,7 +1236,9 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 	// Desktop view: the interface over the left eye image, or on its own for menus
 	drawTextureToWindow(m_uiColor, windowSize, !overScene);
 
-	if(image) {
+	// In-game the HUD panel is only shown with an open interface (inventory, book, ...) unless enabled
+	bool show = !overScene || ((config.vr.showHud || isVRInterfaceOpen()) && !isVRGrabbing());
+	if(image && show) {
 		updateUIPlacement(overScene);
 		m_uiSubmitted = true;
 	}
@@ -1236,7 +1247,8 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 
 void VRSystem::submitWindowAsUI(const Vec2i & windowSize) {
 
-	if(!isRenderingFrame() || m_uiSubmitted || windowSize.x <= 0 || windowSize.y <= 0) {
+	// Only for frames drawn directly to the window (logos), not when the virtual screen was hidden on purpose
+	if(!isRenderingFrame() || m_uiSubmitted || m_uiRendered || windowSize.x <= 0 || windowSize.y <= 0) {
 		return;
 	}
 
@@ -1414,7 +1426,8 @@ void VRSystem::updatePointer() {
 	 */
 	bool inGame = m_lastFrameStereo;
 	clearVRPointerBeam();
-	bool interfaceOpen = !inGame || isVRInterfaceOpen();
+	// While holding an object, the panel is ignored so that the object does not switch to inventory drag and drop
+	bool interfaceOpen = (!inGame || isVRInterfaceOpen()) && !isVRGrabbing();
 	
 	// Intersect the dominant hand's aim ray with the virtual screen shown in the last frame
 	bool onUI = false;
@@ -1455,35 +1468,56 @@ void VRSystem::updatePointer() {
 	bool onWorld = !onUI && inGame && getVRWorldPointer(hand.aim, mouse);
 	
 	/*
-	 * Pulling the trigger tilts the controller, which moves the cursor a lot at a distance and would turn every
-	 * click into a drag. Freeze the cursor where the trigger was pulled: releasing it quickly is a click there,
-	 * holding it longer lets the cursor follow the hand again to drag.
+	 * The "click" (left mouse button): in the world the grip uses, talks and attacks, on an interface panel the
+	 * trigger or the grip click. Items pointed at in the world are grabbed directly instead (see VRGrab).
+	 * The trigger is otherwise used for magic (see VRControls). A trigger click started on a panel stays a click
+	 * until the trigger is released, e.g. to drag an item out of the inventory.
+	 */
+	if(hand.wasPressed(VRButtonTrigger)) {
+		m_clickByTrigger = onUI;
+	} else if(!hand.isPressed(VRButtonTrigger)) {
+		m_clickByTrigger = false;
+	}
+	if(hand.wasPressed(VRButtonGrip)) {
+		// Touching an object grabs it even while pointing at a panel
+		m_gripIsClick = !isVRGripGrabbing();
+	} else if(isVRGrabbingDirectly()) {
+		m_gripIsClick = false; // Caught an object after pressing the grip
+	}
+	bool clickPressed = (hand.isPressed(VRButtonGrip) && m_gripIsClick) || m_clickByTrigger;
+	bool clickStarted = clickPressed && !m_clickWasPressed;
+	bool clickEnded = !clickPressed && m_clickWasPressed;
+	m_clickWasPressed = clickPressed;
+	
+	/*
+	 * Pressing a button tilts the controller, which moves the cursor a lot at a distance and would turn every
+	 * click into a drag. Freeze the cursor where the click started: releasing quickly is a click there,
+	 * holding longer lets the cursor follow the hand again to drag.
 	 */
 	const float ClickDuration = 0.35f;
-	if(hand.wasPressed(VRButtonTrigger)) {
+	if(clickStarted) {
 		m_triggerHoldTime = 0.f;
 		m_clickPosition = mouse;
 		m_clickOnTarget = onUI || onWorld;
 		m_clickOnUI = onUI;
-	} else if(hand.isPressed(VRButtonTrigger) || hand.wasReleased(VRButtonTrigger)) {
+	} else if(clickPressed || clickEnded) {
 		m_triggerHoldTime += getFrameDuration();
 	}
-	bool clicking = hand.isPressed(VRButtonTrigger) || hand.wasReleased(VRButtonTrigger);
-	if(clicking && m_triggerHoldTime < ClickDuration && m_clickOnTarget) {
+	if((clickPressed || clickEnded) && m_triggerHoldTime < ClickDuration && m_clickOnTarget) {
 		mouse = m_clickPosition;
 		onUI = m_clickOnUI;
 		onWorld = !m_clickOnUI;
 	}
-
+	
 	GInput->setVirtualMousePosition(onUI || onWorld, mouse);
-
-	// Main hand trigger = left click, off hand grip = right click (other buttons are mapped in VRControls)
+	
+	// Off hand grip = right click on a panel, in the world it grabs (see VRGrab)
 	const VRHandState & off = m_input.getHand(config.vr.leftHanded ? VRHandRight : VRHandLeft);
-	GInput->setVirtualMouseButton(Mouse::Button_0, hand.isPressed(VRButtonTrigger));
-	GInput->setVirtualMouseButton(Mouse::Button_1, off.isPressed(VRButtonGrip));
-
-	if(onUI && (hand.wasPressed(VRButtonTrigger) || off.wasPressed(VRButtonGrip))) {
+	GInput->setVirtualMouseButton(Mouse::Button_0, clickPressed);
+	GInput->setVirtualMouseButton(Mouse::Button_1, off.isPressed(VRButtonGrip) && onUI);
+	
+	if(onUI && (clickStarted || off.wasPressed(VRButtonGrip))) {
 		m_input.vibrate(dominant, 0.5f, 0.05f);
 	}
-
+	
 }
