@@ -235,6 +235,8 @@ bool ArxGame::initialize() {
 		if(g_vr) {
 			// The player model follows the headset and controllers
 			g_playerSkeletonHook = &applyVRBodyIK;
+			g_playerSheathHook = &getVRSheathTransform;
+			g_playerUpperLayerBones = &getVRUpperLayerBones;
 		}
 	}
 	#endif

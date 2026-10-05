@@ -1304,6 +1304,14 @@ void ARX_PLAYER_Manage_Visual() {
 		}
 	}
 	
+	// The fighting stance of the body (VR: the body keeps its normal pose, the arms follow the controllers)
+	bool fightStance = (player.Interface & INTER_COMBATMODE) != 0;
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		fightStance = false;
+	}
+	#endif
+	
 	ANIM_HANDLE * request0_anim = nullptr;
 	ANIM_HANDLE * request3_anim = nullptr;
 	bool request0_loop = true;
@@ -1324,7 +1332,7 @@ void ARX_PLAYER_Manage_Visual() {
 	   || player.m_currentMovement == PLAYER_MOVE_STEALTH
 	   || (player.m_currentMovement & PLAYER_ROTATE)
 	) {
-		if(player.Interface & INTER_COMBATMODE) {
+		if(fightStance) {
 			request0_anim = alist[ANIM_FIGHT_WAIT];
 		} else if(EXTERNALVIEW) {
 			request0_anim = alist[ANIM_WAIT];
@@ -1342,12 +1350,12 @@ void ARX_PLAYER_Manage_Visual() {
 	   && LASTPLAYERA < 180.f
 	) {
 		if(PLAYER_ROTATION < 0) {
-			if(player.Interface & INTER_COMBATMODE)
+			if(fightStance)
 				request0_anim = alist[ANIM_U_TURN_LEFT_FIGHT];
 			else
 				request0_anim = alist[ANIM_U_TURN_LEFT];
 		} else {
-			if(player.Interface & INTER_COMBATMODE)
+			if(fightStance)
 				request0_anim = alist[ANIM_U_TURN_RIGHT_FIGHT];
 			else
 				request0_anim = alist[ANIM_U_TURN_RIGHT];
@@ -1392,7 +1400,7 @@ void ARX_PLAYER_Manage_Visual() {
 		tmove = PLAYER_MOVE_WALK_FORWARD;
 	
 	if(tmove & PLAYER_MOVE_STRAFE_LEFT) {
-		if(player.Interface & INTER_COMBATMODE)
+		if(fightStance)
 			request0_anim = alist[ANIM_FIGHT_STRAFE_LEFT];
 		else if(player.m_currentMovement & PLAYER_MOVE_STEALTH)
 			request0_anim = alist[ANIM_STRAFE_LEFT];
@@ -1401,7 +1409,7 @@ void ARX_PLAYER_Manage_Visual() {
 	}
 	
 	if(tmove & PLAYER_MOVE_STRAFE_RIGHT) {
-		if(player.Interface & INTER_COMBATMODE)
+		if(fightStance)
 			request0_anim = alist[ANIM_FIGHT_STRAFE_RIGHT];
 		else if(player.m_currentMovement & PLAYER_MOVE_STEALTH)
 			request0_anim = alist[ANIM_STRAFE_RIGHT];
@@ -1410,7 +1418,7 @@ void ARX_PLAYER_Manage_Visual() {
 	}
 	
 	if(tmove & PLAYER_MOVE_WALK_BACKWARD) {
-		if(player.Interface & INTER_COMBATMODE)
+		if(fightStance)
 			request0_anim = alist[ANIM_FIGHT_WALK_BACKWARD];
 		else if(player.m_currentMovement & PLAYER_MOVE_STEALTH)
 			request0_anim = alist[ANIM_WALK_BACKWARD];
@@ -1421,7 +1429,7 @@ void ARX_PLAYER_Manage_Visual() {
 	}
 	
 	if(tmove & PLAYER_MOVE_WALK_FORWARD) {
-		if(player.Interface & INTER_COMBATMODE)
+		if(fightStance)
 			request0_anim = alist[ANIM_FIGHT_WALK_FORWARD];
 		else if(player.m_currentMovement & PLAYER_MOVE_STEALTH)
 			request0_anim = alist[ANIM_WALK];

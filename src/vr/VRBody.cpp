@@ -22,10 +22,12 @@
 #include <algorithm>
 #include <map>
 #include <string_view>
+#include <vector>
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include "animation/AnimationRender.h"
 #include "animation/Skeleton.h"
 #include "core/Config.h"
 #include "game/Entity.h"
@@ -358,6 +360,10 @@ struct WristPose {
 };
 WristPose g_wristPoses[VRHandCount];
 
+// The hip joints of the posed model, in the world
+bool g_hipsValid = false;
+Vec3f g_hipPositions[VRHandCount];
+
 const Vec3f FingerDirection(0.f, -0.5f, -1.f); //!< From the wrist to the knuckles
 const Vec3f ThumbDirection(0.f, 1.f, 0.f);     //!< The thumb rests on top of the controller
 
@@ -610,6 +616,7 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 	for(WristPose & pose : g_wristPoses) {
 		pose.valid = false;
 	}
+	g_hipsValid = false;
 	
 	// The spine first: it moves the shoulders
 	if(bones.spine.valid()) {
@@ -631,7 +638,107 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 			}
 		}
 	}
+	
+	if(bones.legs[0].valid() && bones.legs[1].valid()) {
+		for(size_t leg = 0; leg < VRHandCount; leg++) {
+			g_hipPositions[leg] = skeleton.bones[bones.legs[leg].hip].anim.trans;
+		}
+		g_hipsValid = true;
+	}
 
+}
+
+const std::vector<bool> * getVRUpperLayerBones(const EERIE_3DOBJ & object) {
+	
+	if(!isVRActive() || !object.m_skeleton) {
+		return nullptr;
+	}
+	
+	static const EERIE_3DOBJ * s_object = nullptr;
+	static std::vector<bool> s_mask;
+	const Skeleton & skeleton = *object.m_skeleton;
+	if(s_object != &object || s_mask.size() != skeleton.bones.size()) {
+		const BodyBones & bones = getBodyBones(object);
+		s_mask.assign(skeleton.bones.size(), false);
+		for(VertexGroupId group : skeleton.bones.handles()) {
+			for(const ArmBones & arm : bones.arms) {
+				if(arm.hand && (group == arm.hand || isBoneDescendant(skeleton, group, arm.hand))) {
+					s_mask[size_t(group)] = true;
+				}
+			}
+		}
+		s_object = &object;
+	}
+	
+	return &s_mask;
+}
+
+bool getVRHipPosition(VRHand side, Vec3f & position) {
+	
+	if(!isVRActive() || !g_hipsValid) {
+		return false;
+	}
+	
+	position = g_hipPositions[side];
+	return true;
+}
+
+namespace {
+
+//! The side of the sheath: the hip opposite to the main hand
+VRHand sheathSide() {
+	return config.vr.leftHanded ? VRHandRight : VRHandLeft;
+}
+
+//! The body frame of the player (y is down)
+void getBodyFrame(Vec3f & forward, Vec3f & outwards) {
+	float yaw = player.angle.getYaw();
+	forward = angleToVectorXZ(yaw);
+	outwards = angleToVectorXZ(yaw - 90.f) * ((sheathSide() == VRHandRight) ? 1.f : -1.f);
+}
+
+} // anonymous namespace
+
+bool getVRSheathHilt(Vec3f & hilt) {
+	
+	Vec3f hip;
+	if(!getVRHipPosition(sheathSide(), hip)) {
+		return false;
+	}
+	
+	// In front of the hip at belt height, outside the thigh
+	Vec3f forward;
+	Vec3f outwards;
+	getBodyFrame(forward, outwards);
+	const Vec3f up(0.f, -1.f, 0.f);
+	hilt = hip + (forward * 8.f + up * 6.f + outwards * 7.f) * getVRBodyScale();
+	return true;
+}
+
+bool getVRSheathTransform(const Entity & entity, const EERIE_LINKED & link, TransformInfo & transform) {
+	
+	if(!entity.obj || !entity.obj->m_skeleton || !link.obj || (link.io && (link.io->type_flags & OBJECT_TYPE_BOW))) {
+		return false; // Bows stay hidden on the back
+	}
+	
+	const BodyBones & bones = getBodyBones(*entity.obj);
+	Vec3f axis = getHeldItemAxis(*link.obj, link.lidx2);
+	Vec3f hilt;
+	if(!bones.spine.belt || axis == Vec3f(0.f) || !getVRSheathHilt(hilt)) {
+		return false;
+	}
+	
+	// The blade down and backwards, turned from the pelvis so that it keeps its roll relative to the body
+	Vec3f forward;
+	Vec3f outwards;
+	getBodyFrame(forward, outwards);
+	Vec3f blade = glm::normalize(Vec3f(0.f, 1.f, 0.f) - forward * 0.6f);
+	glm::quat pelvis = entity.obj->m_skeleton->bones[bones.spine.belt].anim.quat;
+	glm::quat rotation = glm::normalize(rotationBetween(glm::normalize(pelvis * axis), blade) * pelvis);
+	
+	transform = TransformInfo(hilt, rotation, link.io ? link.io->scale : 1.f);
+	transform.pos = transform(link.obj->vertexlist[link.obj->origin].v - link.obj->vertexlist[link.lidx2].v);
+	return true;
 }
 
 bool getVRWristPose(VRHand hand, Vec3f & position, glm::quat & gripOrientation) {

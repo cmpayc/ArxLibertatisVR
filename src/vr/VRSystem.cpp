@@ -1662,7 +1662,7 @@ void VRSystem::updatePointer() {
 	}
 	if(hand.wasPressed(VRButtonGrip)) {
 		// Touching an object grabs it even while pointing at a panel
-		m_gripIsClick = !isVRGripGrabbing();
+		m_gripIsClick = !isVRGripGrabbing() && !isVRHandAtSheath(); // Not at the sheath (draws the weapon, see VRControls)
 	} else if(isVRGrabbingDirectly()) {
 		m_gripIsClick = false; // Caught an object after pressing the grip
 	}

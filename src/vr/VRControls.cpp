@@ -30,6 +30,7 @@
 #include "game/Player.h"
 #include "game/Camera.h"
 #include "game/EntityManager.h"
+#include "game/Equipment.h"
 #include "graphics/Draw.h"
 #include "graphics/Raycast.h"
 #include "physics/Collisions.h"
@@ -42,6 +43,7 @@
 #include "input/InputKey.h"
 #include "input/Keyboard.h"
 #include "input/Mouse.h"
+#include "vr/VRBody.h"
 #include "vr/VRCamera.h"
 #include "vr/VRGrab.h"
 #include "vr/VRMath.h"
@@ -54,6 +56,8 @@ float g_headYaw = 0.f; // world yaw of the head
 float g_pendingTurn = 0.f;
 bool g_snapTurnReady = true;
 std::vector<InputKeyId> g_pressedKeys;
+int g_weaponToggleFrames = 0; // Frames left of the ready weapon action from the sheath
+bool g_sheatheArmed = false; // The drawn weapon left the sheath: bringing it back sheathes it
 
 //! The laser pointer beam, in world space - shown when pointing at a 2D interface, the world ray only for debugging
 struct PointerBeam {
@@ -73,6 +77,32 @@ VRHand dominantHand() {
 
 VRHand offHand() {
 	return config.vr.leftHanded ? VRHandRight : VRHandLeft;
+}
+
+const float SheathRadius = 30.f; // cm, at the model's size
+
+/*!
+ * \return the distance from the main hand to the sheath, in cm at the model's size, or a large value if the weapon
+ *         cannot be drawn or sheathed
+ *
+ * The sheath hangs at the hip opposite to the main hand, see \ref getVRSheathHilt.
+ */
+float getSheathDistance() {
+
+	const float Far = 1e6f;
+	if(!g_vr || ARXmenu.mode() != Mode_InGame || BLOCK_PLAYER_CONTROLS || isVRGrabbing()
+	   || !entities.get(player.equiped[EQUIP_SLOT_WEAPON])) {
+		return Far;
+	}
+
+	Vec3f wrist;
+	glm::quat grip;
+	Vec3f hilt;
+	if(!getVRWristPose(dominantHand(), wrist, grip) || !getVRSheathHilt(hilt)) {
+		return Far;
+	}
+
+	return glm::distance(wrist, hilt) / getVRBodyScale();
 }
 
 //! Yaw of an OpenXR orientation in degrees, positive turns left like the Arx convention
@@ -190,7 +220,28 @@ void updateVRControls() {
 	press(CONTROLS_CUST_INVENTORY, main.isPressed(VRButtonSecondary));
 	press(CONTROLS_CUST_CROUCHTOGGLE, main.isPressed(VRButtonStick));
 	press(CONTROLS_CUST_BOOK, off.isPressed(VRButtonPrimary));
-	press(CONTROLS_CUST_WEAPON, off.isPressed(VRButtonStick));
+	// Grabbing the weapon at the sheath (opposite hip) draws or sheathes it: hold the action, a key release only
+	// counts after two frames
+	// counts after two frames. A drawn weapon is sheathed by just bringing it back, once it has left the sheath.
+	float sheathDistance = getSheathDistance();
+	bool toggleWeapon = false;
+	if(!(player.Interface & INTER_COMBATMODE)) {
+		g_sheatheArmed = false;
+		toggleWeapon = main.wasPressed(VRButtonGrip) && sheathDistance < SheathRadius;
+	} else if(sheathDistance > SheathRadius + 10.f) {
+		g_sheatheArmed = true;
+	} else if(g_sheatheArmed && sheathDistance < SheathRadius) {
+		g_sheatheArmed = false;
+		toggleWeapon = true;
+	}
+	if(toggleWeapon && g_weaponToggleFrames == 0) {
+		g_weaponToggleFrames = 3;
+		g_vr->getInput().vibrate(dominantHand(), 0.6f, 0.08f);
+	}
+	press(CONTROLS_CUST_WEAPON, off.isPressed(VRButtonStick) || g_weaponToggleFrames > 0);
+	if(g_weaponToggleFrames > 0) {
+		g_weaponToggleFrames--;
+	}
 	// While the off hand holds an object its trigger stores it instead (see VRGrab)
 	press(CONTROLS_CUST_USE, (off.isPressed(VRButtonTrigger) && !isVROffHandGrabbing()) || g_vr->isUseTapPressed());
 	// While holding an object the trigger stores it instead (see VRGrab)
@@ -254,6 +305,10 @@ float takeVRTurn() {
 	float turn = g_pendingTurn;
 	g_pendingTurn = 0.f;
 	return turn;
+}
+
+bool isVRHandAtSheath() {
+	return getSheathDistance() < SheathRadius;
 }
 
 bool isVRInterfaceOpen() {

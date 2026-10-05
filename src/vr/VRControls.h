@@ -60,6 +60,9 @@ void applyVRRoomScale();
 //! \return true if a 2D interface (menu, inventory, book, note) is open and the laser should point at it
 [[nodiscard]] bool isVRInterfaceOpen();
 
+//! \return true if a weapon is equipped and the main hand is at its sheath (the opposite hip), to draw or sheathe it
+[[nodiscard]] bool isVRHandAtSheath();
+
 /*!
  * Point into the game world with a controller
  *

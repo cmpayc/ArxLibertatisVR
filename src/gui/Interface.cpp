@@ -645,7 +645,15 @@ void ARX_INTERFACE_setCombatMode(ARX_INTERFACE_COMBAT_MODE i) {
 		if(weapontype == WEAPON_BOW) {
 			EERIE_LINKEDOBJ_UnLinkObjectFromObject(entities.player()->obj, arrowobj.get());
 		}
-		
+
+		if(isVRModeActive()) {
+			// VR: the arms follow the controllers, put the weapon away at once instead of playing the animation
+			Entity * io = entities.player();
+			ARX_EQUIPMENT_AttachPlayerWeaponToBack();
+			AcquireLastAnim(io);
+			io->animlayer[1].cur_anim = nullptr;
+		}
+
 		player.doingmagic = 0;
 		
 	} else if(!entities.player()->animlayer[1].cur_anim

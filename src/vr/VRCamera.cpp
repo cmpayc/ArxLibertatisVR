@@ -68,6 +68,7 @@ float g_settleTime = 0.f; // how long the head has been offset without leaning
 bool g_userEyeHeightValid = false;
 float g_userEyeHeight = 0.f; // highest the head has been: the user's standing eye height (stage space, meters)
 float g_bodyScale = 1.f; // scale of the player model to match the user's height
+float g_crouchDrop = 0.f; // how far the view is lowered for crouching with a button (cm, y down)
 const float ModelEyeHeight = 169.f; // eye height of the standing player model (human_base) above its feet, cm
 Vec3f g_eyeCenter(0.f); // world position of the eyes in the last prepared player frame
 bool g_eyeCenterValid = false;
@@ -195,6 +196,19 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 		origin = Vec3f(player.pos.x, player.pos.y - player.baseHeight() - g_bodyScale * modelEyeHeight, player.pos.z);
 		// Optionally raise the view further (y points down)
 		origin.y -= config.vr.heightOffset * 100.f;
+
+		/*
+		 * Crouching with a button (or kept crouched under a low ceiling): lower the view like the crouching body,
+		 * minus how far the user already bends down. A real crouch moves the view by itself.
+		 */
+		float crouchDrop = 0.f;
+		if(player.physics.cyl.height > player.baseHeight() && !g_physicallyCrouching) {
+			float physicalDrop = std::max(g_standingHeight - headStage.y, 0.f) * scale;
+			float bodyDrop = (player.crouchHeight() - player.baseHeight()) * g_bodyScale;
+			crouchDrop = std::max(bodyDrop - physicalDrop, 0.f);
+		}
+		g_crouchDrop += (crouchDrop - g_crouchDrop) * (1.f - std::exp(-g_vr->getFrameDuration() * 8.f));
+		origin.y += g_crouchDrop;
 	} else {
 		// Scripted cameras: the camera defines the origin and heading
 		heading = cam.angle.getYaw();

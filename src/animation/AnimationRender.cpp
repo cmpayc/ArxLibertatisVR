@@ -832,6 +832,8 @@ extern long IN_BOOK_DRAW;
 
 void (*g_playerSkeletonHook)(Entity & player, Skeleton & skeleton) = nullptr;
 float g_playerModelScale = 1.f;
+bool (*g_playerSheathHook)(const Entity & player, const EERIE_LINKED & link, TransformInfo & transform) = nullptr;
+const std::vector<bool> * (*g_playerUpperLayerBones)(const EERIE_3DOBJ & object) = nullptr;
 
 static void PrepareAnimatedObjectHalo(HaloInfo & haloInfo, const Vec3f & pos,
                                       Skeleton * obj, EERIE_3DOBJ * eobj) {
@@ -1100,6 +1102,10 @@ static void Cedric_AnimateDrawEntityRender(EERIE_3DOBJ * eobj, const Vec3f & pos
 		// specific check to avoid drawing player weapon on its back when in subjective view
 		if(!EXTERNALVIEW && io == entities.player() &&
 		   link.lidx == entities.player()->obj->fastaccess.weapon_attach) {
+			TransformInfo sheath;
+			if(g_playerSheathHook && !IN_BOOK_DRAW && g_playerSheathHook(*io, link, sheath)) {
+				DrawEERIEInter(link.obj, sheath, link.io, true, invisibility);
+			}
 			continue;
 		}
 		
@@ -1191,7 +1197,8 @@ static void StoreEntityMovement(Entity * io, Vec3f & ftr, float scale) {
 /*!
  * Animate skeleton
  */
-static void Cedric_AnimateObject(Skeleton * obj, AnimLayer * animlayer) {
+static void Cedric_AnimateObject(Skeleton * obj, AnimLayer * animlayer,
+                                 const std::vector<bool> * upperLayerBones = nullptr) {
 	
 	std::vector<unsigned char> grps(obj->bones.size());
 
@@ -1227,7 +1234,12 @@ static void Cedric_AnimateObject(Skeleton * obj, AnimLayer * animlayer) {
 			if(grps[j]) {
 				continue;
 			}
-			
+
+			// Leave the other bones to the lower layers
+			if(count > 0 && upperLayerBones && (j >= upperLayerBones->size() || !(*upperLayerBones)[j])) {
+				continue;
+			}
+
 			if(!eanim->voidgroups[j]) {
 				grps[j] = 1;
 			}
@@ -1386,7 +1398,11 @@ static void animateSkeleton(EERIE_3DOBJ * eobj, AnimLayer * animlayer,
 	}
 	
 	// Perform animation in Local space
-	Cedric_AnimateObject(&skeleton, animlayer);
+	const std::vector<bool> * upperLayerBones = nullptr;
+	if(g_playerUpperLayerBones && io && io == entities.player() && !IN_BOOK_DRAW) {
+		upperLayerBones = g_playerUpperLayerBones(*eobj);
+	}
+	Cedric_AnimateObject(&skeleton, animlayer, upperLayerBones);
 	
 	if(BH_MODE && eobj->fastaccess.head_group) {
 		Bone & bone = skeleton.bones[eobj->fastaccess.head_group];

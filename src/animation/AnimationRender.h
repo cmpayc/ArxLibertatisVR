@@ -44,6 +44,8 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #ifndef ARX_ANIMATION_ANIMATIONRENDER_H
 #define ARX_ANIMATION_ANIMATIONRENDER_H
 
+#include <vector>
+
 #include "core/TimeTypes.h"
 #include "graphics/BaseGraphicsTypes.h"
 #include "graphics/Color.h"
@@ -52,6 +54,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "math/Types.h"
 
 struct EERIE_3DOBJ;
+struct EERIE_LINKED;
 struct AnimLayer;
 class Entity;
 struct RenderMaterial;
@@ -126,5 +129,17 @@ extern void (*g_playerSkeletonHook)(Entity & player, Skeleton & skeleton);
 
 //! Extra scale for drawing the player model (VR: matches the user's height), does not affect movement
 extern float g_playerModelScale;
+
+/*!
+ * Where to draw the player's sheathed weapon (linked to its back) in first person, where the game hides it
+ * (VR: at the hip). Returns false to keep it hidden.
+ */
+extern bool (*g_playerSheathHook)(const Entity & player, const EERIE_LINKED & link, TransformInfo & transform);
+
+/*!
+ * The bones of the player model that animation layers above the base layer may animate, or nullptr for all
+ * (VR: only the hands, the base layer animates the rest)
+ */
+extern const std::vector<bool> * (*g_playerUpperLayerBones)(const EERIE_3DOBJ & object);
 
 #endif // ARX_ANIMATION_ANIMATIONRENDER_H

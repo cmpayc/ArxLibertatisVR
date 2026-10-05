@@ -429,7 +429,8 @@ bool canGrabDirectly(VRHand handId) {
 
 //! \return true if a hand may also point at objects to grab them: the main hand points at panels instead
 bool canPointToGrab(VRHand handId) {
-	return handId == grabOffHand() || !g_vr->isPointingAtUI();
+	// At the sheath the grip draws the weapon (see VRControls)
+	return handId == grabOffHand() || (!g_vr->isPointingAtUI() && !isVRHandAtSheath());
 }
 
 //! Point at, take, grab, pull and throw objects with a hand, without the game's drag
