@@ -238,7 +238,17 @@ Entity::~Entity() {
 			}
 		}
 	}
-	
+
+	/*
+	 * Entities still owned by this one would point to a deleted entity, e.g. the weapon of an NPC (it keeps its owner
+	 * while it is the NPC's weapon), and crash when they are deleted later, e.g. when clearing the level.
+	 */
+	for(Entity & entity : entities) {
+		if(entity.m_owner == this) {
+			entity.m_owner = nullptr;
+		}
+	}
+
 	if(m_index != size_t(-1)) {
 		entities.remove(m_index);
 	}

@@ -1780,7 +1780,7 @@ void ArxGame::updateLevel() {
 		#if ARX_HAVE_OPENXR
 		// VR: swinging the weapon strikes instead of the strike animations
 		vrMelee = isVRMeleeActive();
-		if(vrMelee) {
+		if(isVRActive()) {
 			updateVRCombat();
 		}
 		#endif

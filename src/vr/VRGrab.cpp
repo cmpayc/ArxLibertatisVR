@@ -29,6 +29,7 @@
 #include "core/Core.h"
 #include "game/Entity.h"
 #include "game/EntityManager.h"
+#include "game/Equipment.h"
 #include "game/Inventory.h"
 #include "game/Player.h"
 #include "graphics/GraphicsTypes.h"
@@ -422,9 +423,11 @@ bool canGrabDirectly(VRHand handId) {
 		return true;
 	}
 
-	// The main hand attacks in combat mode, and the cursor is needed to drop dragged items, combine items
+	// The main hand attacks with a weapon in combat mode (fists also grab, see VRCombat), and the cursor is needed
+	// to drop dragged items, combine items
 	// and select spell targets
-	return !(player.Interface & INTER_COMBATMODE) && !g_draggedEntity && !COMBINE && !LOOKING_FOR_SPELL_TARGET;
+	bool attacking = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE;
+	return !attacking && !g_draggedEntity && !COMBINE && !LOOKING_FOR_SPELL_TARGET;
 }
 
 //! \return true if a hand may also point at objects to grab them: the main hand points at panels instead

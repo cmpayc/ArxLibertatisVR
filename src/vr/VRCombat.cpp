@@ -32,12 +32,14 @@
 #include "game/Player.h"
 #include "graphics/GraphicsTypes.h"
 #include "graphics/particle/Spark.h"
+#include "gui/Menu.h"
 #include "gui/Speech.h"
 #include "physics/Collisions.h"
 #include "scene/GameSound.h"
 #include "script/Script.h"
 #include "vr/VRBody.h"
 #include "vr/VRControls.h"
+#include "vr/VRGrab.h"
 #include "vr/VRSystem.h"
 
 namespace {
@@ -45,6 +47,8 @@ namespace {
 const float SwingStartSpeed = 1.5f;  // m/s
 const float SwingEndSpeed = 0.8f;    // m/s
 const float SwingEndTime = 0.15f;    // s below the end speed
+const float SwingTurnRatio = 0.3f;   // of the peak speed: the turning point of quick strikes
+const float SwingTurnTime = 0.05f;   // s below the turning speed
 const float HardHitSpeed = 2.5f;     // m/s for wear and sounds when the weapon hits walls and objects
 
 /*
@@ -176,9 +180,14 @@ bool updateSwing(Swing & swing, const Vec3f & position, float dt) {
 	swing.peakSpeed = std::max(swing.peakSpeed, swing.speed);
 	swing.distance += step;
 
-	if(swing.speed < SwingEndSpeed) {
+	/*
+	 * The swing ends when the hand stops, or when it slows down a lot compared to the peak: at the turning point of
+	 * quick strikes (jab, pull back, jab), which do not stop long enough, so that each one can hit
+	 */
+	if(swing.speed < SwingEndSpeed || swing.speed < swing.peakSpeed * SwingTurnRatio) {
 		swing.slowTime += dt;
-		if(swing.slowTime > SwingEndTime) {
+		float endTime = (swing.speed < SwingEndSpeed) ? SwingEndTime : SwingTurnTime;
+		if(swing.slowTime > endTime) {
 			swing.active = false;
 		}
 	} else {
@@ -201,6 +210,24 @@ std::string_view strikeName(WeaponType type) {
 		case WEAPON_2H: return "2h";
 		default: return "bare";
 	}
+}
+
+//! Damage factor of the player's attack without the bonus of the equipped weapon, for punches while it is sheathed
+float getBareHandRatio() {
+
+	Entity * weapon = entities.get(player.equiped[EQUIP_SLOT_WEAPON]);
+	float attack = player.m_miscFull.damages;
+	if(!weapon || !(weapon->ioflags & IO_ITEM) || !weapon->_itemdata->equipitem || attack <= 0.f) {
+		return 1.f;
+	}
+
+	const IO_EQUIPITEM_ELEMENT & bonus = weapon->_itemdata->equipitem->elements[IO_EQUIPITEM_ELEMENT_Damages];
+	float bare = attack - bonus.value;
+	if(bonus.flags.has(IO_ELEMENT_FLAG_PERCENT)) {
+		bare = attack / (1.f + bonus.value * 0.01f);
+	}
+
+	return glm::clamp(bare / attack, 0.05f, 1.f);
 }
 
 void startStrike(Entity & io, WeaponType type, VRHand hand) {
@@ -269,10 +296,20 @@ void updateFistSwings(Entity & io, float dt) {
 			continue;
 		}
 
+		/*
+		 * Every hand punches, in and outside of the combat mode (user request), except one holding an object; the
+		 * grip on an item still grabs it (see VRGrab). The grip in the world is also a game click, which the game may
+		 * take as a drag (isVRGrabbing): only objects really held count.
+		 */
+		bool free = !((hand == mainHand()) ? isVRGrabbingDirectly() : isVROffHandGrabbing());
 		if(updateSwing(swing, state.grip.position, dt)) {
-			startStrike(io, WEAPON_BARE, hand);
+			if(free) {
+				startStrike(io, WEAPON_BARE, hand);
+			} else {
+				swing.hit = true; // No punch in this swing
+			}
 		}
-		if(!swing.active || swing.hit) {
+		if(!swing.active || swing.hit || !free) {
 			continue;
 		}
 
@@ -292,7 +329,18 @@ void updateFistSwings(Entity & io, float dt) {
 
 		player.m_strikeAimRatio = strikeRatio(swing, FistSwing);
 		float damage = (player.m_miscFull.damages + 1.f) * player.m_strikeAimRatio;
-		if(tryToDoDamage(sphere.origin, damage, 40.f, io)) {
+		bool hit = false;
+		if(entities.get(player.equiped[EQUIP_SLOT_WEAPON])) {
+			// The weapon is in its sheath: punch without its damage bonus (the game's punches use the full attack)
+			if(target && (target->ioflags & IO_NPC)) {
+				Vec3f position = sphere.origin;
+				ARX_EQUIPMENT_ComputeDamages(&io, target, getBareHandRatio(), &position);
+				hit = true;
+			}
+		} else {
+			hit = tryToDoDamage(sphere.origin, damage, 40.f, io);
+		}
+		if(hit) {
 			swing.hit = true;
 			ParticleSparkSpawnContinous(sphere.origin, unsigned(damage), Color3f(0.45f, 0.1f, 0.f).toRGB());
 			if(target) {
@@ -314,7 +362,8 @@ bool isVRMeleeActive() {
 void updateVRCombat() {
 
 	Entity * io = entities.player();
-	if(!isVRMeleeActive() || !io || !io->obj || !(player.Interface & INTER_COMBATMODE)) {
+	bool canFight = ARXmenu.mode() == Mode_InGame && !BLOCK_PLAYER_CONTROLS && player.lifePool.current > 0.f;
+	if(!isVRActive() || !g_vr || !io || !io->obj || !canFight) {
 		resetSwings();
 		return;
 	}
@@ -322,8 +371,15 @@ void updateVRCombat() {
 	float dt = g_vr->getFrameDuration();
 	WeaponType type = ARX_EQUIPMENT_GetPlayerWeaponType();
 
-	if(type == WEAPON_BARE) {
+	// The fists punch whenever no weapon is drawn: without a weapon, or with it (or a bow) in its sheath
+	bool drawn = (player.Interface & INTER_COMBATMODE) && type != WEAPON_BARE;
+	if(!drawn) {
 		updateFistSwings(*io, dt);
+		return;
+	}
+
+	if(type == WEAPON_BOW) {
+		resetSwings(); // The game handles bows
 		return;
 	}
 
