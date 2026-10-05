@@ -20,6 +20,7 @@
 #include "vr/VRBody.h"
 
 #include <algorithm>
+#include <map>
 #include <sstream>
 #include <string_view>
 
@@ -56,6 +57,9 @@ struct ArmBones {
 	VertexGroupId hand;      //!< Hand, parent of the fingers
 	VertexGroupId indexRoot; //!< Gives the direction of the fingers
 	VertexGroupId thumb;     //!< Gives the side of the thumb
+	VertexGroupId indexTip;
+	VertexGroupId fingersRoot; //!< Middle, ring and little fingers
+	VertexGroupId fingersTip;
 	[[nodiscard]] bool valid() const { return shoulder && elbow && wrist && hand && indexRoot && thumb; }
 };
 
@@ -107,7 +111,12 @@ const BodyBones & getBodyBones(const EERIE_3DOBJ & object) {
 			arm.hand = findBodyGroup(object, side + "_hand");
 			arm.indexRoot = findBodyGroup(object, side + "_hand_index_root");
 			arm.thumb = findBodyGroup(object, side + "_hand_thumb");
-			if(!arm.valid()) {
+			arm.indexTip = findBodyGroup(object, side + "_hand_index_tip");
+			arm.fingersRoot = findBodyGroup(object, side + "_hand_fingers_root");
+			arm.fingersTip = findBodyGroup(object, side + "_hand_fingers_tip");
+			if(!arm.fingersTip) {
+				arm.fingersTip = findBodyGroup(object, side + "_hand_finger_tip"); // Spelled differently in the model
+			}			if(!arm.valid()) {
 				LogWarning << "VR: the player model has no complete " << side << " arm, it will not follow the controller";
 			}
 		}
@@ -219,6 +228,55 @@ glm::mat3x3 makeBodyFrame(const Vec3f & primary, const Vec3f & secondary) {
 const Vec3f FingerDirection(0.f, -0.5f, -1.f); //!< From the wrist to the knuckles
 const Vec3f ThumbDirection(0.f, 1.f, 0.f);     //!< The thumb rests on top of the controller
 
+/*!
+ * Curl the fingers of the model with the controller: the grip closes the middle, ring and little fingers,
+ * the trigger the index finger. Touch sensors lower the thumb and the index finger when they rest on the
+ * controller. The finger animation of the game is replaced - except while holding something (see applyVRBodyIK).
+ */
+void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & state) {
+	
+	// In the rest pose of the model the palms face down (+y in model space, which points down)
+	const Vec3f palm(0.f, 1.f, 0.f);
+	const Vec3f fingers = glm::normalize(skeleton.bones[arm.indexRoot].transinit_global);
+	const Vec3f thumb = skeleton.bones[arm.thumb].transinit_global;
+	
+	// Fingers bend around the line of the knuckles towards the palm, the thumb around the direction of the fingers
+	Vec3f fingerAxis = glm::cross(fingers, palm);
+	Vec3f thumbAxis = glm::cross(thumb - fingers * glm::dot(thumb, fingers), palm);
+	if(glm::length(fingerAxis) < 0.001f || glm::length(thumbAxis) < 0.001f) {
+		return;
+	}
+	fingerAxis = glm::normalize(fingerAxis);
+	thumbAxis = glm::normalize(thumbAxis);
+	
+	const float relaxed = 0.12f; // A slight curl even when open
+	float grip = glm::mix(relaxed, 1.f, state.squeeze);
+	float index = glm::mix(relaxed, 1.f, state.trigger);
+	if(state.hasIndexTouch && state.indexTouch) {
+		// Resting on the trigger
+		index = std::max(index, 0.35f);
+	}
+	
+	// With touch sensors the thumb lies on the controller while touching it and is raised otherwise
+	float thumbAngle = 25.f + 15.f * state.squeeze;
+	if(state.hasThumbTouch) {
+		thumbAngle = state.thumbTouch ? 40.f + 15.f * state.squeeze : 0.f;
+	}
+	
+	auto curl = [&](VertexGroupId bone, const Vec3f & axis, float degrees) {
+		if(bone) {
+			skeleton.bones[bone].init.quat = glm::angleAxis(glm::radians(degrees), axis);
+		}
+	};
+	curl(arm.fingersRoot, fingerAxis, 80.f * grip);
+	curl(arm.fingersTip, fingerAxis, 60.f * grip);
+	curl(arm.indexRoot, fingerAxis, 75.f * index);
+	curl(arm.indexTip, fingerAxis, 55.f * index);
+	curl(arm.thumb, thumbAxis, thumbAngle);
+	
+	updateBoneDescendants(skeleton, arm.hand);
+}
+
 void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPose & grip) {
 
 	Vec3f gripPosition;
@@ -299,6 +357,89 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 
 }
 
+//! The attach vertex for objects held in a hand of the player model
+VertexId getHoldVertex(const EERIE_3DOBJ & object, VRHand hand) {
+	return (hand == VRHandRight) ? object.fastaccess.primary_attach : object.fastaccess.left_attach;
+}
+
+//! \return true if the player model holds something (weapon, torch) in a hand
+bool isHoldingItem(const EERIE_3DOBJ & object, VRHand hand) {
+	VertexId vertex = getHoldVertex(object, hand);
+	for(const EERIE_LINKED & link : object.linked) {
+		if(vertex && link.lidx == vertex && link.obj) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! Direction of the longest extent of an object from its attach point (the blade of a weapon), in object space
+Vec3f getHeldItemAxis(const EERIE_3DOBJ & object, VertexId attach) {
+	
+	static std::map<const EERIE_3DOBJ *, Vec3f> s_axes;
+	auto it = s_axes.find(&object);
+	if(it != s_axes.end()) {
+		return it->second;
+	}
+	
+	Vec3f axis(0.f);
+	if(attach && size_t(attach) < object.vertexlist.size()) {
+		const Vec3f origin = object.vertexlist[attach].v;
+		float farthest = 0.f;
+		for(const EERIE_VERTEX & vertex : object.vertexlist) {
+			float distance = glm::distance(vertex.v, origin);
+			if(distance > farthest) {
+				farthest = distance;
+				axis = vertex.v - origin;
+			}
+		}
+		if(farthest > 0.001f) {
+			axis = glm::normalize(axis);
+		}
+	}
+	
+	s_axes[&object] = axis;
+	return axis;
+}
+
+/*!
+ * Turn the hand so that the object it holds (weapon, torch) points along the controller
+ *
+ * The object keeps the pose relative to the hand that the game gives it, with the handle inside the fist.
+ * The grip pose points through the closed fist, like the blade of a sword.
+ */
+void alignHeldItem(Skeleton & skeleton, const EERIE_3DOBJ & object, const ArmBones & arm, VRHand hand,
+                   const VRPose & grip) {
+	
+	VertexId vertex = getHoldVertex(object, hand);
+	const EERIE_LINKED * held = nullptr;
+	for(const EERIE_LINKED & link : object.linked) {
+		if(vertex && link.lidx == vertex && link.obj && link.lgroup) {
+			held = &link;
+			break;
+		}
+	}
+	if(!held) {
+		return;
+	}
+	
+	Vec3f axis = getHeldItemAxis(*held->obj, held->lidx2);
+	Vec3f gripPosition;
+	glm::quat gripOrientation;
+	if(axis == Vec3f(0.f) || !trackingPoseToWorld(grip.position, grip.orientation, gripPosition, gripOrientation)) {
+		return;
+	}
+	
+	// Attached objects use the rotation of the bone they are attached to
+	Vec3f current = skeleton.bones[held->lgroup].anim.quat * axis;
+	Vec3f wanted = gripOrientation * Vec3f(0.f, 0.f, 1.f);
+	glm::quat change = rotationBetween(glm::normalize(current), glm::normalize(wanted));
+	
+	Bone & handBone = skeleton.bones[arm.hand];
+	handBone.anim.quat = glm::normalize(change * handBone.anim.quat);
+	updateBoneDescendants(skeleton, arm.hand);
+}
+
 } // anonymous namespace
 
 void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
@@ -318,7 +459,16 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 	for(size_t hand = 0; hand < VRHandCount; hand++) {
 		const ArmBones & arm = bones.arms[hand];
 		if(arm.valid()) {
-			solveArm(skeleton, arm, VRHand(hand), input.getHand(VRHand(hand)).grip);
+			const VRHandState & state = input.getHand(VRHand(hand));
+			solveArm(skeleton, arm, VRHand(hand), state.grip);
+			if(state.grip.valid) {
+				if(isHoldingItem(*entity.obj, VRHand(hand))) {
+					// The animation of the game wraps the fingers around the handle: keep it, only aim the item
+					alignHeldItem(skeleton, *entity.obj, arm, VRHand(hand), state.grip);
+				} else {
+					curlFingers(skeleton, arm, state);
+				}
+			}
 		}
 	}
 

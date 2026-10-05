@@ -59,6 +59,12 @@ struct VRHandState {
 	float trigger = 0.f;
 	float squeeze = 0.f;
 	Vec2f thumbstick = Vec2f(0.f);
+	
+	// Capacitive touch sensors (not available on all controllers)
+	bool hasThumbTouch = false;
+	bool thumbTouch = false; //!< The thumb touches the buttons, thumbstick or thumb rest
+	bool hasIndexTouch = false;
+	bool indexTouch = false; //!< The index finger rests on the trigger
 
 	std::array<bool, VRButtonCount> pressed = { };
 	std::array<bool, VRButtonCount> previous = { };
@@ -121,6 +127,8 @@ private:
 	XrAction m_secondary;
 	XrAction m_menu;
 	XrAction m_haptic;
+	XrAction m_thumbTouch;
+	XrAction m_indexTouch;
 
 	std::array<XrSpace, VRHandCount> m_gripSpaces;
 	std::array<XrSpace, VRHandCount> m_aimSpaces;

@@ -25,6 +25,12 @@
 #include "graphics/Draw.h"
 #include "graphics/Renderer.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 static PlatformDuration FADEDURATION = 0;
 long FADEDIR = 0;
 static PlatformInstant FADESTART = 0;
@@ -77,6 +83,13 @@ void ManageFade() {
 	}
 	
 	LAST_FADEVALUE = Visibility;
+	
+	#if ARX_HAVE_OPENXR
+	// In VR the fade would only darken the floating interface panel, not the view
+	if(isVRActive()) {
+		return;
+	}
+	#endif
 	
 	UseRenderState state(render2D());
 	

@@ -77,6 +77,8 @@ VRInput::VRInput()
 	, m_secondary(XR_NULL_HANDLE)
 	, m_menu(XR_NULL_HANDLE)
 	, m_haptic(XR_NULL_HANDLE)
+	, m_thumbTouch(XR_NULL_HANDLE)
+	, m_indexTouch(XR_NULL_HANDLE)
 	, m_gripSpaces{ XR_NULL_HANDLE, XR_NULL_HANDLE }
 	, m_aimSpaces{ XR_NULL_HANDLE, XR_NULL_HANDLE }
 { }
@@ -156,6 +158,8 @@ bool VRInput::init(XrInstance instance) {
 	m_secondary = createAction("secondary", "Secondary button (B/Y)", XR_ACTION_TYPE_BOOLEAN_INPUT);
 	m_menu = createAction("menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT);
 	m_haptic = createAction("haptic", "Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT);
+	m_thumbTouch = createAction("thumb_touch", "Thumb touch", XR_ACTION_TYPE_BOOLEAN_INPUT);
+	m_indexTouch = createAction("index_touch", "Index finger touch", XR_ACTION_TYPE_BOOLEAN_INPUT);
 
 	suggestBindings("/interaction_profiles/oculus/touch_controller", {
 		{ m_gripPose, "/user/hand/left/input/grip/pose" },
@@ -177,6 +181,16 @@ bool VRInput::init(XrInstance instance) {
 		{ m_menu, "/user/hand/left/input/menu/click" },
 		{ m_haptic, "/user/hand/left/output/haptic" },
 		{ m_haptic, "/user/hand/right/output/haptic" },
+		{ m_thumbTouch, "/user/hand/left/input/x/touch" },
+		{ m_thumbTouch, "/user/hand/left/input/y/touch" },
+		{ m_thumbTouch, "/user/hand/left/input/thumbstick/touch" },
+		{ m_thumbTouch, "/user/hand/left/input/thumbrest/touch" },
+		{ m_thumbTouch, "/user/hand/right/input/a/touch" },
+		{ m_thumbTouch, "/user/hand/right/input/b/touch" },
+		{ m_thumbTouch, "/user/hand/right/input/thumbstick/touch" },
+		{ m_thumbTouch, "/user/hand/right/input/thumbrest/touch" },
+		{ m_indexTouch, "/user/hand/left/input/trigger/touch" },
+		{ m_indexTouch, "/user/hand/right/input/trigger/touch" },
 	});
 
 	suggestBindings("/interaction_profiles/valve/index_controller", {
@@ -198,6 +212,16 @@ bool VRInput::init(XrInstance instance) {
 		{ m_secondary, "/user/hand/right/input/b/click" },
 		{ m_haptic, "/user/hand/left/output/haptic" },
 		{ m_haptic, "/user/hand/right/output/haptic" },
+		{ m_thumbTouch, "/user/hand/left/input/a/touch" },
+		{ m_thumbTouch, "/user/hand/left/input/b/touch" },
+		{ m_thumbTouch, "/user/hand/left/input/thumbstick/touch" },
+		{ m_thumbTouch, "/user/hand/left/input/trackpad/touch" },
+		{ m_thumbTouch, "/user/hand/right/input/a/touch" },
+		{ m_thumbTouch, "/user/hand/right/input/b/touch" },
+		{ m_thumbTouch, "/user/hand/right/input/thumbstick/touch" },
+		{ m_thumbTouch, "/user/hand/right/input/trackpad/touch" },
+		{ m_indexTouch, "/user/hand/left/input/trigger/touch" },
+		{ m_indexTouch, "/user/hand/right/input/trigger/touch" },
 	});
 
 	suggestBindings("/interaction_profiles/htc/vive_controller", {
@@ -374,7 +398,15 @@ void VRInput::update(XrTime time, XrSpace space) {
 		state.pressed[VRButtonSecondary] = getBoolean(m_secondary);
 		state.pressed[VRButtonStick] = getBoolean(m_thumbstickClick);
 		state.pressed[VRButtonMenu] = getBoolean(m_menu);
-
+		
+		auto getTouch = [&](XrAction action, bool & available) {
+			XrActionStateBoolean value = { XR_TYPE_ACTION_STATE_BOOLEAN };
+			getInfo.action = action;
+			available = focused && XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &getInfo, &value)) && value.isActive;
+			return available && value.currentState;
+		};
+		state.thumbTouch = getTouch(m_thumbTouch, state.hasThumbTouch);
+		state.indexTouch = getTouch(m_indexTouch, state.hasIndexTouch);
 	}
 
 }
