@@ -172,6 +172,9 @@ extern EntityHandle LastSelectedIONum;
 
 void ARX_INTERFACE_setCombatMode(ARX_INTERFACE_COMBAT_MODE i);
 
+//! Open the inventory of a dead NPC (loot), \return false if it is not a corpse with an inventory
+bool ARX_INTERFACE_OpenCorpse(Entity & npc);
+
 bool ARX_INTERFACE_MouseInBook();
 
 void ARX_INTERFACE_Reset();

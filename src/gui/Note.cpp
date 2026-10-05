@@ -35,6 +35,23 @@
 #include "platform/Platform.h"
 #include "scene/GameSound.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
+//! \return true if a left click on a note closes it, like in free look mode
+static bool isNoteClosedByClick() {
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		// VR: the laser pointer clicks (main trigger) close notes too
+		return true;
+	}
+	#endif
+	return TRUE_PLAYER_MOUSELOOK_ON;
+}
+
 void Note::setData(Type type, std::string_view text) {
 	
 	deallocate();
@@ -344,7 +361,7 @@ bool Note::manageActions() {
 		}
 		
 	} else if(area().contains(Vec2f(DANAEMouse))) {
-		if((eeMouseDown1() && TRUE_PLAYER_MOUSELOOK_ON) || eeMouseDown2()) {
+		if((eeMouseDown1() && isNoteClosedByClick()) || eeMouseDown2()) {
 			return true;
 		}
 	}

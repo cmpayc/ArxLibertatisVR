@@ -176,6 +176,8 @@ private:
 	                bool interactive);
 	//! Attach the HUD to the wrists, see \ref VRHudAreas
 	void updateWristPanels(const VRHudAreas & areas);
+	//! Show the loot of a dead NPC like a sheet of paper lying on the body, see \ref VRHudAreas
+	void updateLootPanel(const VRHudAreas & areas);
 	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
 	void updatePointer();
 	unsigned acquireSwapchainImage(EyeSwapchain & swapchain);

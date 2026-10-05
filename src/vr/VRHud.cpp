@@ -24,6 +24,7 @@
 #include "cinematic/CinematicController.h"
 #include "core/Config.h"
 #include "core/Core.h"
+#include "game/Entity.h"
 #include "game/Player.h"
 #include "gui/CinematicBorder.h"
 #include "gui/Hud.h"
@@ -85,7 +86,13 @@ VRHudAreas getVRHudAreas() {
 		// Without the slide-in animation, which moves the contents instead
 		Rectf container = g_secondaryInventoryHud.rect();
 		container.move(-container.left, 0.f);
-		areas.screen = merge(areas.screen, toPixels(container));
+		const Entity * owner = g_secondaryInventoryHud.container();
+		if(owner && (owner->ioflags & IO_NPC)) {
+			areas.loot = toPixels(container);
+			areas.lootEntity = owner;
+		} else {
+			areas.screen = merge(areas.screen, toPixels(container));
+		}
 	}
 	
 	bool cinematic = !cinematicIsStopped() || cinematicBorder.isActive();

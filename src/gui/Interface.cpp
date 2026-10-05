@@ -677,6 +677,34 @@ void ARX_INTERFACE_setCombatMode(ARX_INTERFACE_COMBAT_MODE i) {
 	}
 }
 
+bool ARX_INTERFACE_OpenCorpse(Entity & npc) {
+
+	if(!(npc.ioflags & IO_NPC) || !npc.script.valid || npc._npcdata->lifePool.current > 0.f || !npc.inventory) {
+		return false;
+	}
+
+	if((player.Interface & INTER_STEAL) && ioSteal && &npc != ioSteal) {
+		SendIOScriptEvent(entities.player(), ioSteal, SM_STEAL, "off");
+		player.Interface &= ~INTER_STEAL;
+	}
+
+	g_secondaryInventoryHud.open(&npc);
+
+	if(player.Interface & INTER_INVENTORYALL) {
+		ARX_SOUND_PlayInterface(g_snd.BACKPACK, Random::getf(0.9f, 1.1f));
+		g_playerInventoryHud.close();
+	} else if(player.Interface & INTER_INVENTORY) {
+		ARX_SOUND_PlayInterface(g_snd.BACKPACK, Random::getf(0.9f, 1.1f));
+	}
+
+	if(g_secondaryInventoryHud.isOpen()) {
+		bForceEscapeFreeLook = true;
+		lOldTruePlayerMouseLook = !TRUE_PLAYER_MOUSELOOK_ON;
+	}
+
+	return true;
+}
+
 long CSEND = 0;
 long MOVE_PRECEDENCE = 0;
 
@@ -699,28 +727,7 @@ void ArxGame::managePlayerControls() {
 						SendIOScriptEvent(entities.player(), t, SM_CHAT);
 						DRAGGING = false;
 					} else {
-						if(t->inventory) {
-							
-							if((player.Interface & INTER_STEAL) && ioSteal && t != ioSteal) {
-								SendIOScriptEvent(entities.player(), ioSteal, SM_STEAL, "off");
-								player.Interface &= ~INTER_STEAL;
-							}
-							
-							g_secondaryInventoryHud.open(t);
-							
-							if(player.Interface & INTER_INVENTORYALL) {
-								ARX_SOUND_PlayInterface(g_snd.BACKPACK, Random::getf(0.9f, 1.1f));
-								g_playerInventoryHud.close();
-							} else if(player.Interface & INTER_INVENTORY) {
-								ARX_SOUND_PlayInterface(g_snd.BACKPACK, Random::getf(0.9f, 1.1f));
-							}
-							
-							if(g_secondaryInventoryHud.isOpen()) {
-								bForceEscapeFreeLook = true;
-								lOldTruePlayerMouseLook = !TRUE_PLAYER_MOUSELOOK_ON;
-							}
-							
-						}
+						ARX_INTERFACE_OpenCorpse(*t);
 					}
 				}
 			} else {

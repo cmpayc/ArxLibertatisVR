@@ -108,6 +108,8 @@ public:
 	
 	[[nodiscard]] bool isVisible() const noexcept;
 	[[nodiscard]] bool isOpen() const noexcept;
+	//! The open container (chest, corpse, shop), or nullptr
+	[[nodiscard]] Entity * container() const noexcept { return m_container; }
 	[[nodiscard]] bool isOpen(const Entity * container) const noexcept;
 	
 	void clear(const Entity * container);

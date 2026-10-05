@@ -22,6 +22,8 @@
 
 #include "math/Rectangle.h"
 
+class Entity;
+
 /*!
  * Areas of the virtual screen (window pixels, top-left origin) that are shown separately in VR while in-game:
  * the gauges on the off hand wrist, the inventory extending from it, the mini map on the main hand wrist and the
@@ -35,6 +37,8 @@ struct VRHudAreas {
 	Rect mana;      //!< Mana gauge
 	Rect inventory; //!< Player inventory, while open
 	Rect map;       //!< Mini map
+	Rect loot;      //!< Inventory of a dead NPC, shown lying on the body
+	const Entity * lootEntity = nullptr; //!< The dead NPC
 
 	float hudScale = 1.f; //!< Screen pixels per interface pixel of the gauges and the inventory
 	float mapScale = 1.f; //!< Screen pixels per interface pixel of the mini map

@@ -52,6 +52,9 @@
 #include "core/Config.h"
 #include "core/Version.h"
 #include "game/Entity.h"
+#include "game/NPC.h"
+#include "game/Player.h"
+#include "gui/Interface.h"
 #include "input/Input.h"
 #include "input/Mouse.h"
 #include "io/log/Logger.h"
@@ -1276,6 +1279,7 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 		addScreenPanel(areas.screen, isVRInterfaceOpen());
 	}
 	updateWristPanels(areas);
+	updateLootPanel(areas);
 
 }
 
@@ -1402,6 +1406,54 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 		}
 
 	}
+
+}
+
+void VRSystem::updateLootPanel(const VRHudAreas & areas) {
+
+	if(areas.loot.empty() || !areas.lootEntity) {
+		return;
+	}
+
+	// On top of the body (Arx world: y points down)
+	const Entity & body = *areas.lootEntity;
+	Vec3f top = body.pos;
+	if(body.bbox3D.min.x <= body.bbox3D.max.x) {
+		top = (body.bbox3D.min + body.bbox3D.max) * 0.5f;
+		top.y = body.bbox3D.min.y;
+	}
+	top.y -= 5.f;
+	Vec3f position;
+	glm::quat unused;
+	if(!worldPoseToTracking(top, glm::quat(1.f, 0.f, 0.f, 0.f), position, unused)) {
+		return;
+	}
+
+	const XrPosef & left = m_views[0].pose;
+	const XrPosef & right = m_views[1].pose;
+	Vec3f head = (Vec3f(left.position.x, left.position.y, left.position.z)
+	              + Vec3f(right.position.x, right.position.y, right.position.z)) * 0.5f;
+
+	// Lying flat with its top away from the user, tilted up a little towards the user to be readable
+	Vec3f away = position - head;
+	away.y = 0.f;
+	if(glm::length(away) < 0.01f) {
+		glm::quat orientation(left.orientation.w, left.orientation.x, left.orientation.y, left.orientation.z);
+		away = orientation * Vec3f(0.f, 0.f, -1.f);
+		away.y = 0.f;
+		if(glm::length(away) < 0.01f) {
+			return;
+		}
+	}
+	away = glm::normalize(away);
+	const float Tilt = glm::radians(30.f);
+	Vec3f normal = Vec3f(0.f, 1.f, 0.f) * std::cos(Tilt) - away * std::sin(Tilt);
+	Vec3f up = glm::normalize(away - normal * glm::dot(away, normal));
+	Vec3f across = glm::cross(up, normal);
+	glm::quat orientation = glm::quat_cast(glm::mat3x3(across, up, normal));
+
+	const float LootPixelSize = 0.0012f; // meters per interface pixel: a sheet of about 30 cm
+	addUIPanel(areas.loot, LootPixelSize / areas.hudScale, position, orientation, true);
 
 }
 
@@ -1663,6 +1715,21 @@ void VRSystem::updatePointer() {
 	if(hand.wasPressed(VRButtonGrip)) {
 		// Touching an object grabs it even while pointing at a panel
 		m_gripIsClick = !isVRGripGrabbing() && !isVRHandAtSheath(); // Not at the sheath (draws the weapon, see VRControls)
+		// The grip on a dead body opens its loot (the game uses a double click), putting a drawn weapon away
+		if(m_gripIsClick && inGame && !onUI) {
+			Entity * target = getVRPointedEntity(hand.aim, false);
+			const float LootDistance = 360.f; // Like the game's clicks on objects
+			if(target && (target->ioflags & IO_NPC) && target->_npcdata->lifePool.current <= 0.f
+			   && glm::distance(player.pos, target->pos) < LootDistance) {
+				if(player.Interface & INTER_COMBATMODE) {
+					ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
+				}
+				if(ARX_INTERFACE_OpenCorpse(*target)) {
+					m_gripIsClick = false;
+					m_input.vibrate(dominant, 0.4f, 0.05f);
+				}
+			}
+		}
 	} else if(isVRGrabbingDirectly()) {
 		m_gripIsClick = false; // Caught an object after pressing the grip
 	}
