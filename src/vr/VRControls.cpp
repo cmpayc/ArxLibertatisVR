@@ -192,7 +192,7 @@ void updateVRControls() {
 	press(CONTROLS_CUST_BOOK, off.isPressed(VRButtonPrimary));
 	press(CONTROLS_CUST_WEAPON, off.isPressed(VRButtonStick));
 	// While the off hand holds an object its trigger stores it instead (see VRGrab)
-	press(CONTROLS_CUST_USE, off.isPressed(VRButtonTrigger) && !isVROffHandGrabbing());
+	press(CONTROLS_CUST_USE, (off.isPressed(VRButtonTrigger) && !isVROffHandGrabbing()) || g_vr->isUseTapPressed());
 	// While holding an object the trigger stores it instead (see VRGrab)
 	press(CONTROLS_CUST_MAGICMODE, main.isPressed(VRButtonTrigger) && !g_vr->isTriggerClicking()
 	                               && !g_vr->isPointingAtUI() && !isVRGrabbing());

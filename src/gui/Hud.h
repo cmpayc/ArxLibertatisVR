@@ -420,6 +420,11 @@ public:
 	void updateInput();
 	void draw();
 	void recalcScale();
+
+	//! Screen area of the health gauge, as laid out in the last frame
+	Rectf healthGaugeArea() { return healthGauge.rect(); }
+	//! Screen area of the mana gauge, as laid out in the last frame
+	Rectf manaGaugeArea() { return manaGauge.rect(); }
 };
 
 extern HudRoot g_hudRoot;

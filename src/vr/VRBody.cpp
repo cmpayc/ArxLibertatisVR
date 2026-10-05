@@ -350,6 +350,14 @@ glm::mat3x3 makeBodyFrame(const Vec3f & primary, const Vec3f & secondary) {
  */
 bool g_handInWall[VRHandCount] = { false, false };
 
+// The wrist joint and the controller orientation of each hand of the posed model, in the world
+struct WristPose {
+	bool valid = false;
+	Vec3f position = Vec3f(0.f);
+	glm::quat gripOrientation = glm::quat(1.f, 0.f, 0.f, 0.f);
+};
+WristPose g_wristPoses[VRHandCount];
+
 const Vec3f FingerDirection(0.f, -0.5f, -1.f); //!< From the wrist to the knuckles
 const Vec3f ThumbDirection(0.f, 1.f, 0.f);     //!< The thumb rests on top of the controller
 
@@ -498,6 +506,11 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	
 	skeleton.bones[arm.hand].anim.quat = handOrientation;
 	updateBoneDescendants(skeleton, arm.hand);
+	
+	WristPose & pose = g_wristPoses[hand];
+	pose.valid = true;
+	pose.position = skeleton.bones[arm.wrist].anim.trans;
+	pose.gripOrientation = gripOrientation;
 
 }
 
@@ -594,6 +607,9 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 
 	const BodyBones & bones = getBodyBones(*entity.obj);
 	const VRInput & input = g_vr->getInput();
+	for(WristPose & pose : g_wristPoses) {
+		pose.valid = false;
+	}
 	
 	// The spine first: it moves the shoulders
 	if(bones.spine.valid()) {
@@ -616,6 +632,18 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 		}
 	}
 
+}
+
+bool getVRWristPose(VRHand hand, Vec3f & position, glm::quat & gripOrientation) {
+	
+	const WristPose & pose = g_wristPoses[hand];
+	if(!isVRActive() || !pose.valid) {
+		return false;
+	}
+	
+	position = pose.position;
+	gripOrientation = pose.gripOrientation;
+	return true;
 }
 
 Vec3f getVRModelOffset() {

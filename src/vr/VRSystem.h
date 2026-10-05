@@ -28,8 +28,11 @@
 #include <openxr/openxr.h>
 
 #include "graphics/opengl/OpenGLRenderer.h"
+#include "math/Rectangle.h"
 #include "math/Types.h"
 #include "vr/VRInput.h"
+
+struct VRHudAreas;
 
 
 /*!
@@ -140,6 +143,9 @@ public:
 	
 	//! \return true if the laser pointer currently points at the virtual screen
 	[[nodiscard]] bool isPointingAtUI() const { return m_pointerOnUI; }
+	
+	//! \return true while a trigger tap in the inventory uses the item (the game's use action, like a right click)
+	[[nodiscard]] bool isUseTapPressed() const { return m_useTapFrames > 2; }
 
 	//! Acquire the current swapchain image for an eye and return its OpenGL texture name
 	unsigned acquireEyeImage(size_t eye);
@@ -163,6 +169,13 @@ private:
 	bool createUITarget(const Vec2i & size);
 	void destroyUITarget();
 	void updateUIPlacement(bool followHead);
+	//! Show a part of the virtual screen at the screen placement, see \ref updateUIPlacement
+	void addScreenPanel(const Rect & area, bool interactive);
+	//! Show a part of the virtual screen as a quad of the given size (metres per pixel)
+	bool addUIPanel(const Rect & area, float pixelSize, const Vec3f & position, const glm::quat & orientation,
+	                bool interactive);
+	//! Attach the HUD to the wrists, see \ref VRHudAreas
+	void updateWristPanels(const VRHudAreas & areas);
 	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
 	void updatePointer();
 	unsigned acquireSwapchainImage(EyeSwapchain & swapchain);
@@ -213,7 +226,17 @@ private:
 	Vec3f m_uiAnchor; // head position the screen is placed relative to, OpenXR stage space
 	XrPosef m_uiPose;
 	XrExtent2Df m_uiExtent;
-	bool m_uiVisible; // The virtual screen was shown in the last frame
+	
+	// Parts of the virtual screen shown as separate quad layers
+	struct UIPanel {
+		Rect area; // Window pixels, top-left origin
+		XrPosef pose;
+		XrExtent2Df extent;
+		bool interactive; // The laser pointer can click on it
+		bool useOnTap = false; // A short trigger click uses the item (right click), holding it drags
+	};
+	std::vector<UIPanel> m_uiPanels; // Submitted in this frame
+	std::vector<UIPanel> m_visiblePanels; // Shown in the last frame
 	
 	// Controllers and the laser pointer (dominant hand) emulating the mouse on the virtual screen
 	VRInput m_input;
@@ -226,6 +249,8 @@ private:
 	bool m_clickByTrigger; // The trigger is used as the click (started on a panel)
 	bool m_clickWasPressed;
 	bool m_gripIsClick; // The grip press is a game click (not grabbing directly, see VRGrab)
+	bool m_clickUseOnTap; // The trigger click started on a panel where a tap uses the item
+	int m_useTapFrames; // Frames left of a use action from a trigger tap (press, then release in place)
 
 	XrFrameState m_frameState;
 	bool m_frameActive;

@@ -121,6 +121,8 @@ public:
 	
 	//! Shows the top right minimap
 	void showPlayerMiniMap(MapLevel level);
+	//! Screen area of the top right minimap
+	static Rect playerMiniMapArea();
 	
 	//! Shows the zoomed-in minimap in the book
 	void showBookMiniMap(MapLevel level, Rect rect, float scale);

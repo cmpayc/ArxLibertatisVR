@@ -78,6 +78,10 @@ bool trackingPointToWorld(const Vec3f & position, Vec3f & world);
  */
 bool trackingPoseToWorld(const Vec3f & position, const glm::quat & orientation,
                          Vec3f & worldPosition, glm::quat & worldOrientation);
+//! Convert a pose in the game world to the tracking space, the inverse of \ref trackingPoseToWorld
+bool worldPoseToTracking(const Vec3f & worldPosition, const glm::quat & worldOrientation,
+                         Vec3f & position, glm::quat & orientation);
+
 //! Project a world position to the window-sized screen of the last prepared VR frame
 bool worldToVRScreen(const Vec3f & position, Vec2f & screen);
 

@@ -68,6 +68,8 @@ public:
 	Vec2f anchorPosition();
 	void update();
 	void updateRect();
+	//! The screen area once the inventory has finished sliding in
+	Rectf openArea() const { return m_rect + Vec2f(0.f, -float(m_inventoryY) * m_scale); }
 	bool updateInput();
 	void updateCombineFlags(Entity * source);
 	void draw();

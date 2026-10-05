@@ -35,6 +35,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <sstream>
 
 #include <glm/gtc/constants.hpp>
@@ -50,12 +51,16 @@
 
 #include "core/Config.h"
 #include "core/Version.h"
+#include "game/Entity.h"
 #include "input/Input.h"
 #include "input/Mouse.h"
 #include "io/log/Logger.h"
 #include "platform/ProgramOptions.h"
+#include "vr/VRBody.h"
+#include "vr/VRCamera.h"
 #include "vr/VRControls.h"
 #include "vr/VRGrab.h"
+#include "vr/VRHud.h"
 
 
 VRSystem * g_vr = nullptr;
@@ -314,7 +319,6 @@ VRSystem::VRSystem()
 	, m_uiAnchor(0.f)
 	, m_uiPose{ { 0.f, 0.f, 0.f, 1.f }, { 0.f, 0.f, 0.f } }
 	, m_uiExtent{ 1.f, 1.f }
-	, m_uiVisible(false)
 	, m_pointerOnUI(false)
 	, m_lastFrameStereo(false)
 	, m_triggerHoldTime(0.f)
@@ -324,6 +328,8 @@ VRSystem::VRSystem()
 	, m_clickByTrigger(false)
 	, m_clickWasPressed(false)
 	, m_gripIsClick(true)
+	, m_clickUseOnTap(false)
+	, m_useTapFrames(0)
 	, m_frameState{ XR_TYPE_FRAME_STATE }
 	, m_frameActive(false)
 	, m_shouldRender(false)
@@ -743,6 +749,7 @@ bool VRSystem::beginFrame() {
 	m_stereoViews.clear();
 	m_uiSubmitted = false;
 	m_uiRendered = false;
+	m_uiPanels.clear();
 
 	if(!m_sessionRunning) {
 		return false;
@@ -902,19 +909,25 @@ void VRSystem::endFrame() {
 		layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&projection));
 	}
 
-	XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+	std::vector<XrCompositionLayerQuad> quads;
 	if(m_shouldRender && m_uiSubmitted) {
-		// The virtual screen contains premultiplied alpha
-		quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-		quad.space = m_stageSpace;
-		quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-		quad.subImage.swapchain = m_uiSwapchain.handle;
-		quad.subImage.imageRect.offset = { 0, 0 };
-		quad.subImage.imageRect.extent = { m_uiSize.x, m_uiSize.y };
-		quad.subImage.imageArrayIndex = 0;
-		quad.pose = m_uiPose;
-		quad.size = m_uiExtent;
-		layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&quad));
+		quads.reserve(m_uiPanels.size());
+		for(const UIPanel & panel : m_uiPanels) {
+			XrCompositionLayerQuad & quad = quads.emplace_back();
+			quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+			// The virtual screen contains premultiplied alpha
+			quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+			quad.space = m_stageSpace;
+			quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+			quad.subImage.swapchain = m_uiSwapchain.handle;
+			// OpenGL images start at the bottom
+			quad.subImage.imageRect.offset = { panel.area.left, m_uiSize.y - panel.area.bottom };
+			quad.subImage.imageRect.extent = { panel.area.width(), panel.area.height() };
+			quad.subImage.imageArrayIndex = 0;
+			quad.pose = panel.pose;
+			quad.size = panel.extent;
+			layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader *>(&quad));
+		}
 	}
 
 	XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
@@ -923,13 +936,17 @@ void VRSystem::endFrame() {
 	endInfo.layerCount = uint32_t(layers.size());
 	endInfo.layers = layers.data();
 	check(xrEndFrame(m_session, &endInfo), "xrEndFrame");
-	m_uiVisible = m_shouldRender && m_uiSubmitted;
+	m_visiblePanels.clear();
+	if(m_shouldRender && m_uiSubmitted) {
+		m_visiblePanels.swap(m_uiPanels);
+	}
 	m_lastFrameStereo = m_shouldRender && m_stereoRendered;
 
 	m_frameActive = false;
 	m_shouldRender = false;
 	m_rendered = false;
 	m_uiSubmitted = false;
+	m_uiPanels.clear();
 
 }
 
@@ -1166,6 +1183,8 @@ void VRSystem::destroyUITarget() {
 		xrDestroySwapchain(m_uiSwapchain.handle);
 	}
 	m_uiSwapchain = EyeSwapchain();
+	m_uiPanels.clear();
+	m_visiblePanels.clear();
 	m_uiSubmitted = false;
 
 	if(m_uiFramebuffer) {
@@ -1236,11 +1255,152 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 	// Desktop view: the interface over the left eye image, or on its own for menus
 	drawTextureToWindow(m_uiColor, windowSize, !overScene);
 
-	// In-game the HUD panel is only shown with an open interface (inventory, book, ...) unless enabled
-	bool show = !overScene || ((config.vr.showHud || isVRInterfaceOpen()) && !isVRGrabbing());
-	if(image && show) {
-		updateUIPlacement(overScene);
-		m_uiSubmitted = true;
+	if(!image) {
+		return;
+	}
+
+	if(!overScene) {
+		updateUIPlacement(false);
+		addScreenPanel(Rect(m_uiSize.x, m_uiSize.y), true);
+		return;
+	}
+
+	/*
+	 * In-game the HUD is attached to the wrists and only the open interface (book, notes, containers) is shown
+	 * in front, see VRHud. While holding an object the panel in front is hidden, so that the object does not
+	 * switch to inventory drag and drop.
+	 */
+	VRHudAreas areas = getVRHudAreas();
+	if(!areas.screen.empty() && !isVRGrabbing()) {
+		updateUIPlacement(true);
+		addScreenPanel(areas.screen, isVRInterfaceOpen());
+	}
+	updateWristPanels(areas);
+
+}
+
+void VRSystem::addScreenPanel(const Rect & area, bool interactive) {
+
+	// The same pixel size as the whole virtual screen, centered where the screen is
+	float pixelSize = m_uiExtent.width / float(m_uiSize.x);
+	glm::quat orientation(m_uiPose.orientation.w, m_uiPose.orientation.x,
+	                      m_uiPose.orientation.y, m_uiPose.orientation.z);
+	Vec3f position(m_uiPose.position.x, m_uiPose.position.y, m_uiPose.position.z);
+	addUIPanel(area, pixelSize, position, orientation, interactive);
+
+}
+
+bool VRSystem::addUIPanel(const Rect & area, float pixelSize, const Vec3f & position,
+                          const glm::quat & orientation, bool interactive) {
+
+	Rect visible = area & Rect(m_uiSize.x, m_uiSize.y);
+	if(visible.empty() || pixelSize <= 0.f) {
+		return false;
+	}
+
+	UIPanel & panel = m_uiPanels.emplace_back();
+	panel.area = visible;
+	panel.pose.orientation = { orientation.x, orientation.y, orientation.z, orientation.w };
+	panel.pose.position = { position.x, position.y, position.z };
+	panel.extent = { float(visible.width()) * pixelSize, float(visible.height()) * pixelSize };
+	panel.interactive = interactive;
+	m_uiSubmitted = true;
+	return true;
+
+}
+
+void VRSystem::updateWristPanels(const VRHudAreas & areas) {
+
+	const VRHand hudHand = config.vr.leftHanded ? VRHandRight : VRHandLeft;
+
+	const XrPosef & left = m_views[0].pose;
+	const XrPosef & right = m_views[1].pose;
+	Vec3f head = (Vec3f(left.position.x, left.position.y, left.position.z)
+	              + Vec3f(right.position.x, right.position.y, right.position.z)) * 0.5f;
+
+	// Sizes in metres per interface pixel
+	const float GaugePixelSize = 0.0003f;
+	const float InventoryPixelSize = 0.0005f;
+	const float MapPixelSize = 0.001f;
+	const float Gap = 0.005f;
+	// Rotation of the panels on the left wrist, clockwise (mirrored on the right wrist)
+	const float Tilt = glm::radians(45.f);
+	// Sideways shift of the panels: to the left on the left wrist, to the right on the right wrist
+	const float Shift = 0.025f;
+
+	for(size_t i = 0; i < VRHandCount; i++) {
+
+		const VRHand hand = VRHand(i);
+		const VRHandState & state = m_input.getHand(hand);
+		bool isHudHand = (hand == hudHand);
+		if(!state.grip.valid || (isHudHand ? (areas.health.empty() && areas.mana.empty() && areas.inventory.empty())
+		                                   : areas.map.empty())) {
+			continue;
+		}
+
+		/*
+		 * Like a watch on the inside of the wrist, fixed to it (OpenXR grip frame: x points out of the left palm and
+		 * into the right palm, z backwards along the forearm). The top of the panels points to the fingers, turned by
+		 * the tilt.
+		 */
+		Vec3f wristJoint = state.grip.position + state.grip.orientation * config.vr.handOffset;
+		glm::quat grip = state.grip.orientation;
+		// Attached to the visible body: the model wrist lags behind the controller while walking
+		Vec3f modelWrist;
+		glm::quat modelGrip;
+		if(getVRWristPose(hand, modelWrist, modelGrip)) {
+			Vec3f position;
+			glm::quat orientation;
+			if(worldPoseToTracking(modelWrist, modelGrip, position, orientation)) {
+				wristJoint = position;
+				grip = orientation;
+			}
+		}
+		float side = (hand == VRHandLeft) ? 1.f : -1.f;
+		Vec3f normal = grip * Vec3f(side, 0.f, 0.f);
+		Vec3f fingers = grip * Vec3f(0.f, 0.f, -1.f);
+		Vec3f fingersRight = glm::cross(fingers, normal);
+		float tilt = Tilt * side;
+		Vec3f up = fingers * std::cos(tilt) + fingersRight * std::sin(tilt);
+		Vec3f across = glm::cross(up, normal); // Left to right when reading
+		Vec3f wrist = wristJoint + grip * Vec3f(0.f, 0.f, 0.03f) + normal * 0.025f;
+
+		// Like the body, it can only be seen from the front (quad layers are not hidden by the arm)
+		if(glm::dot(normal, head - wrist) <= 0.f) {
+			continue;
+		}
+
+		glm::quat orientation = glm::quat_cast(glm::mat3x3(across, up, normal));
+		auto add = [&](const Rect & area, float pixelSize, Vec2f center, bool interactive) {
+			Vec3f position = wrist + across * (center.x - Shift * side) + up * center.y;
+			return addUIPanel(area, pixelSize, position, orientation, interactive);
+		};
+		auto size = [](const Rect & area, float pixelSize) {
+			return area.empty() ? Vec2f(0.f) : Vec2f(float(area.width()), float(area.height())) * pixelSize;
+		};
+
+		if(!isHudHand) {
+			add(areas.map, MapPixelSize / areas.mapScale, Vec2f(0.f), false);
+			continue;
+		}
+
+		// Health and mana side by side, bottoms aligned; the inventory above them
+		float gaugePixelSize = GaugePixelSize / areas.hudScale;
+		Vec2f health = size(areas.health, gaugePixelSize);
+		Vec2f mana = size(areas.mana, gaugePixelSize);
+		float rowWidth = health.x + mana.x + ((health.x > 0.f && mana.x > 0.f) ? Gap : 0.f);
+		float bottom = -0.5f * std::max(health.y, mana.y);
+		add(areas.health, gaugePixelSize, Vec2f(-0.5f * (rowWidth - health.x), bottom + 0.5f * health.y), true);
+		add(areas.mana, gaugePixelSize, Vec2f(0.5f * (rowWidth - mana.x), bottom + 0.5f * mana.y), true);
+		if(!areas.inventory.empty()) {
+			float inventoryPixelSize = InventoryPixelSize / areas.hudScale;
+			Vec2f inventory = size(areas.inventory, inventoryPixelSize);
+			float top = bottom + std::max(health.y, mana.y);
+			if(add(areas.inventory, inventoryPixelSize, Vec2f(0.f, top + Gap + 0.5f * inventory.y), true)) {
+				m_uiPanels.back().useOnTap = true;
+			}
+		}
+
 	}
 
 }
@@ -1279,7 +1439,7 @@ void VRSystem::submitWindowAsUI(const Vec2i & windowSize) {
 	releaseSwapchainImage(m_uiSwapchain);
 
 	updateUIPlacement(false);
-	m_uiSubmitted = true;
+	addScreenPanel(Rect(m_uiSize.x, m_uiSize.y), true);
 
 }
 
@@ -1421,43 +1581,58 @@ void VRSystem::updatePointer() {
 	const VRHandState & hand = m_input.getHand(dominant);
 
 	/*
-	 * In-game the laser points into the world, unless a 2D interface (inventory, book, ...) is open and the
-	 * laser points at the virtual screen. Outside the game (menus) it always points at the virtual screen.
+	 * In-game the laser points into the world, unless it points at an interface panel (book, containers, the HUD
+	 * and inventory on the wrist, ...). Outside the game (menus) it always points at the virtual screen.
 	 */
 	bool inGame = m_lastFrameStereo;
 	clearVRPointerBeam();
-	// While holding an object, the panel is ignored so that the object does not switch to inventory drag and drop
-	bool interfaceOpen = (!inGame || isVRInterfaceOpen()) && !isVRGrabbing();
-	
-	// Intersect the dominant hand's aim ray with the virtual screen shown in the last frame
+	// While holding an object, panels are ignored so that the object does not switch to inventory drag and drop
+	bool panelsActive = !inGame || !isVRGrabbing();
+
+	// Intersect the dominant hand's aim ray with the panels shown in the last frame, the nearest hit wins
 	bool onUI = false;
 	Vec2s mouse(0);
-	if(interfaceOpen && m_uiVisible && hand.aim.valid && m_uiSize.x > 0 && m_uiSize.y > 0) {
+	bool useOnTap = false;
+	float nearest = std::numeric_limits<float>::max();
+	for(const UIPanel & panel : m_visiblePanels) {
 
-		glm::quat screenRotation(m_uiPose.orientation.w, m_uiPose.orientation.x,
-		                         m_uiPose.orientation.y, m_uiPose.orientation.z);
-		glm::quat toScreen = glm::inverse(screenRotation);
-		Vec3f screenPosition(m_uiPose.position.x, m_uiPose.position.y, m_uiPose.position.z);
-
-		// Ray in screen space: the screen is the z = 0 plane, visible from +z
-		Vec3f origin = toScreen * (hand.aim.position - screenPosition);
-		Vec3f direction = toScreen * (hand.aim.orientation * Vec3f(0.f, 0.f, -1.f));
-
-		if(direction.z < -1e-4f && origin.z > 0.f) {
-			Vec3f hit = origin + direction * (-origin.z / direction.z);
-			float u = hit.x / m_uiExtent.width + 0.5f;
-			float v = 0.5f - hit.y / m_uiExtent.height;
-			if(u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f) {
-				onUI = true;
-				if(inGame) {
-					float distance = -origin.z / direction.z;
-					Vec3f aimDirection = hand.aim.orientation * Vec3f(0.f, 0.f, -1.f);
-					setVRPointerBeamToUI(hand.aim.position, hand.aim.position + aimDirection * distance);
-				}
-				mouse = Vec2s(s16(u * float(m_uiSize.x - 1)), s16(v * float(m_uiSize.y - 1)));
-			}
+		if(!panelsActive || !hand.aim.valid) {
+			break;
+		}
+		if(!panel.interactive) {
+			continue;
 		}
 
+		glm::quat panelRotation(panel.pose.orientation.w, panel.pose.orientation.x,
+		                        panel.pose.orientation.y, panel.pose.orientation.z);
+		glm::quat toPanel = glm::inverse(panelRotation);
+		Vec3f panelPosition(panel.pose.position.x, panel.pose.position.y, panel.pose.position.z);
+
+		// Ray in panel space: the panel is the z = 0 plane, visible from +z
+		Vec3f origin = toPanel * (hand.aim.position - panelPosition);
+		Vec3f direction = toPanel * (hand.aim.orientation * Vec3f(0.f, 0.f, -1.f));
+		if(direction.z > -1e-4f || origin.z <= 0.f) {
+			continue;
+		}
+
+		float distance = -origin.z / direction.z;
+		Vec3f hit = origin + direction * distance;
+		float u = hit.x / panel.extent.width + 0.5f;
+		float v = 0.5f - hit.y / panel.extent.height;
+		if(distance >= nearest || u < 0.f || u > 1.f || v < 0.f || v > 1.f) {
+			continue;
+		}
+
+		nearest = distance;
+		onUI = true;
+		useOnTap = panel.useOnTap;
+		mouse = Vec2s(s16(float(panel.area.left) + u * float(panel.area.width() - 1)),
+		              s16(float(panel.area.top) + v * float(panel.area.height() - 1)));
+
+	}
+	if(onUI && inGame) {
+		Vec3f aimDirection = hand.aim.orientation * Vec3f(0.f, 0.f, -1.f);
+		setVRPointerBeamToUI(hand.aim.position, hand.aim.position + aimDirection * nearest);
 	}
 
 	if(onUI && !m_pointerOnUI) {
@@ -1470,11 +1645,18 @@ void VRSystem::updatePointer() {
 	/*
 	 * The "click" (left mouse button): in the world the grip uses, talks and attacks, on an interface panel the
 	 * trigger or the grip click. Items pointed at in the world are grabbed directly instead (see VRGrab).
+	 * The trigger also clicks in the world on items (to take them) and with an open interface (e.g. the inventory).
 	 * The trigger is otherwise used for magic (see VRControls). A trigger click started on a panel stays a click
 	 * until the trigger is released, e.g. to drag an item out of the inventory.
 	 */
 	if(hand.wasPressed(VRButtonTrigger)) {
-		m_clickByTrigger = onUI;
+		bool worldClick = onWorld && !isVRGrabbing();
+		if(worldClick && !isVRInterfaceOpen()) {
+			const Entity * target = getVRPointedEntity(hand.aim, false);
+			worldClick = target && (target->ioflags & IO_ITEM) && (target->gameFlags & GFLAG_INTERACTIVITY);
+		}
+		m_clickByTrigger = onUI || worldClick;
+		m_clickUseOnTap = onUI && useOnTap;
 	} else if(!hand.isPressed(VRButtonTrigger)) {
 		m_clickByTrigger = false;
 	}
@@ -1509,11 +1691,34 @@ void VRSystem::updatePointer() {
 		onWorld = !m_clickOnUI;
 	}
 	
+	/*
+	 * In the inventory a trigger tap uses the item (e.g. to eat), holding the trigger drags it: the left button is
+	 * only pressed once the click is held long enough. The use action of the game (see VRControls) is pressed for
+	 * three frames (a key release only counts after two) and released, with the cursor kept on the item - a right
+	 * click would also toggle free look, which closes the inventory.
+	 */
+	bool tapClick = m_clickByTrigger || (clickEnded && m_clickUseOnTap);
+	bool tapPending = m_clickUseOnTap && tapClick && m_triggerHoldTime < ClickDuration;
+	if(m_useTapFrames > 0) {
+		m_useTapFrames--;
+	}
+	if(tapPending && clickEnded) {
+		m_useTapFrames = 5;
+	}
+	if(clickEnded) {
+		m_clickUseOnTap = false;
+	}
+	if(m_useTapFrames > 0) {
+		mouse = m_clickPosition;
+		onUI = true;
+		onWorld = false;
+	}
+
 	GInput->setVirtualMousePosition(onUI || onWorld, mouse);
-	
+
 	// Off hand grip = right click on a panel, in the world it grabs (see VRGrab)
 	const VRHandState & off = m_input.getHand(config.vr.leftHanded ? VRHandRight : VRHandLeft);
-	GInput->setVirtualMouseButton(Mouse::Button_0, clickPressed);
+	GInput->setVirtualMouseButton(Mouse::Button_0, clickPressed && !tapPending);
 	GInput->setVirtualMouseButton(Mouse::Button_1, off.isPressed(VRButtonGrip) && onUI);
 	
 	if(onUI && (clickStarted || off.wasPressed(VRButtonGrip))) {

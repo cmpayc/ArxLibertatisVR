@@ -20,7 +20,10 @@
 #ifndef ARX_VR_VRBODY_H
 #define ARX_VR_VRBODY_H
 
+#include <glm/gtc/quaternion.hpp>
+
 #include "math/Types.h"
+#include "vr/VRInput.h"
 
 class Entity;
 struct Skeleton;
@@ -35,6 +38,12 @@ struct Skeleton;
  * Registered as \ref g_playerSkeletonHook: called after the animation, before the mesh is skinned.
  */
 void applyVRBodyIK(Entity & player, Skeleton & skeleton);
+
+/*!
+ * The wrist joint of the posed player model and the controller orientation it follows (Arx basis, to world),
+ * in the last frame - to attach things to the visible body
+ */
+bool getVRWristPose(VRHand hand, Vec3f & position, glm::quat & gripOrientation);
 
 //! \return where the player model is drawn relative to the player position in VR
 Vec3f getVRModelOffset();

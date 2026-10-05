@@ -479,6 +479,26 @@ bool trackingPoseToWorld(const Vec3f & position, const glm::quat & orientation,
 	
 	glm::quat relative = g_referenceYawInverse * orientation;
 	worldOrientation = glm::quat_cast(g_trackingToWorld.body * glm::mat3_cast(vr::toArxBasis(relative)));
-	
+
+	return true;
+}
+
+bool worldPoseToTracking(const Vec3f & worldPosition, const glm::quat & worldOrientation,
+                         Vec3f & position, glm::quat & orientation) {
+
+	const TrackingToWorld & t = g_trackingToWorld;
+	if(!t.valid || t.scale <= 0.f) {
+		return false;
+	}
+
+	glm::mat3x3 worldToBody = glm::inverse(t.body);
+	glm::quat referenceYaw = glm::inverse(g_referenceYawInverse);
+
+	Vec3f relative = vr::toArxBasis(worldToBody * (worldPosition - t.origin) / t.scale);
+	position = referenceYaw * (relative + t.consumed) + g_referencePosition;
+
+	glm::quat relativeOrientation = vr::toArxBasis(glm::quat_cast(worldToBody * glm::mat3_cast(worldOrientation)));
+	orientation = glm::normalize(referenceYaw * relativeOrientation);
+
 	return true;
 }
