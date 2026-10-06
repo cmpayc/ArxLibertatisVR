@@ -397,7 +397,9 @@ void copyMirroredFingers(Skeleton & skeleton, const ArmBones & from, const ArmBo
 	updateBoneDescendants(skeleton, to.hand);
 }
 
-void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & state) {
+void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & state,
+                 const ANIM_HANDLE * fistPose = nullptr, const ArmBones * fistArm = nullptr,
+                 bool mirrorFist = false) {
 	
 	// In the rest pose of the model the palms face down (+y in model space, which points down)
 	const Vec3f palm(0.f, 1.f, 0.f);
@@ -427,16 +429,36 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 		thumbAngle = state.thumbTouch ? 40.f + 15.f * state.squeeze : 0.f;
 	}
 	
-	auto curl = [&](VertexGroupId bone, const Vec3f & axis, float degrees) {
-		if(bone) {
-			skeleton.bones[bone].init.quat = glm::angleAxis(glm::radians(degrees), axis);
+	/*
+	 * Grip and trigger together make a fist (it punches, see VRCombat): blend into the right hand grip of the game's
+	 * one-handed weapon stance (its first frame), mirrored for the left hand like copyMirroredFingers. Bending the fingers
+	 * further pointed the tips down, the bare hand stance hardly bends them.
+	 */
+	float fist = std::min(state.squeeze, state.trigger);
+	const EERIE_ANIM * fistAnim = (fistPose && !fistPose->anims.empty()) ? fistPose->anims[0] : nullptr;
+	
+	auto curl = [&](VertexGroupId bone, VertexGroupId fistBone, const Vec3f & axis, float degrees) {
+		if(!bone) {
+			return;
 		}
+		glm::quat rotation = glm::angleAxis(glm::radians(degrees), axis);
+		size_t group = size_t(fistBone);
+		if(fist > 0.f && fistAnim && fistBone && group < fistAnim->nb_groups() && group < fistAnim->groups.size()
+		   && !fistAnim->voidgroups[group]) {
+			glm::quat pose = fistAnim->groups[group].quat;
+			if(mirrorFist) {
+				pose = glm::quat(pose.w, pose.x, -pose.y, -pose.z);
+			}
+			rotation = glm::slerp(rotation, pose, fist);
+		}
+		skeleton.bones[bone].init.quat = rotation;
 	};
-	curl(arm.fingersRoot, fingerAxis, 80.f * grip);
-	curl(arm.fingersTip, fingerAxis, 60.f * grip);
-	curl(arm.indexRoot, fingerAxis, 75.f * index);
-	curl(arm.indexTip, fingerAxis, 55.f * index);
-	curl(arm.thumb, thumbAxis, thumbAngle);
+	const ArmBones & source = fistArm ? *fistArm : arm;
+	curl(arm.fingersRoot, source.fingersRoot, fingerAxis, 80.f * grip);
+	curl(arm.fingersTip, source.fingersTip, fingerAxis, 60.f * grip);
+	curl(arm.indexRoot, source.indexRoot, fingerAxis, 75.f * index);
+	curl(arm.indexTip, source.indexTip, fingerAxis, 55.f * index);
+	curl(arm.thumb, source.thumb, thumbAxis, thumbAngle);
 	
 	updateBoneDescendants(skeleton, arm.hand);
 }
@@ -721,7 +743,9 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 						copyMirroredFingers(skeleton, bones.arms[VRHandRight], arm);
 					}
 				} else {
-					curlFingers(skeleton, arm, state);
+					// The fist pose of the game's right hand, mirrored for the left hand
+					curlFingers(skeleton, arm, state, entity.anims[ANIM_1H_WAIT], &bones.arms[VRHandRight],
+					            hand == VRHandLeft);
 				}
 			}
 		}

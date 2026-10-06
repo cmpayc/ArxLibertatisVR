@@ -217,9 +217,9 @@ void updateVRControls() {
 
 	/*
 	 * Buttons are mapped to the keys bound to the game actions, so they also work in places that read keys.
-	 * Main hand (right): A = jump, B = inventory, stick click = crouch toggle, trigger = magic mode,
+	 * Main hand (right): A = jump, B = book, stick click = crouch toggle, trigger = magic mode,
 	 *                    grip = take, grab and attack (left click, see the laser pointer in VRSystem)
-	 * Off hand (left):   X = book, Y = game menu, stick click = ready weapon,
+	 * Off hand (left):   X = inventory, Y = game menu, stick click = ready weapon,
 	 *                    trigger = use (interaction cursor), grip = right click
 	 */
 	std::vector<InputKeyId> keys;
@@ -230,9 +230,9 @@ void updateVRControls() {
 		}
 	};
 	press(CONTROLS_CUST_JUMP, main.isPressed(VRButtonPrimary));
-	press(CONTROLS_CUST_INVENTORY, main.isPressed(VRButtonSecondary));
+	press(CONTROLS_CUST_INVENTORY, off.isPressed(VRButtonPrimary));
 	press(CONTROLS_CUST_CROUCHTOGGLE, main.isPressed(VRButtonStick));
-	press(CONTROLS_CUST_BOOK, off.isPressed(VRButtonPrimary));
+	press(CONTROLS_CUST_BOOK, main.isPressed(VRButtonSecondary));
 	/*
 	 * Grabbing the weapon at the sheath (on the back, over the shoulder of the hand) with either hand draws it into that
 	 * hand: hold the action, a key release only counts after two frames. A drawn weapon is sheathed by just bringing it
