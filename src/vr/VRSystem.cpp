@@ -64,6 +64,7 @@
 #include "scene/Interactive.h"
 #include "vr/VRBody.h"
 #include "vr/VRCamera.h"
+#include "vr/VRCombat.h"
 #include "vr/VRControls.h"
 #include "vr/VRGrab.h"
 #include "vr/VRHud.h"
@@ -340,6 +341,7 @@ VRSystem::VRSystem()
 	, m_useTapPosition(0)
 	, m_secondTap(false)
 	, m_triggerOnItem(false)
+	, m_magicDrawing(false)
 	, m_triggerItemTime(0.f)
 	, m_lastItemTapAge(0.f)
 	, m_frameState{ XR_TYPE_FRAME_STATE }
@@ -1804,8 +1806,12 @@ void VRSystem::updatePointer() {
 				m_triggerItemTime = 0.f;
 			}
 		}
+		// Elsewhere in the world the trigger draws runes with the hand (magic mode, see VRControls)
+		m_magicDrawing = inGame && !onUI && !m_clickByTrigger && !m_triggerOnItem && !isVRGrabbing()
+		                 && !isVRFist(dominant) && !isVRArcheryActive();
 	} else if(!hand.isPressed(VRButtonTrigger)) {
 		m_clickByTrigger = false;
+		m_magicDrawing = false;
 	}
 	if(hand.wasPressed(VRButtonGrip)) {
 		// Touching an object grabs it even while pointing at a panel
@@ -1932,11 +1938,29 @@ void VRSystem::updatePointer() {
 		onWorld = false;
 	}
 
+	/*
+	 * Drawing runes: the cursor follows the fingertips of the main hand as seen from the eyes, with the left button
+	 * held. The game draws the flares in the world along the line through the cursor, so they appear at the hand, and
+	 * recognizes the runes from these screen positions.
+	 */
+	if(m_magicDrawing && hand.isPressed(VRButtonTrigger) && hand.grip.valid) {
+		Vec3f fingertips;
+		Vec2f screen;
+		if(trackingPointToWorld(hand.grip.position + hand.grip.orientation * Vec3f(0.f, 0.f, -0.08f), fingertips)
+		   && worldToVRScreen(fingertips, screen)) {
+			mouse = Vec2s(s16(screen.x), s16(screen.y));
+			onWorld = true;
+			onUI = false;
+		}
+	}
+	
 	GInput->setVirtualMousePosition(onUI || onWorld, mouse);
 
+	bool drawing = m_magicDrawing && hand.isPressed(VRButtonTrigger);
+	GInput->setVirtualMouseButton(Mouse::Button_0, (clickPressed && !tapPending) || drawing);
+	
 	// Off hand grip = right click on a panel, in the world it grabs (see VRGrab)
 	const VRHandState & off = m_input.getHand(config.vr.leftHanded ? VRHandRight : VRHandLeft);
-	GInput->setVirtualMouseButton(Mouse::Button_0, clickPressed && !tapPending);
 	GInput->setVirtualMouseButton(Mouse::Button_1, off.isPressed(VRButtonGrip) && onUI);
 	
 	if(onUI && (clickStarted || off.wasPressed(VRButtonGrip))) {

@@ -260,6 +260,7 @@ private:
 	Vec2s m_useTapPosition; // Where the pending tap was
 	bool m_secondTap; // The current trigger click is the second tap of a double tap (selects the item to combine)
 	bool m_triggerOnItem; // The trigger was pressed on an item in the world (a tap, not magic)
+	bool m_magicDrawing; // The trigger draws runes with the hand (see updatePointer)
 	EntityHandle m_triggerItem;
 	float m_triggerItemTime;
 	EntityHandle m_lastItemTap; // The item of the last tap in the world, for double taps

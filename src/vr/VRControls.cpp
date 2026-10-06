@@ -66,6 +66,7 @@ float g_pendingTurn = 0.f;
 bool g_snapTurnReady = true;
 std::vector<InputKeyId> g_pressedKeys;
 int g_weaponToggleFrames = 0; // Frames left of the ready weapon action from the sheath
+float g_magicHold = 0.f; // s the magic mode stays on after a rune, to draw the next one before the spell is cast
 bool g_sheatheArmed = false; // The drawn weapon left the sheath: bringing it back sheathes it
 VRHand g_weaponHand = VRHandRight; // The hand that drew the weapon (set before the first use)
 
@@ -271,9 +272,20 @@ void updateVRControls() {
 	                          && !isVRArcheryActive())
 	                         || g_vr->isUseTapPressed());
 	// While holding an object the trigger stores it instead (see VRGrab)
-	press(CONTROLS_CUST_MAGICMODE, main.isPressed(VRButtonTrigger) && !g_vr->isTriggerClicking()
-	                               && !g_vr->isPointingAtUI() && !isVRGrabbing() && !isVRFist(dominantHand())
-	                               && !isVRArcheryActive()); // The bow uses the triggers (see VRCombat)
+	/*
+	 * Magic: the main trigger held draws a rune with the hand (see VRSystem::updatePointer), releasing it ends the rune.
+	 * The magic mode stays on a moment longer for the next rune, then the spell is cast (the game casts when the magic
+	 * key is released). Not while the trigger is a click, holds an object, a fist or the bow string.
+	 */
+	const float RuneGap = 1.f; // s
+	bool drawingRune = main.isPressed(VRButtonTrigger) && !g_vr->isTriggerClicking() && !g_vr->isPointingAtUI()
+	                   && !isVRGrabbing() && !isVRFist(dominantHand()) && !isVRArcheryActive();
+	if(drawingRune) {
+		g_magicHold = RuneGap;
+	} else if(g_magicHold > 0.f) {
+		g_magicHold -= g_vr->getFrameDuration();
+	}
+	press(CONTROLS_CUST_MAGICMODE, drawingRune || g_magicHold > 0.f);
 	// The menu button is often reserved by the system (e.g. Quest through Virtual Desktop)
 	if(off.isPressed(VRButtonSecondary) || off.isPressed(VRButtonMenu) || main.isPressed(VRButtonMenu)) {
 		keys.push_back(Keyboard::Key_Escape);
