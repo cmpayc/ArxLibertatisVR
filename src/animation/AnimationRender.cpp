@@ -536,6 +536,9 @@ void DrawEERIEInter_ViewProjectTransform(EERIE_3DOBJ * eobj) {
 	
 }
 
+// Set while drawing an object mirrored (negative scale, see g_playerLinkedTransformHook): its faces turn the other way
+static bool s_drawMirrored = false;
+
 static bool CullFace(const EERIE_3DOBJ * eobj, const EERIE_FACE & face) {
 	
 	if(!(face.facetype & POLY_DOUBLESIDED)) {
@@ -546,7 +549,7 @@ static bool CullFace(const EERIE_3DOBJ * eobj, const EERIE_FACE & face) {
 		normFace.y = (normV10.z * normV20.x) - (normV10.x * normV20.z);
 		normFace.z = (normV10.x * normV20.y) - (normV10.y * normV20.x);
 		Vec3f nrm = eobj->vertexWorldPositions[face.vid[0]].v - g_camera->m_pos;
-		if(glm::dot(normFace, nrm) > 0.f) {
+		if((glm::dot(normFace, nrm) > 0.f) != s_drawMirrored) {
 			return true;
 		}
 	}
@@ -834,6 +837,7 @@ void (*g_playerSkeletonHook)(Entity & player, Skeleton & skeleton) = nullptr;
 float g_playerModelScale = 1.f;
 bool (*g_playerSheathHook)(const Entity & player, const EERIE_LINKED & link, TransformInfo & transform) = nullptr;
 const std::vector<bool> * (*g_playerUpperLayerBones)(const EERIE_3DOBJ & object) = nullptr;
+void (*g_playerLinkedTransformHook)(const Entity & player, const EERIE_LINKED & link, TransformInfo & transform) = nullptr;
 
 static void PrepareAnimatedObjectHalo(HaloInfo & haloInfo, const Vec3f & pos,
                                       Skeleton * obj, EERIE_3DOBJ * eobj) {
@@ -1112,9 +1116,14 @@ static void Cedric_AnimateDrawEntityRender(EERIE_3DOBJ * eobj, const Vec3f & pos
 		TransformInfo t(eobj->vertexWorldPositions[link.lidx].v,
 		                eobj->m_skeleton->bones[link.lgroup].anim.quat,
 		                link.io ? link.io->scale : 1.f);
+		if(g_playerLinkedTransformHook && io == entities.player() && !IN_BOOK_DRAW) {
+			g_playerLinkedTransformHook(*io, link, t);
+		}
 		t.pos = t(link.obj->vertexlist[link.obj->origin].v - link.obj->vertexlist[link.lidx2].v);
 		
+		s_drawMirrored = (t.scale < 0.f);
 		DrawEERIEInter(link.obj, t, link.io, true, invisibility);
+		s_drawMirrored = false;
 		
 	}
 	

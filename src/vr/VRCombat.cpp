@@ -22,20 +22,28 @@
 #include <algorithm>
 #include <string_view>
 
+#include <boost/algorithm/string/predicate.hpp>
+
 #include <glm/glm.hpp>
 
 #include "core/Config.h"
+#include "core/Core.h"
 #include "game/Damage.h"
 #include "game/Entity.h"
 #include "game/EntityManager.h"
 #include "game/Equipment.h"
+#include "game/Inventory.h"
 #include "game/Player.h"
 #include "graphics/GraphicsTypes.h"
 #include "graphics/particle/Spark.h"
 #include "gui/Menu.h"
 #include "gui/Speech.h"
 #include "physics/Collisions.h"
+#include "physics/Projectile.h"
+#include "scene/LinkedObject.h"
 #include "scene/GameSound.h"
+#include "scene/Interactive.h"
+#include "scene/Object.h"
 #include "script/Script.h"
 #include "vr/VRBody.h"
 #include "vr/VRControls.h"
@@ -82,7 +90,11 @@ VRHand mainHand() {
 	return config.vr.leftHanded ? VRHandLeft : VRHandRight;
 }
 
-//! The equipped weapon once it is in the main hand of the player model (after the draw animation), or nullptr
+/*!
+ * The equipped weapon once it is in a hand of the player model (after the draw animation), or nullptr
+ *
+ * The game always puts it into the right hand: drawn with the left hand (see VRControls) it is moved to the left hand.
+ */
 Entity * getHeldWeapon() {
 
 	Entity * weapon = entities.get(player.equiped[EQUIP_SLOT_WEAPON]);
@@ -91,14 +103,25 @@ Entity * getHeldWeapon() {
 		return nullptr;
 	}
 
-	VertexId hand = io->obj->fastaccess.primary_attach;
+	const VertexId right = io->obj->fastaccess.primary_attach;
+	const VertexId left = io->obj->fastaccess.left_attach;
+	VertexId held;
 	for(const EERIE_LINKED & link : io->obj->linked) {
-		if(hand && link.lidx == hand && link.io == weapon) {
-			return weapon;
+		if(link.io == weapon && link.lidx && (link.lidx == right || link.lidx == left)) {
+			held = link.lidx;
+			break;
 		}
 	}
+	if(!held) {
+		return nullptr;
+	}
 
-	return nullptr;
+	VertexId wanted = (getVRWeaponHand() == VRHandLeft) ? left : right;
+	if(wanted && held != wanted) {
+		linkEntities(*io, (wanted == left) ? "left_attach" : "primary_attach", *weapon, "primary_attach");
+	}
+
+	return weapon;
 }
 
 //! Distance from the grip of an object to its farthest vertex (the blade length), in object units (cm)
@@ -250,7 +273,7 @@ void landStrike(Entity & io, VRHand hand) {
 
 void updateWeaponSwing(Entity & io, Entity & weapon, WeaponType type, float dt) {
 
-	const VRHand hand = mainHand();
+	const VRHand hand = getVRWeaponHand(); // The hand holding the weapon
 	const VRHandState & state = g_vr->getInput().getHand(hand);
 	Swing & swing = g_swings[hand];
 	if(!state.grip.valid) {
@@ -355,10 +378,215 @@ void updateFistSwings(Entity & io, float dt) {
 
 }
 
+/*
+ * Archery: the hand without the bow takes an arrow near the bow, holding its trigger draws the string by pulling the
+ * hand back, releasing it shoots along the line from that hand through the bow (the game's own launch: arrows from the
+ * inventory, damage, poison, the draw ratio for the speed and gravity)
+ */
+struct Archery {
+	bool nocked = false;  // An arrow is in the string hand
+	bool drawing = false; // The trigger pulls the string
+	float startDistance = 0.f; // m between the hands when the draw started
+	float pulseTime = 0.f;
+};
+
+Archery g_archery;
+
+const float NockDistance = 0.3f;  // m between the hands to take an arrow and start drawing
+const float PutAwayDistance = 0.45f; // m between the hands to put the arrow away while not drawing
+const float FullDraw = 0.55f;    // m pulled back for the full draw
+
+VRHand stringHand() {
+	return (getVRWeaponHand() == VRHandLeft) ? VRHandRight : VRHandLeft;
+}
+
+VertexId getArrowAttach() {
+	VertexId attach = getNamedVertex(arrowobj.get(), "attach");
+	return attach ? attach : arrowobj->origin;
+}
+
+//! The tip of the arrow: its hit point farthest from the nock, like the game
+VertexId getArrowTip(VertexId attach) {
+
+	VertexId tip;
+	float farthest = 0.f;
+	for(const EERIE_ACTIONLIST & action : arrowobj->actionlist) {
+		if(!boost::starts_with(action.name, "hit_")) {
+			continue;
+		}
+		float distance = arx::distance2(arrowobj->vertexlist[attach].v, arrowobj->vertexlist[action.idx].v);
+		if(distance > farthest) {
+			tip = action.idx;
+			farthest = distance;
+		}
+	}
+	if(tip) {
+		return tip;
+	}
+
+	for(VertexId vertex : arrowobj->vertexlist.handles()) {
+		float distance = arx::distance2(arrowobj->vertexlist[attach].v, arrowobj->vertexlist[vertex].v);
+		if(vertex != VertexId(0) && distance > farthest) {
+			tip = vertex;
+			farthest = distance;
+		}
+	}
+	return tip ? tip : attach;
+}
+
+void dropArrow(Entity & io) {
+	if(arrowobj) {
+		EERIE_LINKEDOBJ_UnLinkObjectFromObject(io.obj, arrowobj.get());
+	}
+	g_archery = Archery();
+}
+
+//! Shoot the nocked arrow from the bow along a direction, like the game does when the bow string is released
+void shootArrow(Entity & io, const Vec3f & position, const Vec3f & direction, float ratio) {
+
+	dropArrow(io);
+
+	SendIOScriptEvent(nullptr, &io, SM_STRIKE, "bow");
+	player.m_bowAimRatio = ratio;
+	player.m_strikeAimRatio = ratio;
+
+	Entity * quiver = getInventoryItemWithLowestDurability("arrows", 1.f);
+	float poisonous = 0.f;
+	if(quiver) {
+		poisonous = quiver->poisonous;
+		if(quiver->poisonous_count > 0) {
+			quiver->poisonous_count--;
+			if(quiver->poisonous_count <= 0) {
+				quiver->poisonous = 0;
+			}
+		}
+		ARX_DAMAGES_DurabilityLoss(quiver, 1.f);
+		if(ValidIOAddress(quiver) && quiver->durability <= 0.f) {
+			ARX_INTERACTIVE_DestroyIOdelayed(quiver);
+		}
+	}
+
+	if(!arrowobj || arrowobj->vertexlist.size() < 2) {
+		return;
+	}
+
+	// The arrow model points along its tip
+	VertexId attach = getArrowAttach();
+	VertexId tip = getArrowTip(attach);
+	glm::quat quat = glm::inverse(getProjectileQuatFromVector(arrowobj->vertexlist[tip].v
+	                                                          - arrowobj->vertexlist[attach].v));
+
+	float velocity = std::max(ratio + 0.3f, 0.9f);
+	float gravity = 0.0002f * glm::clamp(1.f - ratio, 0.f, 1.f); // Not fully drawn arrows drop
+	float weaponDamage = getEquipmentBaseModifier(IO_EQUIPITEM_ELEMENT_Damages);
+	float damages = weaponDamage * (1.f + (player.m_skillFull.projectile + player.m_attributeFull.dexterity) * 0.02f);
+
+	ARX_THROWN_OBJECT_Throw(EntityHandle_Player, position, direction * velocity, gravity, arrowobj.get(), attach, quat,
+	                        damages, poisonous);
+}
+
+void updateArchery(Entity & io, float dt) {
+
+	const VRHand bowHand = getVRWeaponHand();
+	const VRHand hand = stringHand();
+	const VRHandState & bow = g_vr->getInput().getHand(bowHand);
+	const VRHandState & string = g_vr->getInput().getHand(hand);
+	if(!bow.grip.valid || !string.grip.valid || !arrowobj) {
+		return;
+	}
+
+	float distance = glm::distance(string.grip.position, bow.grip.position);
+	if(!getInventoryItemWithLowestDurability("arrows", 1.f)) {
+		if(g_archery.nocked) {
+			dropArrow(io); // No arrows left
+		}
+		return;
+	}
+
+	// Take an arrow with the free hand near the bow
+	auto attachArrow = [&]() {
+		EERIE_LINKEDOBJ_LinkObjectToObject(io.obj, arrowobj.get(),
+		                                   (hand == VRHandLeft) ? "left_attach" : "primary_attach", "attach");
+	};
+	if(!g_archery.nocked) {
+		if(distance < NockDistance) {
+			attachArrow();
+			g_archery.nocked = true;
+			g_vr->getInput().vibrate(hand, 0.3f, 0.03f);
+		}
+		return;
+	}
+
+	// The game unlinks the arrow at the end of the bow's draw animation: keep it in the hand
+	bool linked = std::any_of(io.obj->linked.begin(), io.obj->linked.end(), [](const EERIE_LINKED & link) {
+		return link.obj == arrowobj.get();
+	});
+	if(!linked) {
+		attachArrow();
+	}
+
+	// Moving the hand away from the bow without drawing puts the arrow away
+	if(!g_archery.drawing && distance > PutAwayDistance) {
+		dropArrow(io);
+		return;
+	}
+	
+	// Hold the trigger near the bow to grab the string
+	if(!g_archery.drawing) {
+		if(string.wasPressed(VRButtonTrigger) && distance < NockDistance + 0.05f) {
+			g_archery.drawing = true;
+			g_archery.startDistance = distance;
+			g_archery.pulseTime = 0.f;
+			g_vr->getInput().vibrate(hand, 0.4f, 0.03f);
+		}
+		return;
+	}
+
+	// Pull back: the tension rises with the distance, felt as faster and stronger pulses
+	float ratio = glm::clamp((distance - g_archery.startDistance) / FullDraw, 0.f, 1.f);
+	player.m_bowAimRatio = ratio;
+	g_archery.pulseTime -= dt;
+	if(g_archery.pulseTime <= 0.f && ratio > 0.05f) {
+		g_vr->getInput().vibrate(hand, 0.1f + 0.4f * ratio, 0.02f);
+		g_vr->getInput().vibrate(bowHand, 0.05f + 0.2f * ratio, 0.02f);
+		g_archery.pulseTime = 0.12f - 0.08f * ratio;
+	}
+
+	if(string.isPressed(VRButtonTrigger)) {
+		return;
+	}
+
+	// Released
+	g_archery.drawing = false;
+	if(ratio < 0.1f) {
+		return; // Hardly drawn: keep the arrow
+	}
+
+	// Along the arrow as it is drawn: from just above the drawing hand to its rest on the bow (adjustVRLinkedTransform)
+	VertexId stringVertex = (hand == VRHandLeft) ? io.obj->fastaccess.left_attach : io.obj->fastaccess.primary_attach;
+	Vec3f bowPosition;
+	if(!stringVertex || !getVRArrowRest(bowPosition)) {
+		return;
+	}
+	Vec3f stringPosition = io.obj->vertexWorldPositions[stringVertex].v + getVRArrowRaise();
+	if(glm::distance(bowPosition, stringPosition) < 1.f) {
+		return;
+	}
+	Vec3f direction = glm::normalize(bowPosition - stringPosition);
+	shootArrow(io, bowPosition + direction * 10.f, direction, ratio);
+	g_vr->getInput().vibrate(hand, 0.8f, 0.08f);
+	g_vr->getInput().vibrate(bowHand, 0.6f, 0.1f);
+
+}
+
 } // anonymous namespace
 
 bool isVRMeleeActive() {
-	return isVRActive() && g_vr && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BOW;
+	return isVRActive() && g_vr;
+}
+
+bool isVRArcheryActive() {
+	return isVRActive() && (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() == WEAPON_BOW;
 }
 
 void updateVRCombat() {
@@ -375,19 +603,26 @@ void updateVRCombat() {
 
 	// The fists punch whenever no weapon is drawn: without a weapon, or with it (or a bow) in its sheath
 	bool drawn = (player.Interface & INTER_COMBATMODE) && type != WEAPON_BARE;
+	if(!drawn || type != WEAPON_BOW) {
+		if(g_archery.nocked) {
+			dropArrow(*io); // The bow was put away (the game also unlinks the arrow)
+		}
+	}
 	if(!drawn) {
 		updateFistSwings(*io, dt);
 		return;
 	}
 
-	if(type == WEAPON_BOW) {
-		resetSwings(); // The game handles bows
-		return;
-	}
-
+	// Also moves the weapon (or bow) to the hand that drew it
 	Entity * weapon = getHeldWeapon();
 	if(!weapon) {
 		resetSwings();
+		return;
+	}
+
+	if(type == WEAPON_BOW) {
+		resetSwings();
+		updateArchery(*io, dt);
 		return;
 	}
 

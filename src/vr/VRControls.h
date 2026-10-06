@@ -61,8 +61,11 @@ void applyVRRoomScale();
 //! \return true if a 2D interface (menu, inventory, book, note) is open and the laser should point at it
 [[nodiscard]] bool isVRInterfaceOpen();
 
-//! \return true if a weapon is equipped and the main hand is at its sheath (the opposite hip), to draw or sheathe it
-[[nodiscard]] bool isVRHandAtSheath();
+//! \return true if a weapon is equipped and the hand is at its sheath (on the back, over the hand's shoulder)
+[[nodiscard]] bool isVRHandAtSheath(VRHand hand);
+
+//! The hand that drew the weapon, which holds it while it is drawn (the main hand by default)
+[[nodiscard]] VRHand getVRWeaponHand();
 
 //! \return true while a hand makes a fist, grip and trigger held together: it punches (see VRCombat)
 [[nodiscard]] bool isVRFist(VRHand hand);
@@ -88,5 +91,8 @@ void drawVRPointerBeam();
 
 //! \return the interactive object a controller points at (with aim assist), or nullptr; optionally shows the debug ray
 class Entity * getVRPointedEntity(const struct VRPose & aim, bool debugRay);
+
+//! Testing: put the bows and arrows of the game into the player inventory (F8 in VR)
+void giveVRTestBow();
 
 #endif // ARX_VR_VRCONTROLS_H

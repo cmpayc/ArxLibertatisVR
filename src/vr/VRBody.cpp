@@ -24,18 +24,21 @@
 #include <string_view>
 #include <vector>
 
+#include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>
 
 #include "animation/AnimationRender.h"
 #include "animation/Skeleton.h"
 #include "core/Config.h"
+#include "core/Core.h"
 #include "game/Entity.h"
 #include "game/Player.h"
 #include "graphics/GraphicsTypes.h"
 #include "graphics/Math.h"
 #include "graphics/Raycast.h"
 #include "io/log/Logger.h"
+#include "scene/Object.h"
 #include "vr/VRCamera.h"
 #include "vr/VRControls.h"
 #include "vr/VRMath.h"
@@ -373,6 +376,27 @@ const Vec3f ThumbDirection(0.f, 1.f, 0.f);     //!< The thumb rests on top of th
  * the trigger the index finger. Touch sensors lower the thumb and the index finger when they rest on the
  * controller. The finger animation of the game is replaced - except while holding something (see applyVRBodyIK).
  */
+/*!
+ * Give the fingers of one hand the pose of the other hand's fingers, mirrored (the model is symmetric across x, and its
+ * bones have no rest rotation, so the mirrored rotation flips y and z)
+ */
+void copyMirroredFingers(Skeleton & skeleton, const ArmBones & from, const ArmBones & to) {
+	
+	auto copy = [&skeleton](VertexGroupId source, VertexGroupId target) {
+		if(source && target) {
+			const glm::quat & q = skeleton.bones[source].init.quat;
+			skeleton.bones[target].init.quat = glm::quat(q.w, q.x, -q.y, -q.z);
+		}
+	};
+	copy(from.fingersRoot, to.fingersRoot);
+	copy(from.fingersTip, to.fingersTip);
+	copy(from.indexRoot, to.indexRoot);
+	copy(from.indexTip, to.indexTip);
+	copy(from.thumb, to.thumb);
+	
+	updateBoneDescendants(skeleton, to.hand);
+}
+
 void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & state) {
 	
 	// In the rest pose of the model the palms face down (+y in model space, which points down)
@@ -552,7 +576,7 @@ VertexId getHoldVertex(const EERIE_3DOBJ & object, VRHand hand) {
 bool isHoldingItem(const EERIE_3DOBJ & object, VRHand hand) {
 	VertexId vertex = getHoldVertex(object, hand);
 	for(const EERIE_LINKED & link : object.linked) {
-		if(vertex && link.lidx == vertex && link.obj) {
+		if(vertex && link.lidx == vertex && link.obj && link.obj != arrowobj.get()) { // Not the arrow to shoot
 			return true;
 		}
 	}
@@ -595,11 +619,23 @@ Vec3f getHeldItemAxis(const EERIE_3DOBJ & object, VertexId attach) {
 float getHeldItemReach(const EERIE_3DOBJ & object, VRHand hand) {
 	VertexId vertex = getHoldVertex(object, hand);
 	for(const EERIE_LINKED & link : object.linked) {
-		if(vertex && link.lidx == vertex && link.obj) {
+		if(vertex && link.lidx == vertex && link.obj && link.obj != arrowobj.get()) {
 			return glm::length(getHeldItemExtent(*link.obj, link.lidx2)) * (link.io ? link.io->scale : 1.f);
 		}
 	}
 	return 0.f;
+}
+
+/*!
+ * \return true if an item held in the left hand of the model is drawn mirrored (bows)
+ *
+ * The left hand is a mirror image of the right hand (the model is symmetric across x and its bones have no rest
+ * rotation, see copyMirroredFingers), so a bow attached to it would curve the wrong way. It is drawn as the mirror
+ * image (across x in the bone's space) of how the right hand holds it, see adjustVRLinkedTransform.
+ */
+bool isMirroredInLeftHand(const EERIE_3DOBJ & object, const EERIE_LINKED & link) {
+	return link.obj && link.io && object.fastaccess.left_attach && link.lidx == object.fastaccess.left_attach
+	       && (link.io->type_flags & OBJECT_TYPE_BOW);
 }
 
 /*!
@@ -631,6 +667,9 @@ void alignHeldItem(Skeleton & skeleton, const EERIE_3DOBJ & object, const ArmBon
 	}
 	
 	// Attached objects use the rotation of the bone they are attached to
+	if(isMirroredInLeftHand(object, *held)) {
+		axis.x = -axis.x;
+	}
 	Vec3f current = skeleton.bones[held->lgroup].anim.quat * axis;
 	Vec3f wanted = gripOrientation * Vec3f(0.f, 0.f, 1.f);
 	glm::quat change = rotationBetween(glm::normalize(current), glm::normalize(wanted));
@@ -674,6 +713,13 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 				if(isHoldingItem(*entity.obj, VRHand(hand))) {
 					// The animation of the game wraps the fingers around the handle: keep it, only aim the item
 					alignHeldItem(skeleton, *entity.obj, arm, VRHand(hand), state.grip);
+					if(hand == VRHandLeft) {
+						/*
+						 * The game only holds items in the right hand, and animates its fingers around the handle: the
+						 * left hand (done first, before the right hand fingers may be curled) gets that pose mirrored
+						 */
+						copyMirroredFingers(skeleton, bones.arms[VRHandRight], arm);
+					}
 				} else {
 					curlFingers(skeleton, arm, state);
 				}
@@ -729,60 +775,127 @@ bool getVRHipPosition(VRHand side, Vec3f & position) {
 	return true;
 }
 
-namespace {
-
-//! The side of the sheath: the hip opposite to the main hand
-VRHand sheathSide() {
-	return config.vr.leftHanded ? VRHandRight : VRHandLeft;
-}
-
-//! The body frame of the player (y is down)
-void getBodyFrame(Vec3f & forward, Vec3f & outwards) {
-	float yaw = player.angle.getYaw();
-	forward = angleToVectorXZ(yaw);
-	outwards = angleToVectorXZ(yaw - 90.f) * ((sheathSide() == VRHandRight) ? 1.f : -1.f);
-}
-
-} // anonymous namespace
-
-bool getVRSheathHilt(Vec3f & hilt) {
+bool getVRSheathHilt(VRHand hand, Vec3f & hilt) {
 	
-	Vec3f hip;
-	if(!getVRHipPosition(sheathSide(), hip)) {
+	// Where the game shows the sheathed weapon (on the back, seen in third person): its grip is at this vertex
+	const Entity * io = entities.player();
+	if(!isVRActive() || !io || !io->obj) {
+		return false;
+	}
+	VertexId vertex = io->obj->fastaccess.weapon_attach;
+	if(!vertex || size_t(vertex) >= io->obj->vertexWorldPositions.size()) {
 		return false;
 	}
 	
-	// In front of the hip at belt height, outside the thigh
-	Vec3f forward;
-	Vec3f outwards;
-	getBodyFrame(forward, outwards);
-	const Vec3f up(0.f, -1.f, 0.f);
-	hilt = hip + (forward * 8.f + up * 6.f + outwards * 7.f) * getVRBodyScale();
+	hilt = io->obj->vertexWorldPositions[vertex].v;
+	
+	// For the hand on the other side: the same spot over the other shoulder, mirrored across the chest
+	const BodyBones & bones = getBodyBones(*io->obj);
+	Vec3f center = io->pos;
+	if(bones.spine.chest && io->obj->m_skeleton) {
+		center = io->obj->m_skeleton->bones[bones.spine.chest].anim.trans;
+	}
+	Vec3f right = angleToVectorXZ(player.angle.getYaw() - 90.f);
+	float side = glm::dot(hilt - center, right);
+	if((side > 0.f) != (hand == VRHandRight)) {
+		hilt -= right * (2.f * side);
+	}
+	
 	return true;
+}
+
+Vec3f getVRArrowRaise() {
+	// Just above the hand, straight up (the thumb side of the controller pointed down with some grips)
+	const float Up = 6.f; // cm
+	return Vec3f(0.f, -Up * getVRBodyScale(), 0.f); // y points down
+}
+
+bool getVRArrowRest(Vec3f & rest) {
+	
+	// Just above the grip of the bow as it is drawn (its grip vertex)
+	Entity * bow = entities.get(player.equiped[EQUIP_SLOT_WEAPON]);
+	if(!isVRActive() || !bow || !bow->obj) {
+		return false;
+	}
+	VertexId grip = bow->obj->fastaccess.primary_attach;
+	if(!grip || size_t(grip) >= bow->obj->vertexWorldPositions.size()) {
+		return false;
+	}
+	
+	/*
+	 * The grip vertex is on the inside of the grip, beside the bow: move it horizontally to the center of the bow at the
+	 * grip (its vertices close to the grip vertex), keeping the height. The center of the whole bow is far off, towards
+	 * its curved limbs.
+	 */
+	const auto & vertices = bow->obj->vertexWorldPositions;
+	const Vec3f gripPosition = vertices[grip].v;
+	const float Near = 8.f * getVRBodyScale(); // cm
+	Vec3f center(0.f);
+	size_t count = 0;
+	for(const auto & vertex : vertices) {
+		if(glm::distance(vertex.v, gripPosition) < Near) {
+			center += vertex.v;
+			count++;
+		}
+	}
+	Vec3f side(0.f);
+	if(count > 0) {
+		side = center / float(count) - gripPosition;
+		side.y = 0.f;
+	}
+
+	rest = vertices[grip].v + side + getVRArrowRaise();
+	return true;
+}
+
+void adjustVRLinkedTransform(const Entity & entity, const EERIE_LINKED & link, TransformInfo & transform) {
+	
+	if(!isVRActive() || !isVRPlayerView() || !entity.obj) {
+		return;
+	}
+	
+	if(arrowobj && link.obj == arrowobj.get()) {
+		/*
+		 * The arrow held to shoot (see VRCombat) lies just above the drawing hand and points at its rest just above the
+		 * bow's grip, along the drawn string: turn it around its nock (attach) so that its tip points there
+		 */
+		Vec3f axis = getHeldItemAxis(*link.obj, link.lidx2);
+		Vec3f rest;
+		if(axis == Vec3f(0.f) || !getVRArrowRest(rest)) {
+			return;
+		}
+		transform.pos += getVRArrowRaise();
+		Vec3f toBow = rest - transform.pos;
+		if(glm::length(toBow) < 1.f) {
+			return;
+		}
+		Vec3f current = glm::normalize(transform.rotation * axis);
+		transform.rotation = glm::normalize(rotationBetween(current, glm::normalize(toBow)) * transform.rotation);
+		return;
+	}
+	
+	if(!isMirroredInLeftHand(*entity.obj, link)) {
+		return;
+	}
+	
+	/*
+	 * The mirror across x in the bone's space: a half turn around x with a negative scale is the reflection
+	 * diag(-1, 1, 1), the faces are then culled the other way (see the linked objects in AnimationRender)
+	 */
+	transform.rotation = glm::normalize(transform.rotation * glm::angleAxis(glm::pi<float>(), Vec3f(1.f, 0.f, 0.f)));
+	transform.scale = -transform.scale;
 }
 
 bool getVRSheathTransform(const Entity & entity, const EERIE_LINKED & link, TransformInfo & transform) {
 	
-	if(!entity.obj || !entity.obj->m_skeleton || !link.obj || (link.io && (link.io->type_flags & OBJECT_TYPE_BOW))) {
-		return false; // Bows stay hidden on the back
-	}
-	
-	const BodyBones & bones = getBodyBones(*entity.obj);
-	Vec3f axis = getHeldItemAxis(*link.obj, link.lidx2);
-	Vec3f hilt;
-	if(!bones.spine.belt || axis == Vec3f(0.f) || !getVRSheathHilt(hilt)) {
+	if(!entity.obj || !entity.obj->m_skeleton || !link.obj || !link.lgroup) {
 		return false;
 	}
 	
-	// The blade down and backwards, turned from the pelvis so that it keeps its roll relative to the body
-	Vec3f forward;
-	Vec3f outwards;
-	getBodyFrame(forward, outwards);
-	Vec3f blade = glm::normalize(Vec3f(0.f, 1.f, 0.f) - forward * 0.6f);
-	glm::quat pelvis = entity.obj->m_skeleton->bones[bones.spine.belt].anim.quat;
-	glm::quat rotation = glm::normalize(rotationBetween(glm::normalize(pelvis * axis), blade) * pelvis);
-	
-	transform = TransformInfo(hilt, rotation, link.io ? link.io->scale : 1.f);
+	// Like the game draws it in third person, attached to the back
+	transform = TransformInfo(entity.obj->vertexWorldPositions[link.lidx].v,
+	                          entity.obj->m_skeleton->bones[link.lgroup].anim.quat,
+	                          link.io ? link.io->scale : 1.f);
 	transform.pos = transform(link.obj->vertexlist[link.obj->origin].v - link.obj->vertexlist[link.lidx2].v);
 	return true;
 }

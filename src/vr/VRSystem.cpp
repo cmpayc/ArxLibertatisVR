@@ -1809,7 +1809,7 @@ void VRSystem::updatePointer() {
 	}
 	if(hand.wasPressed(VRButtonGrip)) {
 		// Touching an object grabs it even while pointing at a panel
-		m_gripIsClick = !isVRGripGrabbing() && !isVRHandAtSheath(); // Not at the sheath (draws the weapon, see VRControls)
+		m_gripIsClick = !isVRGripGrabbing() && !isVRHandAtSheath(dominant); // Not at the sheath (draws the weapon)
 		/*
 		 * The grip activates what it points at like the game's double click: levers, doors, containers, the loot of
 		 * dead bodies, talking to NPCs (not with a drawn weapon). Items are taken and grabbed instead (see VRGrab).

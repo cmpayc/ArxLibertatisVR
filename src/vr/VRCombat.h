@@ -25,11 +25,17 @@
  *
  * A swing starts when the weapon tip (or the fist) moves fast enough, measured from the controller in the tracking
  * space so walking and turning do not count. During a swing the game's hit check runs every frame with the damage
- * scaled by the speed. One swing damages a target once. Bows keep the game's handling.
+ * scaled by the speed. One swing damages a target once.
+ *
+ * Archery: the hand without the bow takes an arrow near the bow, holding its trigger draws the string by pulling the
+ * hand back, releasing it shoots along the line from that hand through the bow.
  */
 
-//! \return true if VR handles the melee of the current weapon (the game's strike animations are skipped)
+//! \return true if VR handles the combat (the game's strike and bow animations are skipped)
 [[nodiscard]] bool isVRMeleeActive();
+
+//! \return true while the bow is drawn: both triggers are used for archery (not for magic or use)
+[[nodiscard]] bool isVRArcheryActive();
 
 //! Swing detection and hit checks, in place of ManageCombatModeAnimations - once per frame in combat mode
 void updateVRCombat();

@@ -238,6 +238,7 @@ bool ArxGame::initialize() {
 			g_playerSkeletonHook = &applyVRBodyIK;
 			g_playerSheathHook = &getVRSheathTransform;
 			g_playerUpperLayerBones = &getVRUpperLayerBones;
+			g_playerLinkedTransformHook = &adjustVRLinkedTransform;
 		}
 	}
 	#endif
@@ -1652,6 +1653,13 @@ void ArxGame::updateInput() {
 	if(GInput->isKeyPressedNowPressed(Keyboard::Key_F10)) {
 		GetSnapShot();
 	}
+
+	#if ARX_HAVE_OPENXR
+	// VR testing: bows and arrows (T5.2)
+	if(isVRActive() && GInput->isKeyPressedNowPressed(Keyboard::Key_F8)) {
+		giveVRTestBow();
+	}
+	#endif
 
 	if(GInput->actionNowPressed(CONTROLS_CUST_DEBUG)) {
 		drawDebugCycleViews();

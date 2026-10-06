@@ -142,4 +142,11 @@ extern bool (*g_playerSheathHook)(const Entity & player, const EERIE_LINKED & li
  */
 extern const std::vector<bool> * (*g_playerUpperLayerBones)(const EERIE_3DOBJ & object);
 
+/*!
+ * Adjust where an object linked to the player model (in a hand) is drawn: the position of its attach point and its
+ * rotation (VR: a bow in the mirrored left hand)
+ */
+extern void (*g_playerLinkedTransformHook)(const Entity & player, const EERIE_LINKED & link,
+                                          TransformInfo & transform);
+
 #endif // ARX_ANIMATION_ANIMATIONRENDER_H

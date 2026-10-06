@@ -433,21 +433,21 @@ namespace {
 //! \return true if a hand may touch and grab objects directly (instead of the game's cursor and drag)
 bool canGrabDirectly(VRHand handId) {
 
+	// The hand holding a drawn weapon attacks with it (fists also grab, see VRCombat)
+	bool holdsWeapon = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE
+	                   && getVRWeaponHand() == handId;
 	if(handId == grabOffHand()) {
-		return true;
+		return !holdsWeapon;
 	}
 
-	// The main hand attacks with a weapon in combat mode (fists also grab, see VRCombat), and the cursor is needed
-	// to drop dragged items, combine items
-	// and select spell targets
-	bool attacking = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE;
-	return !attacking && !g_draggedEntity && !COMBINE && !LOOKING_FOR_SPELL_TARGET;
+	// The main hand cursor is needed to drop dragged items, combine items and select spell targets
+	return !holdsWeapon && !g_draggedEntity && !COMBINE && !LOOKING_FOR_SPELL_TARGET;
 }
 
 //! \return true if a hand may also point at objects to grab them: the main hand points at panels instead
 bool canPointToGrab(VRHand handId) {
 	// At the sheath the grip draws the weapon (see VRControls)
-	return handId == grabOffHand() || (!g_vr->isPointingAtUI() && !isVRHandAtSheath());
+	return !isVRHandAtSheath(handId) && (handId == grabOffHand() || !g_vr->isPointingAtUI());
 }
 
 //! Point at, take, grab, pull and throw objects with a hand, without the game's drag

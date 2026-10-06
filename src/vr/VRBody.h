@@ -64,15 +64,26 @@ bool isVRWeaponInWall(VRHand hand);
  */
 const std::vector<bool> * getVRUpperLayerBones(const EERIE_3DOBJ & object);
 
-//! Where the hilt of the sheathed weapon is, in the world: at the hip opposite to the main hand
-bool getVRSheathHilt(Vec3f & hilt);
+//! Where a hand draws the sheathed weapon, in the world: on the back where the game attaches it, over the shoulder of
+//! the hand (mirrored for the other shoulder)
+bool getVRSheathHilt(VRHand hand, Vec3f & hilt);
 
 /*!
- * Draw the sheathed weapon at the hip opposite to the main hand (where it is drawn from, see VRControls)
+ * Draw the sheathed weapon on the back like in third person (the game hides it in first person), where it is drawn
+ * from (see VRControls)
  *
  * Registered as \ref g_playerSheathHook.
  */
 bool getVRSheathTransform(const Entity & entity, const EERIE_LINKED & link, TransformInfo & transform);
+
+//! Bow in the mirrored left hand, arrow to shoot above the fist pointing at the bow: \ref g_playerLinkedTransformHook
+void adjustVRLinkedTransform(const Entity & entity, const EERIE_LINKED & link, TransformInfo & transform);
+
+//! Where the arrow to shoot lies relative to the drawing hand (in the world): just above it
+Vec3f getVRArrowRaise();
+
+//! Where the arrow to shoot rests on the drawn bow (in the world): just above its grip
+bool getVRArrowRest(Vec3f & rest);
 
 //! \return where the player model is drawn relative to the player position in VR
 Vec3f getVRModelOffset();
