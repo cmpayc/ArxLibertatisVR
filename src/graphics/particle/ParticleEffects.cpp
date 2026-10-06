@@ -92,6 +92,12 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "scene/Light.h"
 #include "scene/Tiles.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRCombat.h"
+#endif
+
 
 static const size_t MAX_PARTICLES = 2200;
 static long ParticleCount = 0;
@@ -412,6 +418,13 @@ void ManageTorch() {
 		
 		float rr = Random::getf();
 		el->pos = player.pos;
+		#if ARX_HAVE_OPENXR
+		// VR: the torch is held in a hand, light from its flame
+		Vec3f flame;
+		if(getVRTorchLight(flame)) {
+			el->pos = flame;
+		}
+		#endif
 		el->intensity = 1.6f;
 		el->fallstart = 280.f + rr * 20.f;
 		el->fallend = el->fallstart + 280.f;

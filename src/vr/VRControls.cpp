@@ -31,7 +31,6 @@
 #include "game/Camera.h"
 #include "game/EntityManager.h"
 #include "game/Equipment.h"
-#include "game/Inventory.h"
 #include "graphics/Draw.h"
 #include "graphics/Raycast.h"
 #include "physics/Collisions.h"
@@ -46,11 +45,6 @@
 #include "input/InputKey.h"
 #include "input/Keyboard.h"
 #include "input/Mouse.h"
-#include "io/log/Logger.h"
-#include "io/resource/PakReader.h"
-#include "io/resource/ResourcePath.h"
-#include "scene/Interactive.h"
-#include "script/Script.h"
 #include "vr/VRBody.h"
 #include "vr/VRCamera.h"
 #include "vr/VRCombat.h"
@@ -398,7 +392,7 @@ bool isVRFist(VRHand hand) {
 }
 
 bool isVRHandAtSheath(VRHand hand) {
-	return getSheathDistance(hand) < SheathRadius;
+	return getSheathDistance(hand) < SheathRadius || isVRHandAtBeltTorch(hand);
 }
 
 VRHand getVRWeaponHand() {
@@ -700,46 +694,4 @@ Entity * getVRPointedEntity(const VRPose & aim, bool debugRay) {
 	}
 	
 	return result;
-}
-
-void giveVRTestBow() {
-	
-	if(!entities.player() || ARXmenu.mode() != Mode_InGame) {
-		return;
-	}
-	
-	// The item names are not known here: take every weapon whose folder name contains "bow" or "arrow"
-	const res::path weapons = "graph/obj3d/interactive/items/weapons";
-	PakDirectory * directory = g_resources->getDirectory(weapons);
-	if(!directory) {
-		LogWarning << "VR test: no " << weapons;
-		return;
-	}
-	
-	for(const auto & entry : directory->dirs()) {
-		
-		std::string_view name = entry.name;
-		bool bow = name.find("bow") != std::string_view::npos;
-		bool arrows = name.find("arrow") != std::string_view::npos;
-		if(!bow && !arrows) {
-			continue;
-		}
-		
-		res::path file = weapons / name / name;
-		Entity * item = AddItem(file);
-		if(!item) {
-			LogWarning << "VR test: could not create " << file;
-			continue;
-		}
-		item->scriptload = 1;
-		SendInitScriptEvent(item);
-		if(arrows && (item->ioflags & IO_ITEM)) {
-			item->_itemdata->maxcount = 9999;
-			item->_itemdata->count = 50;
-		}
-		giveToPlayer(item);
-		LogInfo << "VR test: added " << file;
-		
-	}
-	
 }

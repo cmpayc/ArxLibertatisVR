@@ -149,4 +149,10 @@ extern const std::vector<bool> * (*g_playerUpperLayerBones)(const EERIE_3DOBJ & 
 extern void (*g_playerLinkedTransformHook)(const Entity & player, const EERIE_LINKED & link,
                                           TransformInfo & transform);
 
+/*!
+ * An item the player model carries that is not linked to it, drawn with the given transform, or nullptr
+ * (VR: the torch on the belt, which stays in the inventory)
+ */
+extern Entity * (*g_playerCarriedItemHook)(const Entity & player, TransformInfo & transform);
+
 #endif // ARX_ANIMATION_ANIMATIONRENDER_H

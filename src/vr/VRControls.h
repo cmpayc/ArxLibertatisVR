@@ -92,7 +92,4 @@ void drawVRPointerBeam();
 //! \return the interactive object a controller points at (with aim assist), or nullptr; optionally shows the debug ray
 class Entity * getVRPointedEntity(const struct VRPose & aim, bool debugRay);
 
-//! Testing: put the bows and arrows of the game into the player inventory (F8 in VR)
-void giveVRTestBow();
-
 #endif // ARX_VR_VRCONTROLS_H

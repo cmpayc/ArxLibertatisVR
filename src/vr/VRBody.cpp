@@ -605,6 +605,17 @@ bool isHoldingItem(const EERIE_3DOBJ & object, VRHand hand) {
 	return false;
 }
 
+//! eturn true if the player model holds the lit torch in a hand (see VRCombat)
+bool isHoldingTorch(const EERIE_3DOBJ & object, VRHand hand) {
+	VertexId vertex = getHoldVertex(object, hand);
+	for(const EERIE_LINKED & link : object.linked) {
+		if(vertex && link.lidx == vertex && player.torch && link.io == player.torch) {
+			return true;
+		}
+	}
+	return false;
+}
+
 //! The longest extent of an object from its attach point (the blade of a weapon), in object space
 Vec3f getHeldItemExtent(const EERIE_3DOBJ & object, VertexId attach) {
 
@@ -693,7 +704,9 @@ void alignHeldItem(Skeleton & skeleton, const EERIE_3DOBJ & object, const ArmBon
 		axis.x = -axis.x;
 	}
 	Vec3f current = skeleton.bones[held->lgroup].anim.quat * axis;
-	Vec3f wanted = gripOrientation * Vec3f(0.f, 0.f, 1.f);
+	// A torch is held up and forwards (y is down), weapons point through the fist
+	Vec3f direction = (player.torch && held->io == player.torch) ? Vec3f(0.f, -1.f, 1.f) : Vec3f(0.f, 0.f, 1.f);
+	Vec3f wanted = gripOrientation * glm::normalize(direction);
 	glm::quat change = rotationBetween(glm::normalize(current), glm::normalize(wanted));
 	
 	Bone & handBone = skeleton.bones[arm.hand];
@@ -735,7 +748,13 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 				if(isHoldingItem(*entity.obj, VRHand(hand))) {
 					// The animation of the game wraps the fingers around the handle: keep it, only aim the item
 					alignHeldItem(skeleton, *entity.obj, arm, VRHand(hand), state.grip);
-					if(hand == VRHandLeft) {
+					if(isHoldingTorch(*entity.obj, VRHand(hand))) {
+						// The game does not animate a hand holding the torch: a fist around it
+						VRHandState fist = state;
+						fist.squeeze = fist.trigger = 1.f;
+						curlFingers(skeleton, arm, fist, entity.anims[ANIM_1H_WAIT], &bones.arms[VRHandRight],
+						            hand == VRHandLeft);
+					} else if(hand == VRHandLeft) {
 						/*
 						 * The game only holds items in the right hand, and animates its fingers around the handle: the
 						 * left hand (done first, before the right hand fingers may be curled) gets that pose mirrored
@@ -921,6 +940,44 @@ bool getVRSheathTransform(const Entity & entity, const EERIE_LINKED & link, Tran
 	                          entity.obj->m_skeleton->bones[link.lgroup].anim.quat,
 	                          link.io ? link.io->scale : 1.f);
 	transform.pos = transform(link.obj->vertexlist[link.obj->origin].v - link.obj->vertexlist[link.lidx2].v);
+	return true;
+}
+
+bool getVRBeltTransform(VRHand side, const EERIE_3DOBJ & item, float scale, TransformInfo & transform, Vec3f & centre) {
+	
+	if(!isVRActive() || !isVRPlayerView() || !g_hipsValid || item.vertexlist.empty()) {
+		return false;
+	}
+	
+	Vec3f across = g_hipPositions[VRHandRight] - g_hipPositions[VRHandLeft];
+	across.y = 0.f;
+	if(glm::length(across) < 1.f) {
+		return false;
+	}
+	Vec3f outward = glm::normalize((side == VRHandRight) ? across : -across);
+	
+	// From the end to the flame (fire vertex), or along the longest extent from the origin
+	VertexId bottom = item.origin;
+	Vec3f axis = getHeldItemExtent(item, bottom);
+	if(item.fastaccess.fire && size_t(item.fastaccess.fire) < item.vertexlist.size()) {
+		Vec3f toFire = item.vertexlist[item.fastaccess.fire].v - item.vertexlist[bottom].v;
+		if(glm::length(toFire) > glm::length(axis) * 0.5f) {
+			axis = toFire;
+		}
+	}
+	float length = glm::length(axis) * scale;
+	if(length < 1.f) {
+		return false;
+	}
+	
+	// Tucked into the belt at the outside of the hip, the flame end up and tilted outwards
+	const float BeltOffset = 9.f * getVRBodyScale(); // cm outwards from the hip joint
+	const float tilt = glm::radians(25.f);
+	Vec3f along = glm::normalize(Vec3f(0.f, -std::cos(tilt), 0.f) + outward * std::sin(tilt));
+	glm::quat rotation = rotationBetween(glm::normalize(axis), along);
+	centre = g_hipPositions[side] + outward * BeltOffset;
+	Vec3f middle = item.vertexlist[bottom].v + axis * 0.5f; // Object space, drawn as rotation * vertex * scale + pos
+	transform = TransformInfo(centre - (rotation * middle) * scale, rotation, scale);
 	return true;
 }
 

@@ -26,6 +26,7 @@
 
 #include <glm/glm.hpp>
 
+#include "animation/AnimationRender.h"
 #include "core/Config.h"
 #include "core/Core.h"
 #include "game/Damage.h"
@@ -35,9 +36,11 @@
 #include "game/Inventory.h"
 #include "game/Player.h"
 #include "graphics/GraphicsTypes.h"
+#include "graphics/particle/ParticleEffects.h"
 #include "graphics/particle/Spark.h"
 #include "gui/Menu.h"
 #include "gui/Speech.h"
+#include "io/log/Logger.h"
 #include "physics/Collisions.h"
 #include "physics/Projectile.h"
 #include "scene/LinkedObject.h"
@@ -46,6 +49,7 @@
 #include "scene/Object.h"
 #include "script/Script.h"
 #include "vr/VRBody.h"
+#include "vr/VRCamera.h"
 #include "vr/VRControls.h"
 #include "vr/VRGrab.h"
 #include "vr/VRSystem.h"
@@ -88,6 +92,10 @@ Swing g_swings[VRHandCount];
 
 VRHand mainHand() {
 	return config.vr.leftHanded ? VRHandLeft : VRHandRight;
+}
+
+VRHand secondaryHand() {
+	return config.vr.leftHanded ? VRHandRight : VRHandLeft;
 }
 
 /*!
@@ -579,7 +587,207 @@ void updateArchery(Entity & io, float dt) {
 
 }
 
+/*!
+ * The lit torch is held in a hand (the game only shows its icon and lights the player position): the off hand, or the
+ * main hand while a weapon is drawn in the off hand. Its flame burns at its fire vertex.
+ */
+EntityHandle g_heldTorch; // The torch linked to a hand
+VRHand g_torchHand = VRHandCount; // The hand that took the torch from the belt, VRHandCount: the off hand
+bool g_torchStowArmed = false; // The torch hand was away from the hip, see updateTorch
+const float TorchStowRadius = 16.f; // cm from the hip joint to the wrist
+const float TorchIgniteRadius = 15.f; // cm around the flame
+
+/*!
+ * The torch put away at the hip hangs on the belt there, unlit. It stays in the inventory (saved games keep it there)
+ * and is drawn at the hip (getVRCarriedItem) until it is taken back with a grip or leaves the inventory.
+ */
+EntityHandle g_beltTorch;
+VRHand g_beltSide = VRHandLeft;
+Vec3f g_beltCentre(0.f);
+bool g_beltCentreValid = false;
+bool g_beltTaking[VRHandCount] = { }; // The grip that took the torch is still held (not a click or grab)
+const float BeltTakeRadius = 15.f; // cm from the wrist to the middle of the torch
+
+Entity * getBeltTorch() {
+	Entity * torch = entities.get(g_beltTorch);
+	if(!torch || torch == player.torch || !torch->obj || !torch->obj->fastaccess.fire
+	   || torch->owner() != entities.player() || !locateInInventories(torch)) {
+		g_beltTorch = EntityHandle();
+		g_beltCentreValid = false;
+		return nullptr;
+	}
+	return torch;
+}
+
+void updateBeltTorch() {
+
+	for(size_t hand = 0; hand < VRHandCount; hand++) {
+		if(!g_vr->getInput().getHand(VRHand(hand)).isPressed(VRButtonGrip)) {
+			g_beltTaking[hand] = false;
+		}
+	}
+
+	Entity * torch = getBeltTorch();
+	if(!torch || player.torch) {
+		return;
+	}
+	TransformInfo transform;
+	g_beltCentreValid = getVRBeltTransform(g_beltSide, *torch->obj, torch->scale, transform, g_beltCentre);
+	if(!g_beltCentreValid) {
+		return;
+	}
+
+	// A grip near the torch takes it (and lights it) with a hand that holds no weapon
+	bool weaponDrawn = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE;
+	for(size_t i = 0; i < VRHandCount; i++) {
+		VRHand hand = VRHand(i);
+		Vec3f wrist;
+		glm::quat orientation;
+		if(!g_vr->getInput().getHand(hand).wasPressed(VRButtonGrip) || (weaponDrawn && getVRWeaponHand() == hand)
+		   || !getVRWristPose(hand, wrist, orientation) || glm::distance(wrist, g_beltCentre) > BeltTakeRadius) {
+			continue;
+		}
+		g_beltTorch = EntityHandle();
+		g_beltCentreValid = false;
+		g_beltTaking[hand] = true;
+		g_torchHand = hand;
+		g_torchStowArmed = false;
+		ARX_PLAYER_ClickedOnTorch(torch); // Equips and lights it
+		g_vr->getInput().vibrate(hand, 0.5f, 0.06f);
+		return;
+	}
+}
+
+/*!
+ * The lit torch is held in a hand (the game only shows its icon and lights the player position): the hand that took
+ * it from the belt or the off hand, the other hand while a weapon is drawn in it. Its flame burns at its fire vertex.
+ */
+void updateTorch(Entity & io) {
+
+	updateBeltTorch();
+
+	// A torch that went out (e.g. a douse spell) is not unlinked by the game: let go of it
+	Entity * torch = player.torch;
+	if(Entity * held = entities.get(g_heldTorch); held && held != torch) {
+		unlinkEntity(*held);
+		g_heldTorch = EntityHandle();
+	}
+	if(!torch || !torch->obj) {
+		g_torchStowArmed = false;
+		g_torchHand = VRHandCount;
+		return;
+	}
+
+	bool weaponDrawn = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE;
+	VRHand hand = (g_torchHand < VRHandCount) ? g_torchHand : secondaryHand();
+	if(weaponDrawn && getVRWeaponHand() == hand) {
+		hand = (hand == VRHandLeft) ? VRHandRight : VRHandLeft;
+	}
+
+	VertexId wanted = (hand == VRHandLeft) ? io.obj->fastaccess.left_attach : io.obj->fastaccess.primary_attach;
+	bool linked = false;
+	for(const EERIE_LINKED & link : io.obj->linked) {
+		if(link.io == torch) {
+			linked = (link.lidx == wanted);
+			break;
+		}
+	}
+	if(!linked && wanted) {
+		// The torch model has no attach vertex: held at its origin
+		VertexId attach = getNamedVertex(torch->obj, "primary_attach");
+		if(!attach) {
+			attach = getNamedVertex(torch->obj, "attach");
+		}
+		if(!attach) {
+			attach = torch->obj->origin;
+		}
+		if(VertexGroupId group = getGroupForVertex(io.obj, wanted)) {
+			unlinkEntity(*torch);
+			EERIE_LINKED link;
+			link.lidx = wanted;
+			link.lgroup = group;
+			link.lidx2 = attach;
+			link.obj = torch->obj;
+			link.io = torch;
+			io.obj->linked.push_back(link);
+			torch->setOwner(&io);
+			g_heldTorch = torch->index();
+		}
+	}
+
+	// Bringing the torch hand to the hip on its side hangs the torch on the belt there (unlit, in the inventory), once
+	// the hand has been away from the hip since the torch was taken
+	Vec3f wrist;
+	Vec3f hip;
+	glm::quat orientation;
+	if(getVRWristPose(hand, wrist, orientation) && getVRHipPosition(hand, hip)) {
+		float distance = glm::distance(wrist, hip);
+		if(distance > TorchStowRadius + 15.f) {
+			g_torchStowArmed = true;
+		} else if(g_torchStowArmed && distance < TorchStowRadius) {
+			g_torchStowArmed = false;
+			g_heldTorch = EntityHandle();
+			g_torchHand = VRHandCount;
+			ARX_PLAYER_ClickedOnTorch(torch); // Unequips it into the inventory
+			g_beltTorch = torch->index();
+			g_beltSide = hand;
+			g_vr->getInput().vibrate(hand, 0.5f, 0.06f);
+			return;
+		}
+	}
+
+	VertexId fire = torch->obj->fastaccess.fire;
+	if(fire && size_t(fire) < torch->obj->vertexWorldPositions.size()) {
+		createFireParticles(torch->obj->vertexWorldPositions[fire].v, 2, 2ms);
+		// Touching something that can burn (another torch, a candle, a fireplace) with the flame lights it, like fire arrows
+		Sphere flame(torch->obj->vertexWorldPositions[fire].v, TorchIgniteRadius);
+		igniteLights(flame);
+		igniteEntities(flame);
+	}
+}
+
 } // anonymous namespace
+
+Entity * getVRCarriedItem(const Entity & entity, TransformInfo & transform) {
+	
+	ARX_UNUSED(entity);
+	
+	Entity * torch = (isVRActive() && !player.torch) ? getBeltTorch() : nullptr;
+	Vec3f centre;
+	if(!torch || !getVRBeltTransform(g_beltSide, *torch->obj, torch->scale, transform, centre)) {
+		return nullptr;
+	}
+	return torch;
+}
+
+bool isVRHandAtBeltTorch(VRHand hand) {
+	if(!isVRActive() || hand >= VRHandCount) {
+		return false;
+	}
+	if(g_beltTaking[hand]) {
+		return true;
+	}
+	Vec3f wrist;
+	glm::quat orientation;
+	return g_beltCentreValid && !player.torch && entities.get(g_beltTorch) && getVRWristPose(hand, wrist, orientation)
+	       && glm::distance(wrist, g_beltCentre) < BeltTakeRadius;
+}
+
+bool getVRTorchLight(Vec3f & position) {
+	
+	// At the flame of the torch held in a hand, see updateTorch
+	Entity * torch = player.torch;
+	if(!isVRActive() || !isVRPlayerView() || !torch || !torch->obj || torch->show != SHOW_FLAG_ON_PLAYER) {
+		return false;
+	}
+	VertexId fire = torch->obj->fastaccess.fire;
+	if(!fire || size_t(fire) >= torch->obj->vertexWorldPositions.size()) {
+		return false;
+	}
+	
+	position = torch->obj->vertexWorldPositions[fire].v;
+	return true;
+}
 
 bool isVRMeleeActive() {
 	return isVRActive() && g_vr;
@@ -598,6 +806,8 @@ void updateVRCombat() {
 		return;
 	}
 
+	updateTorch(*io);
+	
 	float dt = g_vr->getFrameDuration();
 	WeaponType type = ARX_EQUIPMENT_GetPlayerWeaponType();
 

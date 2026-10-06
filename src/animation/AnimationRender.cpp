@@ -838,6 +838,7 @@ float g_playerModelScale = 1.f;
 bool (*g_playerSheathHook)(const Entity & player, const EERIE_LINKED & link, TransformInfo & transform) = nullptr;
 const std::vector<bool> * (*g_playerUpperLayerBones)(const EERIE_3DOBJ & object) = nullptr;
 void (*g_playerLinkedTransformHook)(const Entity & player, const EERIE_LINKED & link, TransformInfo & transform) = nullptr;
+Entity * (*g_playerCarriedItemHook)(const Entity & player, TransformInfo & transform) = nullptr;
 
 static void PrepareAnimatedObjectHalo(HaloInfo & haloInfo, const Vec3f & pos,
                                       Skeleton * obj, EERIE_3DOBJ * eobj) {
@@ -1124,9 +1125,16 @@ static void Cedric_AnimateDrawEntityRender(EERIE_3DOBJ * eobj, const Vec3f & pos
 		s_drawMirrored = (t.scale < 0.f);
 		DrawEERIEInter(link.obj, t, link.io, true, invisibility);
 		s_drawMirrored = false;
-		
+
 	}
-	
+
+	if(g_playerCarriedItemHook && io == entities.player() && !IN_BOOK_DRAW) {
+		TransformInfo t;
+		if(Entity * item = g_playerCarriedItemHook(*io, t); item && item->obj) {
+			DrawEERIEInter(item->obj, t, item, true, invisibility);
+		}
+	}
+
 }
 
 static Vec3f CalcTranslation(AnimLayer & layer) {

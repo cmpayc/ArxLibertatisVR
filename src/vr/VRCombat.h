@@ -20,6 +20,12 @@
 #ifndef ARX_VR_VRCOMBAT_H
 #define ARX_VR_VRCOMBAT_H
 
+#include "math/Types.h"
+#include "vr/VRInput.h"
+
+class Entity;
+struct TransformInfo;
+
 /*!
  * Physical melee in VR: swinging the weapon (or fists) strikes, instead of the game's click and hold strikes.
  *
@@ -36,6 +42,16 @@
 
 //! \return true while the bow is drawn: both triggers are used for archery (not for magic or use)
 [[nodiscard]] bool isVRArcheryActive();
+
+//! Where the light of the torch held in a hand is (its flame), false if there is none (VR: the torch is held, see
+//! updateVRCombat; the game lights the player position)
+bool getVRTorchLight(Vec3f & position);
+
+//! The torch hanging on the belt (put away at the hip), drawn at the hip: ef g_playerCarriedItemHook
+Entity * getVRCarriedItem(const Entity & entity, TransformInfo & transform);
+
+//! eturn true while a hand is at the torch on the belt: its grip takes the torch (not a click or grab)
+[[nodiscard]] bool isVRHandAtBeltTorch(VRHand hand);
 
 //! Swing detection and hit checks, in place of ManageCombatModeAnimations - once per frame in combat mode
 void updateVRCombat();

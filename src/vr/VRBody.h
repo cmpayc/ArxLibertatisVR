@@ -76,6 +76,10 @@ bool getVRSheathHilt(VRHand hand, Vec3f & hilt);
  */
 bool getVRSheathTransform(const Entity & entity, const EERIE_LINKED & link, TransformInfo & transform);
 
+//! Where an item hangs on the belt (a torch): at the outside of the hip on the given side, upright. \p centre is its
+//! middle, in the world
+bool getVRBeltTransform(VRHand side, const EERIE_3DOBJ & item, float scale, TransformInfo & transform, Vec3f & centre);
+
 //! Bow in the mirrored left hand, arrow to shoot above the fist pointing at the bow: \ref g_playerLinkedTransformHook
 void adjustVRLinkedTransform(const Entity & entity, const EERIE_LINKED & link, TransformInfo & transform);
 
