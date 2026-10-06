@@ -146,6 +146,43 @@ InputKeyId getActionKey(ControlAction action) {
 }
 
 /*!
+ * \return how far an interactive object is from a ray (offset / distance along the ray), or a negative value if it is
+ *         farther than maxAngle (tangent) or minRadius (cm), out of reach or behind a wall
+ */
+float getAimOffset(const Entity & entity, const Vec3f & origin, const Vec3f & direction, float maxAngle,
+                   float minRadius) {
+	
+	const float Range = 360.f; // cm, the pick range of the game
+	
+	if(&entity == entities.player() || entity.show != SHOW_FLAG_IN_SCENE || !entity.obj
+	   || !(entity.gameFlags & GFLAG_INTERACTIVITY) || !(entity.gameFlags & GFLAG_ISINTREATZONE)
+	   || !(entity.ioflags & (IO_ITEM | IO_FIX | IO_NPC))) {
+		return -1.f;
+	}
+	
+	const EERIE_3D_BBOX & bbox = entity.bbox3D;
+	Vec3f center = (bbox.min.x <= bbox.max.x) ? (bbox.min + bbox.max) * 0.5f : entity.pos;
+	Vec3f toCenter = center - origin;
+	float along = glm::dot(toCenter, direction);
+	if(along < 5.f || along > Range) {
+		return -1.f;
+	}
+	float offset = glm::length(toCenter - direction * along);
+	if(offset > std::max(minRadius, along * maxAngle)) {
+		return -1.f;
+	}
+	
+	// Not behind a wall
+	if(RaycastResult wall = raycastScene(origin, center, POLY_TRANS, RaycastIgnorePlayer)) {
+		if(glm::distance(origin, wall.pos) < along - 20.f) {
+			return -1.f;
+		}
+	}
+	
+	return offset / along;
+}
+
+/*!
  * Find the interactive object that the hand points at most closely: within about 8 degrees or 15 cm of the ray,
  * in reach and not behind a wall
  */
@@ -153,47 +190,53 @@ Entity * findVRAimAssistTarget(const Vec3f & origin, const Vec3f & direction) {
 	
 	const float MaxAngle = 0.14f; // tan(8 degrees)
 	const float MinRadius = 15.f; // cm
-	const float Range = 360.f;    // cm, the pick range of the game
 	
 	Entity * best = nullptr;
 	float bestScore = 0.f;
 	for(Entity & entity : entities) {
-		
-		if(&entity == entities.player() || entity.show != SHOW_FLAG_IN_SCENE || !entity.obj
-		   || !(entity.gameFlags & GFLAG_INTERACTIVITY) || !(entity.gameFlags & GFLAG_ISINTREATZONE)
-		   || !(entity.ioflags & (IO_ITEM | IO_FIX | IO_NPC))) {
-			continue;
+		float score = getAimOffset(entity, origin, direction, MaxAngle, MinRadius);
+		if(score >= 0.f && (!best || score < bestScore)) {
+			best = &entity;
+			bestScore = score;
 		}
-		
-		const EERIE_3D_BBOX & bbox = entity.bbox3D;
-		Vec3f center = (bbox.min.x <= bbox.max.x) ? (bbox.min + bbox.max) * 0.5f : entity.pos;
-		Vec3f toCenter = center - origin;
-		float along = glm::dot(toCenter, direction);
-		if(along < 5.f || along > Range) {
-			continue;
-		}
-		float offset = glm::length(toCenter - direction * along);
-		if(offset > std::max(MinRadius, along * MaxAngle)) {
-			continue;
-		}
-		
-		float score = offset / along;
-		if(best && score >= bestScore) {
-			continue;
-		}
-		
-		// Not behind a wall
-		if(RaycastResult wall = raycastScene(origin, center, POLY_TRANS, RaycastIgnorePlayer)) {
-			if(glm::distance(origin, wall.pos) < along - 20.f) {
-				continue;
-			}
-		}
-		
-		best = &entity;
-		bestScore = score;
 	}
 	
 	return best;
+}
+
+EntityHandle g_aimTargets[VRHandCount]; // The last object each hand pointed at
+
+/*!
+ * Keep pointing at the same object until the ray moves clearly away from it (about 16 degrees or 25 cm), so that the
+ * target does not flicker between objects or drop at the edge of the aim assist. Pointing directly at another object
+ * switches to it at once.
+ */
+Entity * keepVRAimTarget(const VRPose & aim, Entity * target, bool direct, const Vec3f & origin,
+                         const Vec3f & direction) {
+	
+	if(!g_vr) {
+		return target;
+	}
+	size_t hand = VRHandCount;
+	for(size_t i = 0; i < VRHandCount; i++) {
+		if(&aim == &g_vr->getInput().getHand(VRHand(i)).aim) {
+			hand = i;
+		}
+	}
+	if(hand == VRHandCount) {
+		return target;
+	}
+	
+	const float KeepAngle = 0.29f; // tan(16 degrees)
+	const float KeepRadius = 25.f; // cm
+	Entity * previous = entities.get(g_aimTargets[hand]);
+	if(!direct && previous && previous != target
+	   && getAimOffset(*previous, origin, direction, KeepAngle, KeepRadius) >= 0.f) {
+		target = previous;
+	}
+	
+	g_aimTargets[hand] = target ? target->index() : EntityHandle();
+	return target;
 }
 
 } // anonymous namespace
@@ -408,13 +451,14 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 		hitEntity = hit.entity;
 	}
 	
-	// Aim assist: without a direct hit on an interactive object, take the one closest to the ray
-	if(!hitEntity || !(hitEntity->gameFlags & GFLAG_INTERACTIVITY)) {
-		if(Entity * assisted = findVRAimAssistTarget(origin, direction)) {
-			const EERIE_3D_BBOX & bbox = assisted->bbox3D;
-			target = (bbox.min.x <= bbox.max.x) ? (bbox.min + bbox.max) * 0.5f : assisted->pos;
-			hitSomething = true;
-		}
+	// Aim assist: without a direct hit on an interactive object, take the one closest to the ray (kept while near)
+	bool direct = hitEntity && (hitEntity->gameFlags & GFLAG_INTERACTIVITY);
+	Entity * assisted = keepVRAimTarget(aim, direct ? hitEntity : findVRAimAssistTarget(origin, direction), direct,
+	                                    origin, direction);
+	if(!direct && assisted) {
+		const EERIE_3D_BBOX & bbox = assisted->bbox3D;
+		target = (bbox.min.x <= bbox.max.x) ? (bbox.min + bbox.max) * 0.5f : assisted->pos;
+		hitSomething = true;
 	}
 	if(showRay && hitSomething) {
 		g_beam.end = target;
@@ -637,8 +681,10 @@ Entity * getVRPointedEntity(const VRPose & aim, bool debugRay) {
 			result = hit.entity;
 		}
 	}
-	if(!result) {
-		result = findVRAimAssistTarget(origin, direction);
+	bool direct = (result != nullptr);
+	result = keepVRAimTarget(aim, direct ? result : findVRAimAssistTarget(origin, direction), direct,
+	                         origin, direction);
+	if(!direct) {
 		if(result) {
 			const EERIE_3D_BBOX & bbox = result->bbox3D;
 			target = (bbox.min.x <= bbox.max.x) ? (bbox.min + bbox.max) * 0.5f : result->pos;
