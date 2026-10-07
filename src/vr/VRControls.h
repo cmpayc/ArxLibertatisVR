@@ -104,4 +104,13 @@ bool getVRSpellAim(Anglef & angle);
 //! End the player's latest spell that lasts (night vision, armor...), like the game's cancel spell key
 bool endVRLastSpell();
 
+//! \return true while sneaking is toggled on (off stick click): moving slowly and quietly, like the stealth key
+[[nodiscard]] bool isVRSneaking();
+
+//! \return true while the potion wheel is open (the off trigger alone, in the world)
+[[nodiscard]] bool isVRItemWheelOpen();
+
+//! Draw the potion wheel at the off hand, in the world (during the stereo render, like the pointer beam)
+void drawVRItemWheel();
+
 #endif // ARX_VR_VRCONTROLS_H

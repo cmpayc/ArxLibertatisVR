@@ -27,6 +27,7 @@
 
 #include "core/Config.h"
 #include "core/Core.h"
+#include "game/Inventory.h"
 #include "game/Player.h"
 #include "game/Camera.h"
 #include "game/EntityManager.h"
@@ -68,6 +69,7 @@ float g_pendingTurn = 0.f;
 bool g_snapTurnReady = true;
 std::vector<InputKeyId> g_pressedKeys;
 int g_weaponToggleFrames = 0; // Frames left of the ready weapon action from the sheath
+bool g_sneaking = false; // Toggled with the off stick click
 float g_bookHoldTime = -1.f; // s the B button is held, negative after a long press opened the spells
 int g_bookTapFrames = 0; // Frames left of the book action from a short press of B
 bool g_sheatheArmed = false; // The drawn weapon left the sheath: bringing it back sheathes it
@@ -311,6 +313,87 @@ void updatePrecastGestures() {
 	}
 }
 
+/*!
+ * The potion wheel: the off trigger alone opens it where the hand is (with the grip it is a fist, which punches, see
+ * VRCombat). Moving the hand picks a part (the health potion to the left, the mana potion to the right, the antidote
+ * up, cancel down), releasing the trigger drinks the potion picked, like the game's potion keys. The grip cancels it.
+ * While the main hand points at a panel (inventory) the off trigger is the game's use action instead.
+ */
+struct ItemWheelSlot {
+	std::string_view className; //!< Empty: cancel
+	Vec2f direction; //!< Right and up, as seen from the head
+};
+const ItemWheelSlot g_wheelSlots[] = {
+	{ "potion_life", Vec2f(-1.f, 0.f) },
+	{ "potion_mana", Vec2f(1.f, 0.f) },
+	{ "potion_purple", Vec2f(0.f, 1.f) },
+	{ "", Vec2f(0.f, -1.f) },
+};
+bool g_wheelOpen = false;
+Vec3f g_wheelCenter(0.f); // Where the hand was when the wheel opened, in the tracking space
+int g_wheelSelected = -1;
+
+void updateItemWheel() {
+
+	const float DeadZone = 0.04f; // m the hand moves before a part is picked
+
+	const VRHand hand = offHand();
+	const VRHandState & state = g_vr->getInput().getHand(hand);
+	bool trigger = state.isPressed(VRButtonTrigger) && !state.isPressed(VRButtonGrip) && state.grip.valid;
+	bool weaponInHand = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE
+	                    && getVRWeaponHand() == hand;
+	bool usable = ARXmenu.mode() == Mode_InGame && !BLOCK_PLAYER_CONTROLS && !isVROffHandGrabbing()
+	              && !isVRArcheryActive() && !weaponInHand;
+
+	if(!g_wheelOpen) {
+		if(trigger && usable && state.wasPressed(VRButtonTrigger) && !g_vr->isPointingAtUI()) {
+			g_wheelOpen = true;
+			g_wheelCenter = state.grip.position;
+			g_wheelSelected = -1;
+			g_vr->getInput().vibrate(hand, 0.3f, 0.04f);
+		}
+		return;
+	}
+
+	if(!trigger || !usable) {
+		g_wheelOpen = false;
+		// Released: drink the potion picked (the grip cancels)
+		if(usable && !state.isPressed(VRButtonGrip) && g_wheelSelected >= 0 && !g_wheelSlots[g_wheelSelected].className.empty()) {
+			std::string_view className = g_wheelSlots[g_wheelSelected].className;
+			bool have = getInventoryItemWithLowestDurability(className) != nullptr;
+			if(have) {
+				useInventoryItemWithLowestDurability(className);
+			}
+			g_vr->getInput().vibrate(hand, have ? 0.6f : 0.15f, have ? 0.1f : 0.04f);
+		}
+		g_wheelSelected = -1;
+		return;
+	}
+
+	// The part in the direction the hand moved, as seen from the head (tracking space: y up)
+	const XrQuaternionf & q = g_vr->getView(0).pose.orientation;
+	glm::quat head(q.w, q.x, q.y, q.z);
+	Vec3f moved = state.grip.position - g_wheelCenter;
+	Vec2f offset(glm::dot(moved, head * Vec3f(1.f, 0.f, 0.f)), glm::dot(moved, head * Vec3f(0.f, 1.f, 0.f)));
+	int selected = -1;
+	if(glm::length(offset) > DeadZone) {
+		float best = -2.f;
+		for(size_t i = 0; i < std::size(g_wheelSlots); i++) {
+			float alignment = glm::dot(g_wheelSlots[i].direction, glm::normalize(offset));
+			if(alignment > best) {
+				best = alignment;
+				selected = int(i);
+			}
+		}
+	}
+	if(selected != g_wheelSelected) {
+		g_wheelSelected = selected;
+		if(selected >= 0) {
+			g_vr->getInput().vibrate(hand, 0.2f, 0.02f);
+		}
+	}
+}
+
 } // anonymous namespace
 
 bool isVRActive() {
@@ -332,13 +415,14 @@ void updateVRControls() {
 	const VRHandState & off = input.getHand(offHand());
 
 	updatePrecastGestures();
+	updateItemWheel();
 
 	/*
 	 * Buttons are mapped to the keys bound to the game actions, so they also work in places that read keys.
 	 * Main hand (right): A = jump, B = book, stick click = crouch toggle, trigger = magic mode,
 	 *                    grip = take, grab and attack (left click, see the laser pointer in VRSystem)
-	 * Off hand (left):   X = inventory, Y = game menu, stick click = ready weapon,
-	 *                    trigger = use (interaction cursor), grip = right click
+	 * Off hand (left):   X = inventory, Y = game menu, stick click = sneak toggle,
+	 *                    trigger = potion wheel (use on panels), grip = right click
 	 */
 	std::vector<InputKeyId> keys;
 	auto press = [&keys](ControlAction action, bool pressed) {
@@ -381,9 +465,6 @@ void updateVRControls() {
 	bool toggleWeapon = false;
 	if(!(player.Interface & INTER_COMBATMODE)) {
 		g_sheatheArmed = false;
-		if(off.wasPressed(VRButtonStick)) {
-			g_weaponHand = dominantHand(); // The ready weapon button draws into the main hand
-		}
 		for(VRHand hand : { dominantHand(), offHand() }) {
 			if(input.getHand(hand).wasPressed(VRButtonGrip) && getSheathDistance(hand) < SheathRadius) {
 				g_weaponHand = hand;
@@ -401,14 +482,20 @@ void updateVRControls() {
 		g_weaponToggleFrames = 3;
 		g_vr->getInput().vibrate(g_weaponHand, 0.6f, 0.08f);
 	}
-	press(CONTROLS_CUST_WEAPON, off.isPressed(VRButtonStick) || g_weaponToggleFrames > 0);
+	press(CONTROLS_CUST_WEAPON, g_weaponToggleFrames > 0);
+	// Off stick click: sneaking on or off (like holding the stealth key, see isVRSneaking)
+	if(off.wasPressed(VRButtonStick) && ARXmenu.mode() == Mode_InGame) {
+		g_sneaking = !g_sneaking;
+		g_vr->getInput().vibrate(offHand(), g_sneaking ? 0.5f : 0.25f, g_sneaking ? 0.1f : 0.05f);
+	}
 	if(g_weaponToggleFrames > 0) {
 		g_weaponToggleFrames--;
 	}
 	// While the off hand holds an object its trigger stores it instead (see VRGrab)
 	// A fist (grip and trigger) punches instead (see VRCombat)
+	// In the world the off trigger opens the potion wheel instead (see updateItemWheel)
 	press(CONTROLS_CUST_USE, (off.isPressed(VRButtonTrigger) && !isVROffHandGrabbing() && !isVRFist(offHand())
-	                          && !isVRArcheryActive())
+	                          && !g_wheelOpen && !isVRArcheryActive())
 	                         || g_vr->isUseTapPressed());
 	// While holding an object the trigger stores it instead (see VRGrab)
 	/*
@@ -866,4 +953,67 @@ bool endVRLastSpell() {
 	ARX_SOUND_PlaySFX(g_snd.MAGIC_FIZZLE);
 	spells.endSpell(last);
 	return true;
+}
+
+bool isVRSneaking() {
+	return g_sneaking && ARXmenu.mode() == Mode_InGame;
+}
+
+bool isVRItemWheelOpen() {
+	return g_wheelOpen;
+}
+
+void drawVRItemWheel() {
+	
+	Vec3f center;
+	if(!g_wheelOpen || !isVRPlayerView() || !trackingPointToWorld(g_wheelCenter, center)) {
+		return;
+	}
+	
+	// Facing the eyes, the parts around the hand: the picked one bright, potions not carried dim
+	const float Radius = 7.f; // cm
+	const float Size = 2.6f; // cm, half the width of a part
+	const Vec3f right = Vec3f(g_preparedCamera.m_viewToWorld[0]);
+	const Vec3f down = Vec3f(g_preparedCamera.m_viewToWorld[1]);
+	const Vec3f toEye = -Vec3f(g_preparedCamera.m_viewToWorld[2]);
+	
+	UseRenderState state(render3D().depthWrite(false).blend());
+	auto drawQuad = [&](TextureContainer * texture, const Vec3f & middle, float size, Color color) {
+		TexturedVertex quad[4];
+		worldToClipSpace(middle - (right + down) * size, quad[0]);
+		worldToClipSpace(middle + (right - down) * size, quad[1]);
+		worldToClipSpace(middle + (down - right) * size, quad[2]);
+		worldToClipSpace(middle + (right + down) * size, quad[3]);
+		Vec2f uv = texture ? texture->uv : Vec2f(1.f);
+		quad[0].uv = Vec2f(0.f, 0.f);
+		quad[1].uv = Vec2f(uv.x, 0.f);
+		quad[2].uv = Vec2f(0.f, uv.y);
+		quad[3].uv = uv;
+		quad[0].color = quad[1].color = quad[2].color = quad[3].color = color.toRGBA();
+		if(texture) {
+			GRenderer->SetTexture(0, texture);
+		} else {
+			GRenderer->ResetTexture(0);
+		}
+		EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
+	};
+	
+	for(size_t i = 0; i < std::size(g_wheelSlots); i++) {
+		const ItemWheelSlot & slot = g_wheelSlots[i];
+		bool selected = (int(i) == g_wheelSelected);
+		Vec3f middle = center + (right * slot.direction.x - down * slot.direction.y) * Radius;
+		bool cancel = slot.className.empty();
+		Entity * item = cancel ? nullptr : getInventoryItemWithLowestDurability(slot.className);
+		Color background = selected ? (cancel ? Color(150, 40, 30, 210) : Color(170, 140, 70, 210))
+		                            : Color(15, 15, 25, 150);
+		drawQuad(nullptr, middle, Size, background);
+		if(cancel) {
+			if(TextureContainer * circle = cursorCombineTexture(false)) {
+				drawQuad(circle, middle + toEye * 0.1f, Size * 0.7f, selected ? Color::white : Color(170, 170, 170));
+			}
+		} else if(item && item->m_icon) {
+			drawQuad(item->m_icon, middle + toEye * 0.1f, Size * 0.85f, Color::white);
+		}
+	}
+	GRenderer->ResetTexture(0);
 }

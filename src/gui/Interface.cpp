@@ -191,12 +191,6 @@ static bool isVRModeActive() {
 	#endif
 }
 
-/*!
- * \return true if mouselook is toggled instead of held
- *
- * In VR the head looks around and the laser pointer needs cursor mode, so mouselook is only active while the
- * free look button is held (and in combat), like with the toggle disabled. The flying eye spell still uses it.
- */
 //! \return true while the user physically crouches in VR
 static bool isVRCrouching() {
 	#if ARX_HAVE_OPENXR
@@ -206,6 +200,21 @@ static bool isVRCrouching() {
 	#endif
 }
 
+//! \return true while sneaking is toggled on in VR (like holding the stealth key, without its other uses)
+static bool isVRSneakingActive() {
+	#if ARX_HAVE_OPENXR
+	return isVRModeActive() && isVRSneaking();
+	#else
+	return false;
+	#endif
+}
+
+/*!
+ * \return true if mouselook is toggled instead of held
+ *
+ * In VR the head looks around and the laser pointer needs cursor mode, so mouselook is only active while the
+ * free look button is held (and in combat), like with the toggle disabled. The flying eye spell still uses it.
+ */
 static bool isMouseLookToggle() {
 	return config.input.mouseLookToggle && (!isVRModeActive() || eyeball.isActive());
 }
@@ -788,7 +797,7 @@ void ArxGame::managePlayerControls() {
 	
 	// Checks STEALTH Key Status.
 	float MoveDiv;
-	if(GInput->actionPressed(CONTROLS_CUST_STEALTHMODE)) {
+	if(GInput->actionPressed(CONTROLS_CUST_STEALTHMODE) || isVRSneakingActive()) {
 		MoveDiv = 0.02f;
 		player.m_currentMovement |= PLAYER_MOVE_STEALTH;
 	} else {
