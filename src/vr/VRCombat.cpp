@@ -37,10 +37,13 @@
 #include "game/Player.h"
 #include "graphics/GraphicsTypes.h"
 #include "graphics/particle/ParticleEffects.h"
+#include "graphics/particle/ParticleTextures.h"
 #include "graphics/particle/Spark.h"
 #include "gui/Menu.h"
 #include "gui/Speech.h"
 #include "io/log/Logger.h"
+#include "math/Random.h"
+#include "math/RandomVector.h"
 #include "physics/Collisions.h"
 #include "physics/Projectile.h"
 #include "scene/LinkedObject.h"
@@ -746,6 +749,38 @@ void updateTorch(Entity & io) {
 	}
 }
 
+//! A faint blue glow (sparkles) around the casting hand while the magic mode is on (see VRSystem::updatePointer)
+void updateMagicGlow(const Entity & io) {
+
+	if(!g_vr->isMagicMode()) {
+		return;
+	}
+	VertexId vertex = (mainHand() == VRHandLeft) ? io.obj->fastaccess.left_attach : io.obj->fastaccess.primary_attach;
+	if(!vertex || size_t(vertex) >= io.obj->vertexWorldPositions.size()) {
+		return;
+	}
+	Vec3f hand = io.obj->vertexWorldPositions[vertex].v;
+
+	const float SparklesPerSecond = 40.f;
+	float count = SparklesPerSecond * g_vr->getFrameDuration();
+	for(; count > 0.f; count -= 1.f) {
+		if(count < 1.f && Random::getf() > count) {
+			break;
+		}
+		PARTICLE_DEF * pd = createParticle();
+		if(!pd) {
+			break;
+		}
+		pd->ov = hand + arx::randomVec(-2.5f, 2.5f);
+		pd->move = Vec3f(0.f, -4.f, 0.f) + arx::randomVec(-2.f, 2.f); // Rising slowly (y points down)
+		pd->size = Random::getf(0.4f, 0.8f);
+		pd->sizeDelta = -0.5f;
+		pd->duration = Random::get(400ms, 800ms);
+		pd->tc = g_particleTextures.healing;
+		pd->rgb = Color3f(0.06f, 0.11f, 0.25f); // Additive: dim is more transparent
+	}
+}
+
 } // anonymous namespace
 
 Entity * getVRCarriedItem(const Entity & entity, TransformInfo & transform) {
@@ -807,6 +842,7 @@ void updateVRCombat() {
 	}
 
 	updateTorch(*io);
+	updateMagicGlow(*io);
 	
 	float dt = g_vr->getFrameDuration();
 	WeaponType type = ARX_EQUIPMENT_GetPlayerWeaponType();

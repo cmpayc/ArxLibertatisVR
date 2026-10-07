@@ -31,13 +31,19 @@
 #include "game/Camera.h"
 #include "game/EntityManager.h"
 #include "game/Equipment.h"
+#include "game/Spells.h"
+#include "game/magic/Precast.h"
+#include "game/magic/SpellData.h"
 #include "graphics/Draw.h"
+#include "graphics/Math.h"
 #include "graphics/Raycast.h"
 #include "physics/Collisions.h"
+#include "scene/GameSound.h"
 #include "graphics/Renderer.h"
 #include "graphics/data/Mesh.h"
 #include "graphics/data/TextureContainer.h"
 #include "gui/Cursor.h"
+#include "gui/book/Book.h"
 #include "gui/Interface.h"
 #include "gui/Menu.h"
 #include "gui/hud/SecondaryInventory.h"
@@ -45,6 +51,7 @@
 #include "input/InputKey.h"
 #include "input/Keyboard.h"
 #include "input/Mouse.h"
+#include "math/Angle.h"
 #include "vr/VRBody.h"
 #include "vr/VRCamera.h"
 #include "vr/VRCombat.h"
@@ -52,6 +59,7 @@
 #include "vr/VRMath.h"
 #include "vr/VRSystem.h"
 
+extern long LOOKING_FOR_SPELL_TARGET; // see Spells.cpp
 
 namespace {
 
@@ -60,7 +68,8 @@ float g_pendingTurn = 0.f;
 bool g_snapTurnReady = true;
 std::vector<InputKeyId> g_pressedKeys;
 int g_weaponToggleFrames = 0; // Frames left of the ready weapon action from the sheath
-float g_magicHold = 0.f; // s the magic mode stays on after a rune, to draw the next one before the spell is cast
+float g_bookHoldTime = -1.f; // s the B button is held, negative after a long press opened the spells
+int g_bookTapFrames = 0; // Frames left of the book action from a short press of B
 bool g_sheatheArmed = false; // The drawn weapon left the sheath: bringing it back sheathes it
 VRHand g_weaponHand = VRHandRight; // The hand that drew the weapon (set before the first use)
 
@@ -71,6 +80,7 @@ struct PointerBeam {
 	Vec3f start = Vec3f(0.f);
 	Vec3f end = Vec3f(0.f);
 	TextureContainer * icon = nullptr; //!< Shown at the end (the item selected to combine)
+	bool spellTarget = false; //!< The game waits for the target of a spell: its target cursor at the end
 };
 PointerBeam g_beam;
 PointerBeam g_offHandBeam; //!< Only for debugging
@@ -233,6 +243,74 @@ Entity * keepVRAimTarget(const VRPose & aim, Entity * target, bool direct, const
 	return target;
 }
 
+
+/*!
+ * Stored spells are cast with the main hand: a fist (grip and trigger) moved up casts the first one, to the left the
+ * second one, to the right the third one (like their icons on the back of the hand, see VRSystem). Moving forward is
+ * a punch and casts nothing. Not in the magic mode, where the grip stores the spell drawn instead.
+ */
+bool g_castGesture = false; // The main hand makes a fist that may cast a stored spell
+bool g_castGestureDone = false;
+Vec3f g_castGestureStart(0.f);
+
+void updatePrecastGestures() {
+
+	const float GestureDistance = 0.18f; // m the fist moves
+	const float Dominance = 1.5f; // How much more than the other directions it moves in the gesture direction
+
+	VRHand hand = dominantHand();
+	const VRHandState & state = g_vr->getInput().getHand(hand);
+	bool fist = state.isPressed(VRButtonGrip) && state.isPressed(VRButtonTrigger) && state.grip.valid;
+	if(!fist || g_precast.empty() || g_vr->isMagicMode() || ARXmenu.mode() != Mode_InGame || BLOCK_PLAYER_CONTROLS
+	   || isVRArcheryActive() || isVRGrabbing() || g_vr->isPointingAtUI()) {
+		g_castGesture = false;
+		g_castGestureDone = false;
+		return;
+	}
+	if(!g_castGesture) {
+		g_castGesture = true;
+		g_castGestureDone = false;
+		g_castGestureStart = state.grip.position;
+		return;
+	}
+	if(g_castGestureDone) {
+		return; // One spell per fist
+	}
+
+	// In the directions of the head, horizontally (tracking space: y up)
+	const XrQuaternionf & q = g_vr->getView(0).pose.orientation;
+	Vec3f right = glm::quat(q.w, q.x, q.y, q.z) * Vec3f(1.f, 0.f, 0.f);
+	right.y = 0.f;
+	if(glm::length(right) < 0.01f) {
+		return;
+	}
+	right = glm::normalize(right);
+	Vec3f up(0.f, 1.f, 0.f);
+	Vec3f forward = glm::cross(up, right);
+	Vec3f moved = state.grip.position - g_castGestureStart;
+	float x = glm::dot(moved, right);
+	float y = glm::dot(moved, up);
+	float z = std::abs(glm::dot(moved, forward));
+
+	size_t slot = size_t(-1);
+	if(y > GestureDistance && y > Dominance * std::max(std::abs(x), z)) {
+		slot = 0;
+	} else if(std::abs(x) > GestureDistance && std::abs(x) > Dominance * std::max(std::abs(y), z)) {
+		slot = (x < 0.f) ? 1 : 2;
+	}
+	if(slot == size_t(-1)) {
+		return;
+	}
+
+	g_castGestureDone = true;
+	if(slot < g_precast.size()) {
+		ARX_SPELLS_Precast_Launch(PrecastHandle(slot));
+		g_vr->getInput().vibrate(hand, 0.8f, 0.12f);
+	} else {
+		g_vr->getInput().vibrate(hand, 0.2f, 0.04f); // No spell stored there
+	}
+}
+
 } // anonymous namespace
 
 bool isVRActive() {
@@ -253,6 +331,8 @@ void updateVRControls() {
 	const VRHandState & main = input.getHand(dominantHand());
 	const VRHandState & off = input.getHand(offHand());
 
+	updatePrecastGestures();
+
 	/*
 	 * Buttons are mapped to the keys bound to the game actions, so they also work in places that read keys.
 	 * Main hand (right): A = jump, B = book, stick click = crouch toggle, trigger = magic mode,
@@ -270,7 +350,29 @@ void updateVRControls() {
 	press(CONTROLS_CUST_JUMP, main.isPressed(VRButtonPrimary));
 	press(CONTROLS_CUST_INVENTORY, off.isPressed(VRButtonPrimary));
 	press(CONTROLS_CUST_CROUCHTOGGLE, main.isPressed(VRButtonStick));
-	press(CONTROLS_CUST_BOOK, main.isPressed(VRButtonSecondary));
+	// B: a short press opens or closes the book, held it opens the spells page of the book
+	const float BookHoldTime = 0.5f; // s
+	if(main.isPressed(VRButtonSecondary)) {
+		if(g_bookHoldTime >= 0.f) {
+			g_bookHoldTime += g_vr->getFrameDuration();
+			if(g_bookHoldTime >= BookHoldTime) {
+				g_bookHoldTime = -1.f;
+				if(player.rune_flags && ARXmenu.mode() == Mode_InGame) {
+					g_playerBook.openPage(BOOKMODE_SPELLS);
+					g_vr->getInput().vibrate(dominantHand(), 0.5f, 0.06f);
+				}
+			}
+		}
+	} else {
+		if(g_bookHoldTime >= 0.f && main.wasReleased(VRButtonSecondary)) {
+			g_bookTapFrames = 3;
+		}
+		g_bookHoldTime = 0.f;
+	}
+	press(CONTROLS_CUST_BOOK, g_bookTapFrames > 0);
+	if(g_bookTapFrames > 0) {
+		g_bookTapFrames--;
+	}
 	/*
 	 * Grabbing the weapon at the sheath (on the back, over the shoulder of the hand) with either hand draws it into that
 	 * hand: hold the action, a key release only counts after two frames. A drawn weapon is sheathed by just bringing it
@@ -310,19 +412,11 @@ void updateVRControls() {
 	                         || g_vr->isUseTapPressed());
 	// While holding an object the trigger stores it instead (see VRGrab)
 	/*
-	 * Magic: the main trigger held draws a rune with the hand (see VRSystem::updatePointer), releasing it ends the rune.
-	 * The magic mode stays on a moment longer for the next rune, then the spell is cast (the game casts when the magic
-	 * key is released). Not while the trigger is a click, holds an object, a fist or the bow string.
+	 * Magic: a tap of the main trigger in the world toggles the magic mode, in it the trigger held draws a rune with the
+	 * hand (see VRSystem::updatePointer). Leaving the mode casts the spell (the game casts when its magic key is
+	 * released).
 	 */
-	const float RuneGap = 1.f; // s
-	bool drawingRune = main.isPressed(VRButtonTrigger) && !g_vr->isTriggerClicking() && !g_vr->isPointingAtUI()
-	                   && !isVRGrabbing() && !isVRFist(dominantHand()) && !isVRArcheryActive();
-	if(drawingRune) {
-		g_magicHold = RuneGap;
-	} else if(g_magicHold > 0.f) {
-		g_magicHold -= g_vr->getFrameDuration();
-	}
-	press(CONTROLS_CUST_MAGICMODE, drawingRune || g_magicHold > 0.f);
+	press(CONTROLS_CUST_MAGICMODE, g_vr->isMagicMode());
 	// The menu button is often reserved by the system (e.g. Quest through Virtual Desktop)
 	if(off.isPressed(VRButtonSecondary) || off.isPressed(VRButtonMenu) || main.isPressed(VRButtonMenu)) {
 		keys.push_back(Keyboard::Key_Escape);
@@ -387,6 +481,9 @@ bool isVRFist(VRHand hand) {
 	if(!g_vr) {
 		return false;
 	}
+	if(hand == dominantHand() && g_vr->isMagicMode()) {
+		return false; // The grip and trigger draw a stored spell (see VRSystem::updatePointer)
+	}
 	const VRHandState & state = g_vr->getInput().getHand(hand);
 	return state.isPressed(VRButtonGrip) && state.isPressed(VRButtonTrigger);
 }
@@ -419,13 +516,14 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 	
 	// The world ray is invisible, except for debugging and while an item is selected to combine (with its icon)
 	const Vec3f start = origin;
-	bool showRay = config.vr.debugRay || COMBINE;
+	bool showRay = config.vr.debugRay || COMBINE || LOOKING_FOR_SPELL_TARGET;
 	if(showRay) {
 		g_beam.visible = true;
 		g_beam.hit = false;
 		g_beam.start = start;
 		g_beam.end = origin + direction * 200.f;
 		g_beam.icon = COMBINE ? COMBINE->m_icon : nullptr;
+		g_beam.spellTarget = LOOKING_FOR_SPELL_TARGET != 0;
 	}
 	
 	// Start a little in front of the controller so that the player's own hand and weapon are not hit
@@ -474,6 +572,7 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 void clearVRPointerBeam() {
 	g_beam.visible = false;
 	g_beam.icon = nullptr;
+	g_beam.spellTarget = false;
 	g_offHandBeam.visible = false;
 }
 
@@ -514,7 +613,7 @@ static void drawPointerBeam(const PointerBeam & beam) {
 	// A thin ribbon facing the viewer, brighter at the hand (not while combining: only the item icon is shown)
 	Vec3f toEye = eye - beam.start;
 	Vec3f side = glm::cross(direction, toEye);
-	if(glm::length(side) > 0.001f && !beam.icon) {
+	if(glm::length(side) > 0.001f && !beam.icon && !beam.spellTarget) {
 		side = glm::normalize(side) * 0.3f;
 		const Color startColor = Color::rgb(0.35f, 0.6f, 1.f);
 		const Color endColor = Color::rgb(0.1f, 0.2f, 0.4f);
@@ -570,6 +669,33 @@ static void drawPointerBeam(const PointerBeam & beam) {
 		return;
 	}
 	
+	// The game's target cursor of a spell waiting for its target: lit over a valid target, dim elsewhere
+	if(beam.spellTarget) {
+		bool onTarget = isVRSpellTargetValid();
+		if(TextureContainer * cursor = cursorCombineTexture(onTarget)) {
+			Vec3f center = beam.end - direction * 5.f;
+			float size = 2.f + 0.03f * glm::distance(eye, center);
+			Vec3f right = Vec3f(g_preparedCamera.m_viewToWorld[0]) * size;
+			Vec3f down = Vec3f(g_preparedCamera.m_viewToWorld[1]) * size;
+			TexturedVertex quad[4];
+			worldToClipSpace(center - right - down, quad[0]);
+			worldToClipSpace(center + right - down, quad[1]);
+			worldToClipSpace(center - right + down, quad[2]);
+			worldToClipSpace(center + right + down, quad[3]);
+			quad[0].uv = Vec2f(0.f, 0.f);
+			quad[1].uv = Vec2f(cursor->uv.x, 0.f);
+			quad[2].uv = Vec2f(0.f, cursor->uv.y);
+			quad[3].uv = cursor->uv;
+			Color color = onTarget ? Color::white : Color(160, 160, 160);
+			quad[0].color = quad[1].color = quad[2].color = quad[3].color = color.toRGBA();
+			UseRenderState cursorState(render3D().depthWrite(false).blend());
+			GRenderer->SetTexture(0, cursor);
+			EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
+			GRenderer->ResetTexture(0);
+		}
+		return;
+	}
+
 	// A dot where the beam hits, kept about the same apparent size at any distance
 	if(beam.hit) {
 		Vec3f center = beam.end - direction * 1.f;
@@ -694,4 +820,50 @@ Entity * getVRPointedEntity(const VRPose & aim, bool debugRay) {
 	}
 	
 	return result;
+}
+
+bool isVRPrecastRequested() {
+	return g_vr && g_vr->isMagicPrecast();
+}
+
+bool getVRSpellAim(Anglef & angle) {
+	
+	// Along the pointing ray of the casting (main) hand
+	if(!isVRActive() || !isVRPlayerView()) {
+		return false;
+	}
+	const VRPose & aim = g_vr->getInput().getHand(dominantHand()).aim;
+	Vec3f origin;
+	Vec3f direction;
+	if(!aim.valid || !trackingRayToWorld(aim.position, aim.orientation, origin, direction)
+	   || glm::length(Vec2f(direction.x, direction.z)) < 0.01f) {
+		return false;
+	}
+	
+	angle = unitVectorToAngle(glm::normalize(direction));
+	return true;
+}
+
+bool isVRSpellTargetValid() {
+	// Like the game's target cursor (SelectSpellTargetCursorRender): NPCs, or items for enchant weapon
+	return LOOKING_FOR_SPELL_TARGET && FlyingOverIO
+	       && (((LOOKING_FOR_SPELL_TARGET & 1) && (FlyingOverIO->ioflags & IO_NPC))
+	           || ((LOOKING_FOR_SPELL_TARGET & 2) && (FlyingOverIO->ioflags & IO_ITEM)));
+}
+
+bool endVRLastSpell() {
+	
+	// Like the game's cancel spell key: the latest spell of the player that lasts
+	Spell * last = nullptr;
+	for(Spell & spell : spells.byCaster(EntityHandle_Player)) {
+		if(spellicons[spell.m_type].m_hasDuration && (!last || last->m_timcreation < spell.m_timcreation)) {
+			last = &spell;
+		}
+	}
+	if(!last) {
+		return false;
+	}
+	ARX_SOUND_PlaySFX(g_snd.MAGIC_FIZZLE);
+	spells.endSpell(last);
+	return true;
 }

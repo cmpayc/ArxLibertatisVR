@@ -20,6 +20,7 @@
 #include "vr/VRHud.h"
 
 #include <cmath>
+#include <iterator>
 
 #include "cinematic/CinematicController.h"
 #include "core/Config.h"
@@ -122,6 +123,12 @@ VRHudAreas getVRHudAreas() {
 		areas.health = toPixels(g_hudRoot.healthGaugeArea());
 		areas.mana = toPixels(g_hudRoot.manaGaugeArea());
 		areas.equipment = toPixels(g_hudRoot.damagedEquipmentArea());
+	}
+	
+	if(!(player.Interface & INTER_PLAYERBOOK)) {
+		for(size_t i = 0; i < std::size(areas.precast); i++) {
+			areas.precast[i] = toPixels(g_hudRoot.precastArea(i));
+		}
 	}
 	
 	if(player.Interface & (INTER_INVENTORY | INTER_INVENTORYALL)) {

@@ -148,6 +148,11 @@ public:
 	//! \return true while a trigger tap in the inventory uses the item (the game's use action, like a right click)
 	[[nodiscard]] bool isUseTapPressed() const { return m_useTapFrames > 2; }
 
+	//! \return true while the magic mode is on (toggled by a tap of the trigger in the world)
+	[[nodiscard]] bool isMagicMode() const { return m_magicMode; }
+	//! \return true if the spell drawn in the last magic mode is stored instead of cast (the grip held while drawing)
+	[[nodiscard]] bool isMagicPrecast() const { return m_magicPrecast; }
+
 	//! Acquire the current swapchain image for an eye and return its OpenGL texture name
 	unsigned acquireEyeImage(size_t eye);
 	void releaseEyeImage(size_t eye);
@@ -260,7 +265,13 @@ private:
 	Vec2s m_useTapPosition; // Where the pending tap was
 	bool m_secondTap; // The current trigger click is the second tap of a double tap (selects the item to combine)
 	bool m_triggerOnItem; // The trigger was pressed on an item in the world (a tap, not magic)
-	bool m_magicDrawing; // The trigger draws runes with the hand (see updatePointer)
+	bool m_magicDrawing; // The trigger press may draw a rune or tap to toggle the magic mode (see updatePointer)
+	bool m_magicMode; // Toggled by a tap of the trigger in the world: the game's magic mode is held
+	bool m_magicStroke; // The trigger press draws a rune (moved or held long enough, not a tap)
+	bool m_magicPrecast; // The grip was held while drawing a rune in this magic mode: the spell is stored
+	float m_magicCancelTime; // s left for a second tap ending the latest lasting spell, negative if none
+	float m_magicPressTime; // s the trigger is held
+	Vec3f m_magicPressPosition; // Where the fingertips were when the trigger was pressed, in the tracking space
 	EntityHandle m_triggerItem;
 	float m_triggerItemTime;
 	EntityHandle m_lastItemTap; // The item of the last tap in the world, for double taps

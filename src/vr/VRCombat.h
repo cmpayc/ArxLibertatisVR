@@ -47,10 +47,10 @@ struct TransformInfo;
 //! updateVRCombat; the game lights the player position)
 bool getVRTorchLight(Vec3f & position);
 
-//! The torch hanging on the belt (put away at the hip), drawn at the hip: ef g_playerCarriedItemHook
+//! The torch hanging on the belt (put away at the hip), drawn at the hip: \ref g_playerCarriedItemHook
 Entity * getVRCarriedItem(const Entity & entity, TransformInfo & transform);
 
-//! eturn true while a hand is at the torch on the belt: its grip takes the torch (not a click or grab)
+//! \return true while a hand is at the torch on the belt: its grip takes the torch (not a click or grab)
 [[nodiscard]] bool isVRHandAtBeltTorch(VRHand hand);
 
 //! Swing detection and hit checks, in place of ManageCombatModeAnimations - once per frame in combat mode

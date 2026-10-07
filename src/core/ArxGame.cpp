@@ -82,6 +82,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "game/effect/ParticleSystems.h"
 #include "game/effect/Quake.h"
 #include "game/magic/Precast.h"
+#include "game/magic/SpellRecognition.h"
 #include "game/spell/FlyingEye.h"
 #include "game/spell/Cheat.h"
 
@@ -240,6 +241,8 @@ bool ArxGame::initialize() {
 			g_playerUpperLayerBones = &getVRUpperLayerBones;
 			g_playerLinkedTransformHook = &adjustVRLinkedTransform;
 			g_playerCarriedItemHook = &getVRCarriedItem;
+			g_precastSpellHook = &isVRPrecastRequested;
+			g_playerSpellAimHook = &getVRSpellAim;
 		}
 	}
 	#endif

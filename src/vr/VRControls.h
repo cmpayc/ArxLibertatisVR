@@ -92,4 +92,16 @@ void drawVRPointerBeam();
 //! \return the interactive object a controller points at (with aim assist), or nullptr; optionally shows the debug ray
 class Entity * getVRPointedEntity(const struct VRPose & aim, bool debugRay);
 
+//! The spell drawn is stored instead of cast (the grip held in the magic mode): \ref g_precastSpellHook
+bool isVRPrecastRequested();
+
+//! Spells of the player fly along the main hand's pointing ray, not the view: g_playerSpellAimHook
+bool getVRSpellAim(Anglef & angle);
+
+//! \return true while the game waits for the target of a spell and the pointer is on a valid one
+[[nodiscard]] bool isVRSpellTargetValid();
+
+//! End the player's latest spell that lasts (night vision, armor...), like the game's cancel spell key
+bool endVRLastSpell();
+
 #endif // ARX_VR_VRCONTROLS_H

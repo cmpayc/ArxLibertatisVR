@@ -133,6 +133,12 @@ bool ARX_SPELLS_Launch(SpellType typ, Entity & source, SpellcastFlags flags, lon
                        Entity * target, GameDuration duration);
 void ARX_SPELLS_Update();
 
+/*!
+ * The direction spells of the player are cast in instead of the view (VR: the casting hand), false for the view.
+ * Spells read it from player.angle while they are launched and updated.
+ */
+extern bool (*g_playerSpellAimHook)(Anglef & angle);
+
 void ARX_SPELLS_Fizzle(Spell * spell);
 
 void ARX_SPELLS_ManageMagic();

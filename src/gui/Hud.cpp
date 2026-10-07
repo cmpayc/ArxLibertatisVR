@@ -929,7 +929,12 @@ bool PrecastSpellsGui::isVisible() {
 void PrecastSpellsGui::updateRect(const Rectf & parent) {
 	
 	Vec2f size = m_iconSize * Vec2f(g_precast.size(), 1);
-	
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		size.x *= 2.f; // Room for the gesture arrows (see vrArea)
+	}
+	#endif
+
 	m_rect = createChild(parent, Anchor_BottomRight, size * m_scale, Anchor_BottomLeft);
 	
 	if(g_playerInventoryHud.rect().overlaps(m_rect + Vec2f(0.0f, indicatorVertSpacing))) {
@@ -961,7 +966,13 @@ void PrecastSpellsGui::update() {
 		Color color = Color::rgb(0, val * 0.5f, val);
 		
 		Rectf childRect = createChild(m_rect, Anchor_BottomLeft, m_iconSize * m_scale, Anchor_BottomLeft);
-		childRect.move(size_t(handle) * m_iconSize.x * m_scale, 0);
+		float step = m_iconSize.x * m_scale;
+		#if ARX_HAVE_OPENXR
+		if(isVRActive()) {
+			step *= 2.f; // Room for the gesture arrows (see vrArea)
+		}
+		#endif
+		childRect.move(size_t(handle) * step, 0);
 		
 		SpellType typ = precastSlot.typ;
 		
@@ -982,7 +993,39 @@ void PrecastSpellsGui::update() {
 }
 
 void PrecastSpellsGui::draw() {
-	
+
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		// VR: additive icons have no coverage in the interface layer, give them a dark backing to be visible
+		{
+			UseRenderState backing(render2D().blend());
+			for(size_t i = 0; i < m_icons.size(); i++) {
+				EERIEDrawBitmap(vrArea(i), 0.011f, nullptr, Color(0, 0, 0, 160));
+			}
+		}
+		// Arrows of the gestures that cast them (see VRControls): up, left, right
+		static TextureContainer * arrow = TextureContainer::LoadUI("graph/interface/icons/arrow_left");
+		UseRenderState state(render2D().blendAdditive());
+		for(size_t i = 0; i < m_icons.size() && i < 3 && arrow; i++) {
+			const Rectf & icon = m_icons[i].m_rect;
+			float a = icon.width() * 0.5f;
+			Color color = Color::rgb(0.8f, 0.7f, 0.4f);
+			if(i == 0) {
+				Rectf rect(icon.left + a * 0.5f, icon.top - a, icon.right - a * 0.5f, icon.top);
+				EERIEDrawBitmapUVs(rect, 0.01f, arrow, color, Vec2f(0.f, 1.f), Vec2f(0.f, 0.f), Vec2f(1.f, 1.f),
+				                   Vec2f(1.f, 0.f));
+			} else if(i == 1) {
+				Rectf rect(icon.left - a, icon.top + a * 0.5f, icon.left, icon.bottom - a * 0.5f);
+				EERIEDrawBitmap(rect, 0.01f, arrow, color);
+			} else {
+				Rectf rect(icon.right, icon.top + a * 0.5f, icon.right + a, icon.bottom - a * 0.5f);
+				EERIEDrawBitmapUVs(rect, 0.01f, arrow, color, Vec2f(1.f, 0.f), Vec2f(0.f, 0.f), Vec2f(1.f, 1.f),
+				                   Vec2f(0.f, 1.f));
+			}
+		}
+	}
+	#endif
+
 	UseRenderState state(render2D().blendAdditive());
 	
 	for(PrecastSpellIconSlot & slot : m_icons) {

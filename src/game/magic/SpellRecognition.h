@@ -41,6 +41,9 @@ void ARX_SPELLS_AddPoint(const Vec2s & pos);
 
 void ARX_SPELLS_Analyse();
 void ARX_SPELLS_AnalyseSYMBOL();
+
+//! Also store the spell being drawn instead of casting it, besides the stealth key (VR: the grip held while drawing)
+extern bool (*g_precastSpellHook)();
 bool ARX_SPELLS_AnalyseSPELL();
 
 void ARX_SPELLS_Analyse_Alt();

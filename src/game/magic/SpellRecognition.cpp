@@ -49,6 +49,13 @@
 static std::vector<Vec2f> plist;
 bool bPrecastSpell = false;
 
+bool (*g_precastSpellHook)() = nullptr;
+
+// The spell is stored instead of cast (stealth key held, or VR)
+static bool isPrecastRequested() {
+	return GInput->actionPressed(CONTROLS_CUST_STEALTHMODE) || (g_precastSpellHook && g_precastSpellHook());
+}
+
 static void handleRuneDetection(Rune rune);
 
 typedef struct RunePattern{
@@ -439,7 +446,7 @@ void RuneRecognitionAlt::analyze() {
 	
 	bPrecastSpell = false;
 	
-	if(GInput->actionPressed(CONTROLS_CUST_STEALTHMODE)) {
+	if(isPrecastRequested()) {
 		bPrecastSpell = true;
 	}
 	
@@ -1099,7 +1106,7 @@ void ARX_SPELLS_AnalyseSYMBOL() {
 		}
 	}
 	
-	bPrecastSpell = GInput->actionPressed(CONTROLS_CUST_STEALTHMODE);
+	bPrecastSpell = isPrecastRequested();
 	
 }
 
@@ -1107,7 +1114,7 @@ bool ARX_SPELLS_AnalyseSPELL() {
 	
 	SpellcastFlags flags = 0;
 	
-	if(GInput->actionPressed(CONTROLS_CUST_STEALTHMODE) || bPrecastSpell) {
+	if(isPrecastRequested() || bPrecastSpell) {
 		flags |= SPELLCAST_FLAG_PRECAST;
 	}
 	

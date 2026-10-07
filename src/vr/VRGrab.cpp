@@ -440,8 +440,9 @@ bool canGrabDirectly(VRHand handId) {
 		return !holdsWeapon;
 	}
 
-	// The main hand cursor is needed to drop dragged items, combine items and select spell targets
-	return !holdsWeapon && !g_draggedEntity && !COMBINE && !LOOKING_FOR_SPELL_TARGET;
+	// The main hand cursor is needed to drop dragged items, combine items and select spell targets. In the magic mode
+	// its grip stores the spell drawn instead (see VRSystem::updatePointer).
+	return !holdsWeapon && !g_draggedEntity && !COMBINE && !LOOKING_FOR_SPELL_TARGET && !g_vr->isMagicMode();
 }
 
 //! \return true if a hand may also point at objects to grab them: the main hand points at panels instead

@@ -594,6 +594,40 @@ void ARX_SPELLS_ManageMagic() {
 	}
 }
 
+bool (*g_playerSpellAimHook)(Anglef & angle) = nullptr;
+
+namespace {
+
+//! While it exists, spells of the player aim with the angle of g_playerSpellAimHook instead of the view
+class PlayerSpellAim {
+
+	Anglef m_saved;
+	bool m_active = false;
+
+public:
+
+	explicit PlayerSpellAim(const Spell & spell) {
+		Anglef aim;
+		if(spell.m_caster == EntityHandle_Player && g_playerSpellAimHook && g_playerSpellAimHook(aim)) {
+			m_saved = player.angle;
+			player.angle = aim;
+			m_active = true;
+		}
+	}
+
+	~PlayerSpellAim() {
+		if(m_active) {
+			player.angle = m_saved;
+		}
+	}
+
+	PlayerSpellAim(const PlayerSpellAim &) = delete;
+	PlayerSpellAim & operator=(const PlayerSpellAim &) = delete;
+
+};
+
+} // anonymous namespace
+
 static bool CanPayMana(Spell * spell, float cost) {
 	
 	if(spell->m_flags & SPELLCAST_FLAG_NOMANA) {
@@ -998,8 +1032,11 @@ bool ARX_SPELLS_Launch(SpellType typ, Entity & source, SpellcastFlags flags, lon
 		return false;
 	}
 	
-	spell->Launch();
-	
+	{
+		PlayerSpellAim aim(*spell);
+		spell->Launch();
+	}
+
 	Spell & addedSpell = spells.addSpell(std::move(spell));
 	
 	SPELLCAST_Notify(addedSpell);
@@ -1040,8 +1077,9 @@ void ARX_SPELLS_Update() {
 			continue;
 		}
 		
+		PlayerSpellAim aim(spell);
 		spell.Update();
-		
+
 	}
 	
 }

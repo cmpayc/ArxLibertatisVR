@@ -56,11 +56,13 @@
 #include "game/EntityManager.h"
 #include "game/NPC.h"
 #include "game/Player.h"
+#include "game/Spells.h"
 #include "gui/Interface.h"
 #include "input/Input.h"
 #include "input/Mouse.h"
 #include "io/log/Logger.h"
 #include "platform/ProgramOptions.h"
+#include "scene/GameSound.h"
 #include "scene/Interactive.h"
 #include "vr/VRBody.h"
 #include "vr/VRCamera.h"
@@ -77,6 +79,8 @@ PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr = nullptr;
 ARX_XR_GLOBAL_FUNCTIONS(ARX_XR_DEFINE_FUNCTION)
 ARX_XR_INSTANCE_FUNCTIONS(ARX_XR_DEFINE_FUNCTION)
 #undef ARX_XR_DEFINE_FUNCTION
+
+extern long LOOKING_FOR_SPELL_TARGET; // see Spells.cpp
 
 namespace {
 
@@ -342,6 +346,12 @@ VRSystem::VRSystem()
 	, m_secondTap(false)
 	, m_triggerOnItem(false)
 	, m_magicDrawing(false)
+	, m_magicMode(false)
+	, m_magicStroke(false)
+	, m_magicPrecast(false)
+	, m_magicCancelTime(-1.f)
+	, m_magicPressTime(0.f)
+	, m_magicPressPosition(0.f)
 	, m_triggerItemTime(0.f)
 	, m_lastItemTapAge(0.f)
 	, m_frameState{ XR_TYPE_FRAME_STATE }
@@ -1358,14 +1368,21 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 	const float Tilt = glm::radians(45.f);
 	// Sideways shift of the panels: to the left on the left wrist, to the right on the right wrist
 	const float Shift = 0.025f;
+	// The stored spell icons above the main hand: size, spacing and place from the wrist joint
+	const float PrecastPixelSize = 0.0008f;
+	const float PrecastSpacing = 0.02f;
+	const float PrecastForward = 0.04f;
+	const float PrecastAbove = 0.035f; // m, up
 
 	for(size_t i = 0; i < VRHandCount; i++) {
 
 		const VRHand hand = VRHand(i);
 		const VRHandState & state = m_input.getHand(hand);
 		bool isHudHand = (hand == hudHand);
+		bool precast = std::any_of(std::begin(areas.precast), std::end(areas.precast),
+		                           [](const Rect & area) { return !area.empty(); });
 		if(!state.grip.valid || (isHudHand ? (areas.health.empty() && areas.mana.empty() && areas.inventory.empty())
-		                                   : areas.map.empty())) {
+		                                   : (areas.map.empty() && !precast))) {
 			continue;
 		}
 
@@ -1395,6 +1412,37 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 		Vec3f up = fingers * std::cos(tilt) + fingersRight * std::sin(tilt);
 		Vec3f across = glm::cross(up, normal); // Left to right when reading
 		Vec3f wrist = wristJoint + grip * Vec3f(0.f, 0.f, 0.03f) + normal * 0.025f;
+
+		if(!isHudHand && precast) {
+			/*
+			 * The stored spells above the hand, facing the eyes and upright, placed like the gestures that cast them
+			 * (see VRControls): the first above, the second to the left, the third to the right
+			 */
+			Vec3f center = wristJoint + fingers * PrecastForward + Vec3f(0.f, PrecastAbove, 0.f);
+			Vec3f toHead = head - center;
+			if(glm::length(toHead) > 0.05f) {
+				Vec3f facing = glm::normalize(toHead);
+				Vec3f panelUp = Vec3f(0.f, 1.f, 0.f) - facing * facing.y;
+				if(glm::length(panelUp) > 0.1f) {
+					panelUp = glm::normalize(panelUp);
+					Vec3f panelRight = glm::cross(panelUp, facing);
+					glm::quat facingOrientation = glm::quat_cast(glm::mat3x3(panelRight, panelUp, facing));
+					const Vec2f slots[] = { Vec2f(0.f, 1.f), Vec2f(-1.f, 0.f), Vec2f(1.f, 0.f) };
+					float pixelSize = PrecastPixelSize / areas.hudScale;
+					for(size_t slot = 0; slot < std::size(areas.precast); slot++) {
+						// The arrow sticks out on the outer side, the icon stays at its place
+						const Rect & area = areas.precast[slot];
+						float arrow = 0.5f * float(std::abs(area.width() - area.height())) * pixelSize;
+						Vec3f direction = panelRight * slots[slot].x + panelUp * slots[slot].y;
+						Vec3f position = center + direction * (PrecastSpacing + arrow);
+						addUIPanel(area, pixelSize, position, facingOrientation, false);
+					}
+				}
+			}
+		}
+		if(!isHudHand && areas.map.empty()) {
+			continue;
+		}
 
 		// Like the body, it can only be seen from the front (quad layers are not hidden by the arm)
 		if(glm::dot(normal, head - wrist) <= 0.f) {
@@ -1718,6 +1766,9 @@ void VRSystem::updatePointer() {
 	}
 
 	const VRHand dominant = config.vr.leftHanded ? VRHandLeft : VRHandRight;
+	const float MagicTapTime = 0.25f; // s, a shorter trigger press without moving the hand is a tap
+	const float MagicStrokeDistance = 0.03f; // m the fingertips move before a rune is drawn
+	const float MagicDoubleTapTime = 0.6f; // s from the end of the tap entering the magic mode to the end of the next
 	const VRHandState & hand = m_input.getHand(dominant);
 
 	/*
@@ -1789,8 +1840,18 @@ void VRSystem::updatePointer() {
 	 * until the trigger is released, e.g. to drag an item out of the inventory.
 	 */
 	if(hand.wasPressed(VRButtonTrigger)) {
+		/*
+		 * While the game waits for the target of a spell, the trigger on a valid target clicks (the game casts the
+		 * spell on it), elsewhere it cancels the spell. Neither taps items nor toggles the magic mode.
+		 */
+		bool spellTarget = inGame && !onUI && LOOKING_FOR_SPELL_TARGET;
+		bool spellTargetValid = spellTarget && isVRSpellTargetValid();
+		if(spellTarget && !spellTargetValid) {
+			ARX_SOUND_PlaySFX(g_snd.MAGIC_FIZZLE, &player.pos);
+			ARX_SPELLS_CancelSpellTarget();
+		}
 		// While an item is selected to combine, the trigger clicks everywhere: on the target, or elsewhere to cancel
-		m_clickByTrigger = onUI || (COMBINE && onWorld && !isVRGrabbing());
+		m_clickByTrigger = onUI || ((COMBINE || spellTargetValid) && onWorld && !isVRGrabbing());
 		m_clickUseOnTap = onUI && useOnTap && !COMBINE;
 		if(m_clickUseOnTap && m_useTapDelay >= 0.f) {
 			m_secondTap = true; // A double tap: select instead of using
@@ -1798,7 +1859,7 @@ void VRSystem::updatePointer() {
 		}
 		// On an item in the world the trigger taps (a double tap selects it to combine) instead of starting magic
 		m_triggerOnItem = false;
-		if(!onUI && inGame && !COMBINE && !isVRGrabbing()) {
+		if(!onUI && inGame && !COMBINE && !spellTarget && !isVRGrabbing()) {
 			Entity * item = getVRPointedEntity(hand.aim, false);
 			if(item && (item->ioflags & IO_ITEM) && item->show == SHOW_FLAG_IN_SCENE) {
 				m_triggerOnItem = true;
@@ -1806,16 +1867,68 @@ void VRSystem::updatePointer() {
 				m_triggerItemTime = 0.f;
 			}
 		}
-		// Elsewhere in the world the trigger draws runes with the hand (magic mode, see VRControls)
-		m_magicDrawing = inGame && !onUI && !m_clickByTrigger && !m_triggerOnItem && !isVRGrabbing()
-		                 && !isVRFist(dominant) && !isVRArcheryActive();
+		// Elsewhere in the world a tap toggles the magic mode, in it the trigger held draws runes with the hand
+		m_magicDrawing = inGame && !onUI && !spellTarget && !m_clickByTrigger && !m_triggerOnItem
+		                 && !isVRGrabbing() && !isVRFist(dominant) && !isVRArcheryActive();
+		m_magicStroke = false;
+		m_magicPressTime = 0.f;
+		m_magicPressPosition = hand.grip.position + hand.grip.orientation * Vec3f(0.f, 0.f, -0.08f);
 	} else if(!hand.isPressed(VRButtonTrigger)) {
+		if(m_magicDrawing && !m_magicStroke && m_magicPressTime < MagicTapTime) {
+			if(m_magicMode && m_magicCancelTime >= 0.f) {
+				/*
+				 * A double tap (the second right after entering the magic mode, nothing drawn) ends the latest
+				 * lasting spell instead, e.g. night vision. Leaving the mode without runes casts nothing.
+				 */
+				m_magicMode = false;
+				m_magicCancelTime = -1.f;
+				bool ended = endVRLastSpell();
+				m_input.vibrate(dominant, ended ? 0.6f : 0.2f, ended ? 0.1f : 0.04f);
+			} else {
+				// Leaving the magic mode casts the spell of the runes drawn (the game casts when its magic key is
+				// released)
+				m_magicMode = !m_magicMode;
+				if(m_magicMode) {
+					m_magicPrecast = false;
+				}
+				m_magicCancelTime = m_magicMode ? MagicDoubleTapTime : -1.f;
+				m_input.vibrate(dominant, m_magicMode ? 0.7f : 0.4f, m_magicMode ? 0.12f : 0.06f);
+			}
+		}
 		m_clickByTrigger = false;
 		m_magicDrawing = false;
+		m_magicStroke = false;
+	}
+	if(m_magicDrawing && hand.isPressed(VRButtonTrigger)) {
+		// A rune is drawn once the hand moves or the trigger is held, so that taps (toggling the mode) draw nothing
+		m_magicPressTime += getFrameDuration();
+		Vec3f fingertips = hand.grip.position + hand.grip.orientation * Vec3f(0.f, 0.f, -0.08f);
+		if(m_magicMode && (m_magicPressTime >= MagicTapTime
+		                   || glm::distance(fingertips, m_magicPressPosition) > MagicStrokeDistance)) {
+			m_magicStroke = true;
+			m_magicCancelTime = -1.f; // Drawing: the next tap casts
+		}
+		if(m_magicStroke && hand.isPressed(VRButtonGrip) && !m_magicPrecast) {
+			// The grip held while drawing stores the spell instead of casting it (see isMagicPrecast)
+			m_magicPrecast = true;
+			m_input.vibrate(dominant, 0.3f, 0.05f);
+		}
+	}
+	if(m_magicCancelTime >= 0.f) {
+		m_magicCancelTime -= getFrameDuration();
+		if(m_magicCancelTime < 0.f) {
+			m_magicCancelTime = -1.f;
+		}
+	}
+	if(!inGame || isVRArcheryActive()) {
+		m_magicMode = false; // Menus, the book, cutscenes, the bow
 	}
 	if(hand.wasPressed(VRButtonGrip)) {
 		// Touching an object grabs it even while pointing at a panel
 		m_gripIsClick = !isVRGripGrabbing() && !isVRHandAtSheath(dominant); // Not at the sheath (draws the weapon)
+		if(m_magicMode) {
+			m_gripIsClick = false; // In the magic mode the grip stores the spell (precast)
+		}
 		/*
 		 * The grip activates what it points at like the game's double click: levers, doors, containers, the loot of
 		 * dead bodies, talking to NPCs (not with a drawn weapon). Items are taken and grabbed instead (see VRGrab).
@@ -1943,7 +2056,7 @@ void VRSystem::updatePointer() {
 	 * held. The game draws the flares in the world along the line through the cursor, so they appear at the hand, and
 	 * recognizes the runes from these screen positions.
 	 */
-	if(m_magicDrawing && hand.isPressed(VRButtonTrigger) && hand.grip.valid) {
+	if(m_magicDrawing && m_magicMode && hand.isPressed(VRButtonTrigger) && hand.grip.valid) {
 		Vec3f fingertips;
 		Vec2f screen;
 		if(trackingPointToWorld(hand.grip.position + hand.grip.orientation * Vec3f(0.f, 0.f, -0.08f), fingertips)
@@ -1956,7 +2069,7 @@ void VRSystem::updatePointer() {
 	
 	GInput->setVirtualMousePosition(onUI || onWorld, mouse);
 
-	bool drawing = m_magicDrawing && hand.isPressed(VRButtonTrigger);
+	bool drawing = m_magicDrawing && m_magicStroke && hand.isPressed(VRButtonTrigger);
 	GInput->setVirtualMouseButton(Mouse::Button_0, (clickPressed && !tapPending) || drawing);
 	
 	// Off hand grip = right click on a panel, in the world it grabs (see VRGrab)

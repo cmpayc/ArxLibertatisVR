@@ -291,6 +291,26 @@ public:
 	void updateRect(const Rectf & parent);
 	void update();
 	void draw();
+
+	/*!
+	 * VR: the icon of a stored spell (in the order of g_precast) with the arrow of the gesture that casts it: above
+	 * the first, left of the second, right of the third. Empty if there is none.
+	 */
+	[[nodiscard]] Rectf vrArea(size_t index) const {
+		if(index >= m_icons.size()) {
+			return Rectf();
+		}
+		Rectf area = m_icons[index].m_rect;
+		float arrow = area.width() * 0.5f;
+		if(index == 0) {
+			area.top -= arrow;
+		} else if(index == 1) {
+			area.left -= arrow;
+		} else if(index == 2) {
+			area.right += arrow;
+		}
+		return area;
+	}
 };
 
 #include "game/magic/Spell.h"
@@ -427,6 +447,7 @@ public:
 	Rectf manaGaugeArea() { return manaGauge.rect(); }
 	//! Screen area of the damaged equipment icons (weapon and armor status), as laid out in the last frame
 	Rectf damagedEquipmentArea() { return damagedEquipmentGui.rect(); }
+	Rectf precastArea(size_t index) const { return precastSpellsGui.vrArea(index); }
 };
 
 extern HudRoot g_hudRoot;

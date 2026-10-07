@@ -38,6 +38,7 @@ struct VRHudAreas {
 	Rect equipment; //!< Damaged equipment icons (weapon and armor status)
 	Rect inventory; //!< Player inventory, while open
 	Rect map;       //!< Mini map
+	Rect precast[3]; //!< Icons of the stored spells (cast with gestures, see VRControls), above the main hand
 	Rect loot;      //!< Inventory of a dead NPC, shown lying on the body
 	Rect subtitles; //!< Subtitles of in-game cutscenes, below the view
 	Rect info;      //!< Names of pointed objects and notifications (top of the screen), above the view

@@ -605,7 +605,7 @@ bool isHoldingItem(const EERIE_3DOBJ & object, VRHand hand) {
 	return false;
 }
 
-//! eturn true if the player model holds the lit torch in a hand (see VRCombat)
+//! \return true if the player model holds the lit torch in a hand (see VRCombat)
 bool isHoldingTorch(const EERIE_3DOBJ & object, VRHand hand) {
 	VertexId vertex = getHoldVertex(object, hand);
 	for(const EERIE_LINKED & link : object.linked) {
