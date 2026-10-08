@@ -246,6 +246,8 @@ bool ArxGame::initialize() {
 			g_playerSpellAimHook = &getVRSpellAim;
 			// Tutorial messages name the controllers
 			g_extraLocalisationHook = &getVRLocalisation;
+			// Screen effects (hit flash, fades) cover the whole view
+			g_fullScreenColorHook = &drawVRFullView;
 		}
 	}
 	#endif
@@ -1565,11 +1567,23 @@ void ArxGame::handlePlayerDeath() {
 		Vec3f chest = id2 ? entities.player()->obj->vertexWorldPositions[id2].v : targetpos;
 		
 		g_playerCamera.m_pos = chest - Vec3f(0.f, DeadCameraDistance, 0.f);
-		
+
 		g_playerCamera.lookAt(targetpos);
-		
+
 		EXTERNALVIEW = true;
 		BLOCK_PLAYER_CONTROLS = true;
+
+		#if ARX_HAVE_OPENXR
+		if(isVRActive() && id) {
+			/*
+			 * VR: the view stays at the eyes of the falling body (user request), turned like the body, the head looking
+			 * around (see prepareVRCamera) - the head of the model stays hidden like in first person
+			 */
+			g_playerCamera.m_pos = targetpos;
+			g_playerCamera.angle = Anglef(0.f, player.angle.getYaw(), 0.f);
+			EXTERNALVIEW = false;
+		}
+		#endif
 		
 	}
 	
@@ -1999,6 +2013,7 @@ void ArxGame::renderLevel() {
 	if(vrStereo) {
 		drawVRPointerBeam();
 		drawVRHandMenus();
+		drawFadeInView(); // Over the whole view, both eyes
 		g_vr->endStereoRender(m_MainWindow->getSize());
 		GRenderer->Clear(Renderer::DepthBuffer);
 	}

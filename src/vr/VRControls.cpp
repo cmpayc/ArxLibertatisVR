@@ -1271,3 +1271,36 @@ void stowVRHeldItems() {
 	g_stowWeapon = true; // Next update (see updateVRControls)
 	hangVRTorchOnBelt();
 }
+
+bool drawVRFullView(Color color) {
+	
+	/*
+	 * Screen-space drawing is re-projected into the eyes from a center camera a little behind them: a quad over the
+	 * whole screen right in front of that camera ends up behind the eyes. Screen effects (the hit flash, fades, the
+	 * paralysis tint) are drawn on a large quad in front of the camera instead, with the caller's render state.
+	 */
+	if(!isVRActive() || !g_vr->isRenderingStereo()) {
+		return false;
+	}
+	
+	const float Distance = 25.f; // cm in front of the camera
+	const float HalfSize = 100.f; // cm: about 76° around the view direction, more than the field of view
+	const glm::mat4x4 & viewToWorld = g_preparedCamera.m_viewToWorld;
+	Vec3f position(viewToWorld[3]);
+	Vec3f right = glm::normalize(Vec3f(viewToWorld[0])) * HalfSize;
+	Vec3f down = glm::normalize(Vec3f(viewToWorld[1])) * HalfSize;
+	Vec3f center = position + glm::normalize(Vec3f(viewToWorld[2])) * Distance;
+	
+	TexturedVertex quad[4];
+	worldToClipSpace(center - right - down, quad[0]);
+	worldToClipSpace(center + right - down, quad[1]);
+	worldToClipSpace(center - right + down, quad[2]);
+	worldToClipSpace(center + right + down, quad[3]);
+	for(TexturedVertex & vertex : quad) {
+		vertex.uv = Vec2f(0.f);
+		vertex.color = color.toRGBA();
+	}
+	GRenderer->ResetTexture(0);
+	EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
+	return true;
+}

@@ -40,4 +40,7 @@ void fadeRequestStart(FadeType type, PlatformDuration duration);
 
 void ManageFade();
 
+//! Draw the current fade over the 3D view (VR: ManageFade does not draw it, it would only cover the interface layer)
+void drawFadeInView();
+
 #endif // ARX_GRAPHICS_EFFECTS_FADE_H

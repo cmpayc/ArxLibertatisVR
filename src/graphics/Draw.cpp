@@ -160,7 +160,12 @@ void EERIEAddBitmap(const RenderMaterial & mat, const Vec3f & p, float sx, float
 	g_renderBatcher.add(mat, s);
 }
 
+bool (*g_fullScreenColorHook)(Color color) = nullptr;
+
 void EERIEDrawBitmap(const Rectf & rect, float z, TextureContainer * tex, Color color) {
+	if(!tex && rect == Rectf(g_size) && g_fullScreenColorHook && g_fullScreenColorHook(color)) {
+		return; // Drawn over the whole view another way (VR)
+	}
 	TexturedQuad s;
 	CreateBitmap(s, rect, z, tex, color);
 	GRenderer->SetTexture(0, tex);

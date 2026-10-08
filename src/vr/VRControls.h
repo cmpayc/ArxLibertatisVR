@@ -20,6 +20,7 @@
 #ifndef ARX_VR_VRCONTROLS_H
 #define ARX_VR_VRCONTROLS_H
 
+#include "graphics/Color.h"
 #include "math/Types.h"
 #include "vr/VRInput.h"
 
@@ -116,5 +117,8 @@ void drawVRHandMenus();
 
 //! Put the drawn weapon away and hang the lit torch on the belt, freeing both hands (when the book opens)
 void stowVRHeldItems();
+
+//! Draw a screen effect (hit flash, fade...) over the whole view in both eyes: \ref g_fullScreenColorHook
+bool drawVRFullView(Color color);
 
 #endif // ARX_VR_VRCONTROLS_H

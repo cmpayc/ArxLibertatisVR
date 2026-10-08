@@ -111,6 +111,8 @@ public:
 	void endStereoRender(const Vec2i & windowSize);
 
 	[[nodiscard]] bool hasRenderedStereo() const { return m_stereoRendered; }
+	//! \return true between beginStereoRender and endStereoRender (drawing the 3D view into both eyes)
+	[[nodiscard]] bool isRenderingStereo() const { return m_stereoActive; }
 
 	/*!
 	 * Redirect rendering into the virtual screen: a transparent window-sized layer shown as a quad in VR

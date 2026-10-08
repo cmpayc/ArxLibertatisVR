@@ -19,6 +19,8 @@
 
 #include "graphics/effects/Fade.h"
 
+#include <algorithm>
+
 #include "core/Core.h"
 #include "core/GameTime.h"
 
@@ -63,6 +65,17 @@ void fadeRequestStart(FadeType type, const PlatformDuration duration) {
 	FADESTART = g_platformTime.frameStart();
 }
 
+void drawFadeInView() {
+
+	// The fade as ManageFade set it in the last frame (it is managed later, with the interface)
+	if(!FADEDIR || LAST_FADEVALUE <= 0.f) {
+		return;
+	}
+
+	UseRenderState state(render2D());
+	EERIEDrawBitmap(Rectf(g_size), 0.0001f, nullptr, Color(Color4f(FADECOLOR, std::min(LAST_FADEVALUE, 1.f))));
+}
+
 void ManageFade() {
 	
 	PlatformDuration elapsed = g_platformTime.frameStart() - FADESTART;
@@ -85,7 +98,7 @@ void ManageFade() {
 	LAST_FADEVALUE = Visibility;
 	
 	#if ARX_HAVE_OPENXR
-	// In VR the fade would only darken the floating interface panel, not the view
+	// In VR it would only darken the floating interface panels, it is drawn over the view instead (drawFadeInView)
 	if(isVRActive()) {
 		return;
 	}

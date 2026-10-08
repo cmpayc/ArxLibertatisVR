@@ -142,7 +142,11 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	}
 
 	const XrView * views[VRSystem::EyeCount] = { &g_vr->getView(0), &g_vr->getView(1) };
-	const bool isPlayer = (&cam == &g_playerCamera);
+	/*
+	 * The player's own view, driven by the head and moving the body (room-scale, IK). Dead, the game's death camera
+	 * (rising over the body) is a camera like the scripted ones instead (user request: the body is not controlled).
+	 */
+	const bool isPlayer = (&cam == &g_playerCamera) && player.lifePool.current > 0.f;
 
 	const Vec3f headStage = (toVec(views[0]->pose.position) + toVec(views[1]->pose.position)) * 0.5f;
 	
