@@ -71,4 +71,10 @@ bool isVRGrabbing();
 //! \return true while the off hand holds, selects or pulls an object
 bool isVROffHandGrabbing();
 
+/*!
+ * Let go of everything without touching the entities, when the level is cleared (loading a save, changing level):
+ * the entity handles of the grabs are not valid afterwards
+ */
+void resetVRGrabs();
+
 #endif // ARX_VR_VRGRAB_H

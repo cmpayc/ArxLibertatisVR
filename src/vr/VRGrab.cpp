@@ -579,6 +579,15 @@ bool isVRGrabbingDirectly() {
 	return hand.state != GrabNone && hand.direct;
 }
 
+void resetVRGrabs() {
+	for(GrabHand & hand : g_hands) {
+		hand.resetGrab();
+		hand.target = EntityHandle();
+		hand.targetTouched = false;
+		hand.pressed = EntityHandle();
+	}
+}
+
 bool isVRGrabbing() {
 	const GrabHand & hand = g_hands[grabMainHand()];
 	return hand.state != GrabNone && (hand.direct || hand.lastFrame + 2 >= g_frame);

@@ -155,6 +155,13 @@ public:
 
 	//! Place the virtual screen in front of the user again
 	void resetUIPlacement() { m_uiPlaced = false; }
+
+	//! Leave the magic mode and forget the tapped items when the level is cleared (loading a save, changing level)
+	void resetLevelState() {
+		m_magicMode = false;
+		m_triggerItem = EntityHandle();
+		m_lastItemTap = EntityHandle();
+	}
 	
 	[[nodiscard]] const VRInput & getInput() const { return m_input; }
 	[[nodiscard]] VRInput & getInput() { return m_input; }

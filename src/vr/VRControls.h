@@ -118,6 +118,10 @@ void drawVRHandMenus();
 //! Put the drawn weapon away and hang the lit torch on the belt, freeing both hands (when the book opens)
 void stowVRHeldItems();
 
+//! Forget all entities the VR controls refer to and leave VR-only modes when the level is cleared (loading a save,
+//! changing level)
+void resetVRLevelState();
+
 //! Draw a screen effect (hit flash, fade...) over the whole view in both eyes: \ref g_fullScreenColorHook
 bool drawVRFullView(Color color);
 

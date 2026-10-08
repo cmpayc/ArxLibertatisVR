@@ -452,6 +452,32 @@ void updateVignette(const VRHandState & main) {
 
 } // anonymous namespace
 
+void resetVRLevelState() {
+
+	if(!g_vr) {
+		return;
+	}
+
+	/*
+	 * Entity handles are not valid after loading a save or changing level (the entities are created again): forget
+	 * every entity the VR controls refer to, and leave the VR-only modes. The torch on the belt is kept by its
+	 * script variable (see VRCombat).
+	 */
+	g_vr->resetLevelState();
+	resetVRGrabs();
+	resetVRCombatLevelState();
+
+	std::fill(std::begin(g_aimTargets), std::end(g_aimTargets), EntityHandle());
+	g_spellWheelOpen = false;
+	g_spellWheelSelected = -1;
+	g_wheelOpen = false;
+	g_wheelSelected = -1;
+	g_stowWeapon = false;
+	g_sheatheArmed = false;
+	g_sneaking = false;
+
+}
+
 bool isVRActive() {
 	return g_vr && g_vr->hasSession();
 }

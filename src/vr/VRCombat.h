@@ -59,4 +59,7 @@ void hangVRTorchOnBelt();
 //! Swing detection and hit checks, in place of ManageCombatModeAnimations - once per frame in combat mode
 void updateVRCombat();
 
+//! Forget the held torch and the archery state when the level is cleared (loading a save, changing level)
+void resetVRCombatLevelState();
+
 #endif // ARX_VR_VRCOMBAT_H

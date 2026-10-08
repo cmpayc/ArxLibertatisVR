@@ -603,6 +603,8 @@ const float TorchIgniteRadius = 15.f; // cm around the flame
 /*!
  * The torch put away at the hip hangs on the belt there, unlit. It stays in the inventory (saved games keep it there)
  * and is drawn at the hip (getVRCarriedItem) until it is taken back with a grip or leaves the inventory.
+ * Which torch hangs there, and on which side, is a local script variable of the torch: saved games and level changes
+ * keep it, while entity handles change when they are loaded.
  */
 EntityHandle g_beltTorch;
 VRHand g_beltSide = VRHandLeft;
@@ -610,15 +612,42 @@ Vec3f g_beltCentre(0.f);
 bool g_beltCentreValid = false;
 bool g_beltTaking[VRHandCount] = { }; // The grip that took the torch is still held (not a click or grab)
 const float BeltTakeRadius = 15.f; // cm from the wrist to the middle of the torch
+const std::string_view BeltVariable = "\xA7vr_on_belt"; // Local long: 0 not on the belt, 1 + the side (VRHand)
+
+void setOnBelt(Entity & torch, long side) {
+	SETVarValueLong(torch.m_variables, BeltVariable, side);
+}
 
 Entity * getBeltTorch() {
+
 	Entity * torch = entities.get(g_beltTorch);
-	if(!torch || torch == player.torch || !torch->obj || !torch->obj->fastaccess.fire
-	   || torch->owner() != entities.player() || !locateInInventories(torch)) {
+	if(!torch || GETVarValueLong(torch->m_variables, BeltVariable) <= 0) {
+		// After loading a save or changing level: find the torch marked as on the belt again
+		torch = nullptr;
+		for(Entity & item : entities(IO_ITEM)) {
+			if(GETVarValueLong(item.m_variables, BeltVariable) > 0) {
+				torch = &item;
+				break;
+			}
+		}
+		g_beltTorch = torch ? torch->index() : EntityHandle();
+	}
+	if(!torch) {
+		g_beltCentreValid = false;
+		return nullptr;
+	}
+
+	if(torch == player.torch || !torch->obj || !torch->obj->fastaccess.fire || torch->owner() != entities.player()
+	   || !locateInInventories(torch)) {
+		// Taken in hand, dropped, given away... it is no longer on the belt
+		setOnBelt(*torch, 0);
 		g_beltTorch = EntityHandle();
 		g_beltCentreValid = false;
 		return nullptr;
 	}
+
+	long side = GETVarValueLong(torch->m_variables, BeltVariable) - 1;
+	g_beltSide = (side == VRHandRight) ? VRHandRight : VRHandLeft;
 	return torch;
 }
 
@@ -654,6 +683,7 @@ void updateBeltTorch() {
 		   || !getVRWristPose(hand, wrist, orientation) || glm::distance(wrist, g_beltCentre) > BeltTakeRadius) {
 			continue;
 		}
+		setOnBelt(*torch, 0);
 		g_beltTorch = EntityHandle();
 		g_beltCentreValid = false;
 		g_beltTaking[hand] = true;
@@ -671,6 +701,11 @@ void hangTorchOnBelt(Entity & torch, VRHand hand) {
 	g_heldTorch = EntityHandle();
 	g_torchHand = VRHandCount;
 	ARX_PLAYER_ClickedOnTorch(&torch); // Unequips it into the inventory
+	// Only one torch hangs on the belt
+	if(Entity * previous = getBeltTorch(); previous && previous != &torch) {
+		setOnBelt(*previous, 0);
+	}
+	setOnBelt(torch, 1 + long(hand));
 	g_beltTorch = torch.index();
 	g_beltSide = hand;
 }
@@ -798,6 +833,17 @@ void updateMagicGlow(const Entity & io) {
 }
 
 } // anonymous namespace
+
+void resetVRCombatLevelState() {
+	g_archery = Archery();
+	g_heldTorch = EntityHandle();
+	g_torchHand = VRHandCount;
+	g_torchStowArmed = false;
+	// The torch on the belt is found again by its variable (see getBeltTorch)
+	g_beltTorch = EntityHandle();
+	g_beltCentreValid = false;
+	std::fill(std::begin(g_beltTaking), std::end(g_beltTaking), false);
+}
 
 Entity * getVRCarriedItem(const Entity & entity, TransformInfo & transform) {
 	

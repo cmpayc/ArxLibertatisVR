@@ -95,6 +95,12 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "util/Range.h"
 #include "util/String.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 
 extern bool bGCroucheToggle;
 
@@ -513,7 +519,11 @@ bool DanaeLoadLevel(AreaId area, bool loadEntities) {
 }
 
 void DanaeClearLevel() {
-	
+
+	#if ARX_HAVE_OPENXR
+	resetVRLevelState(); // The entities it refers to are deleted
+	#endif
+
 	g_playerBook.forcePage(BOOKMODE_STATS);
 	g_miniMap.reset();
 	
