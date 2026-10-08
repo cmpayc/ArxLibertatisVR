@@ -70,6 +70,8 @@ float g_userEyeHeight = 0.f; // highest the head has been: the user's standing e
 float g_bodyScale = 1.f; // scale of the player model to match the user's height
 float g_crouchDrop = 0.f; // how far the view is lowered for crouching with a button (cm, y down)
 const float ModelEyeHeight = 169.f; // eye height of the standing player model (human_base) above its feet, cm
+const float ModelHeight = 180.f; // height of the standing player model (the top of its head), cm
+const float MinCharacterHeight = 170.f; // cm, the player model is not scaled down further (seated play)
 Vec3f g_eyeCenter(0.f); // world position of the eyes in the last prepared player frame
 bool g_eyeCenterValid = false;
 glm::mat3x3 g_headRotation(1.f); // head orientation (Arx basis: x right, y down, z forward) to world
@@ -198,7 +200,8 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 		 * Scale the player model (from its feet) so that its eyes are at the user's real eye height: the arms and
 		 * shoulders then match the user's reach. The view is at the eyes of the scaled model.
 		 */
-		const float MinBodyScale = 0.85f;
+		// At least 170 cm tall (user request: playing seated made the player too short), the model being about 180 cm
+		const float MinBodyScale = MinCharacterHeight / ModelHeight;
 		const float MaxBodyScale = 1.25f;
 		/*
 		 * The eye height of the standing player model (measured, about 169 cm above its feet). It is a constant:
