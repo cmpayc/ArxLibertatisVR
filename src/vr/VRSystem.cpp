@@ -800,8 +800,26 @@ bool VRSystem::beginFrame() {
 	}
 	m_frameActive = true;
 
+	/*
+	 * The time to locate the head and the controllers at. After the headset reconnects the runtime's prediction can be
+	 * invalid (seen: a large negative time, so nothing could be located and the controllers stopped working): then
+	 * one frame period from now, like the head already fell back to. The frame itself keeps the prediction.
+	 */
+	m_displayTime = m_frameState.predictedDisplayTime;
+	XrTime now = getCurrentTime(m_instance);
+	if(m_displayTime <= 0 && now > 0) {
+		if(!m_displayTimeFixed) {
+			LogWarning << "OpenXR: invalid predicted display time " << m_displayTime << ", locating at the current time";
+		}
+		m_displayTime = now + std::max(m_frameState.predictedDisplayPeriod, XrDuration(0));
+		m_displayTimeFixed = true;
+	} else if(m_displayTimeFixed && m_displayTime > 0) {
+		LogInfo << "OpenXR: predicted display time valid again";
+		m_displayTimeFixed = false;
+	}
+
 	// Controllers are read for every frame, also when nothing is rendered
-	m_input.update(m_frameState.predictedDisplayTime, m_stageSpace);
+	m_input.update(m_displayTime, m_stageSpace);
 	// The hand motion first: the pointer checks whether the main hand touches an object (see VRGrab)
 	updateVRHandMotion();
 	updatePointer();
@@ -813,7 +831,7 @@ bool VRSystem::beginFrame() {
 
 	XrViewLocateInfo locateInfo = { XR_TYPE_VIEW_LOCATE_INFO };
 	locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-	locateInfo.displayTime = m_frameState.predictedDisplayTime;
+	locateInfo.displayTime = m_displayTime;
 	locateInfo.space = m_stageSpace;
 	XrViewState viewState = { XR_TYPE_VIEW_STATE };
 	uint32_t viewCount = 0;
@@ -825,7 +843,6 @@ bool VRSystem::beginFrame() {
 	if(XR_FAILED(result)) {
 		
 		static u64 failures = 0;
-		XrTime now = getCurrentTime(m_instance);
 		if(shouldLogRepeatedError(failures)) {
 			LogError << "OpenXR: xrLocateViews failed (#" << failures << "): " << resultString(m_instance, result)
 			         << ", predicted display time " << m_frameState.predictedDisplayTime

@@ -347,6 +347,8 @@ private:
 	float m_lastItemTapAge;
 
 	XrFrameState m_frameState;
+	XrTime m_displayTime = 0; //!< When to locate the head and the controllers (the prediction, unless it is invalid)
+	bool m_displayTimeFixed = false; //!< The prediction is invalid (seen after the headset reconnects)
 	bool m_frameActive;
 	bool m_shouldRender;
 	bool m_rendered;
