@@ -42,6 +42,8 @@
 #include "util/String.h"
 #include "util/Unicode.h"
 
+std::string_view (*g_extraLocalisationHook)(std::string_view language) = nullptr;
+
 namespace {
 
 IniReader g_localisation;
@@ -262,7 +264,14 @@ void loadLocalisations() {
 		loadLocalisation(dir, std::string(fallbackPrefix) += name);
 		loadLocalisation(dir, std::string(localizedPrefix) += name);
 	}
-	
+
+	if(g_extraLocalisationHook) {
+		std::string_view texts = g_extraLocalisationHook(config.interface.language);
+		if(!texts.empty() && !g_localisation.read(texts, true)) {
+			LogWarning << "Error parsing extra localisation texts";
+		}
+	}
+
 }
 
 } // anonymous namespace

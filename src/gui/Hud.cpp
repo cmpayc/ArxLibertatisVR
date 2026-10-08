@@ -1326,9 +1326,17 @@ void StealthGauge::draw() {
 	if(!m_visible) {
 		return;
 	}
-	
+
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		// VR: additive icons have no coverage in the interface layer, give them a dark backing to be visible
+		UseRenderState backing(render2D().blend());
+		EERIEDrawBitmap(m_rect, 0.011f, nullptr, Color(0, 0, 0, 160));
+	}
+	#endif
+
 	UseRenderState state(render2D().blendAdditive());
-	
+
 	EERIEDrawBitmap(m_rect, 0.01f, m_texture, m_color);
 }
 

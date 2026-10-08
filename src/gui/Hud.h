@@ -109,11 +109,12 @@ class LevelUpIconGui : public HudIconBase {
 	
 public:
 	LevelUpIconGui();
-	
+
 	void init();
 	void update(const Rectf & parent);
 	void updateInput();
 	void draw();
+	[[nodiscard]] bool isVisible() const { return m_visible; }
 };
 
 class PurseIconGui : public HudIconBase {
@@ -384,11 +385,12 @@ class StealthGauge : public HudItem {
 	
 public:
 	StealthGauge();
-	
+
 	void init();
 	void updateRect(const Rectf & parent);
 	void update();
 	void draw();
+	[[nodiscard]] bool isVisible() const { return m_visible; }
 };
 
 enum FadeDirection {
@@ -448,6 +450,12 @@ public:
 	//! Screen area of the damaged equipment icons (weapon and armor status), as laid out in the last frame
 	Rectf damagedEquipmentArea() { return damagedEquipmentGui.rect(); }
 	Rectf precastArea(size_t index) const { return precastSpellsGui.vrArea(index); }
+	//! The stealth icon while the player is hidden, else empty
+	Rectf stealthArea() { return stealthGauge.isVisible() ? stealthGauge.rect() : Rectf(); }
+	//! The level up icon while there are points to allocate (only drawn outside of combat), else empty
+	Rectf levelUpArea() { return levelUpIconGui.isVisible() ? levelUpIconGui.rect() : Rectf(); }
+	//! The stairs icon while the player can change level (by jumping or clicking it), else empty
+	Rectf changeLevelArea() { return changeLevelIconGui.isVisible() ? changeLevelIconGui.rect() : Rectf(); }
 };
 
 extern HudRoot g_hudRoot;

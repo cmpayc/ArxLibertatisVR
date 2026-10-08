@@ -124,6 +124,11 @@ VRHudAreas getVRHudAreas() {
 		areas.mana = toPixels(g_hudRoot.manaGaugeArea());
 		areas.equipment = toPixels(g_hudRoot.damagedEquipmentArea());
 	}
+	areas.stealth = toPixels(g_hudRoot.stealthArea());
+	areas.changeLevel = toPixels(g_hudRoot.changeLevelArea());
+	if(!(player.Interface & INTER_COMBATMODE) && (player.Interface & INTER_MINIBACK)) {
+		areas.levelUp = toPixels(g_hudRoot.levelUpArea()); // Only drawn then
+	}
 	
 	if(!(player.Interface & INTER_PLAYERBOOK)) {
 		for(size_t i = 0; i < std::size(areas.precast); i++) {

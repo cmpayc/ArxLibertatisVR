@@ -177,6 +177,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "vr/VRControls.h"
 #include "vr/VRGrab.h"
 #include "vr/VRSystem.h"
+#include "vr/VRText.h"
 #endif
 
 #include "window/RenderWindow.h"
@@ -243,6 +244,8 @@ bool ArxGame::initialize() {
 			g_playerCarriedItemHook = &getVRCarriedItem;
 			g_precastSpellHook = &isVRPrecastRequested;
 			g_playerSpellAimHook = &getVRSpellAim;
+			// Tutorial messages name the controllers
+			g_extraLocalisationHook = &getVRLocalisation;
 		}
 	}
 	#endif

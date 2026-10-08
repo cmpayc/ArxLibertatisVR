@@ -57,4 +57,10 @@ std::string_view getLocalised(std::string_view name, std::string_view default_va
 
 long getLocalisedKeyCount(std::string_view sectionname);
 
+/*!
+ * Texts in the localisation format loaded over the game's texts for a language, empty for none (VR: tutorial
+ * messages naming the controllers instead of keyboard and mouse)
+ */
+extern std::string_view (*g_extraLocalisationHook)(std::string_view language);
+
 #endif // ARX_CORE_LOCALISATION_H

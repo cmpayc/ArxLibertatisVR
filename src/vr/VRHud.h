@@ -36,6 +36,9 @@ struct VRHudAreas {
 	Rect health;    //!< Health gauge
 	Rect mana;      //!< Mana gauge
 	Rect equipment; //!< Damaged equipment icons (weapon and armor status)
+	Rect stealth;   //!< Stealth icon, while hidden
+	Rect levelUp;   //!< Level up icon, while there are points to allocate
+	Rect changeLevel; //!< Stairs icon, while the player can change level (by jumping)
 	Rect inventory; //!< Player inventory, while open
 	Rect map;       //!< Mini map
 	Rect precast[3]; //!< Icons of the stored spells (cast with gestures, see VRControls), above the main hand

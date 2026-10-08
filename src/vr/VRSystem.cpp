@@ -1463,9 +1463,11 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 			continue;
 		}
 
-		// Health, mana and the damaged equipment status in a row, bottoms aligned; the inventory above them
+		// Health, mana, the damaged equipment status and the stealth, level up and stairs icons in a row, bottoms
+		// aligned; the inventory above them
 		float gaugePixelSize = GaugePixelSize / areas.hudScale;
-		const Rect * row[] = { &areas.health, &areas.mana, &areas.equipment };
+		const Rect * row[] = { &areas.health, &areas.mana, &areas.equipment, &areas.stealth, &areas.levelUp,
+		                       &areas.changeLevel };
 		float rowWidth = 0.f;
 		float rowHeight = 0.f;
 		for(const Rect * area : row) {
@@ -1481,7 +1483,7 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 			Vec2f extent = size(*area, gaugePixelSize);
 			if(extent.x > 0.f) {
 				Vec2f center(x + 0.5f * extent.x, bottom + 0.5f * extent.y);
-				add(*area, gaugePixelSize, center, area != &areas.equipment);
+				add(*area, gaugePixelSize, center, area == &areas.health || area == &areas.mana);
 				x += extent.x + Gap;
 			}
 		}
