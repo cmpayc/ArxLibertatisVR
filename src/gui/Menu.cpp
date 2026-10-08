@@ -158,6 +158,23 @@ void ARX_MENU_Launch(bool allowResume) {
 	}
 }
 
+bool ARX_MENU_CanPause() {
+	return ARXmenu.mode() == Mode_InGame && !isInCinematic() && !cinematicBorder.isActive();
+}
+
+void ARX_MENU_Pause() {
+
+	GRenderer->getSnapshot(savegame_thumbnail, config.interface.thumbnailSize.x, config.interface.thumbnailSize.y);
+
+	g_gameTime.pause(GameTime::PauseMenu);
+
+	ARX_MENU_Launch(true);
+	MenuFader_start(Fade_Out, -1); // TODO: does this fader even work ?
+	TRUE_PLAYER_MOUSELOOK_ON = false;
+
+	ARX_PLAYER_PutPlayerInNormalStance();
+}
+
 void ARX_Menu_Manage() {
 	
 	// looks for keys for each mode.
@@ -178,15 +195,7 @@ void ARX_Menu_Manage() {
 					g_playerBook.close();
 					ARX_INTERFACE_NoteClose();
 				} else {
-					GRenderer->getSnapshot(savegame_thumbnail, config.interface.thumbnailSize.x, config.interface.thumbnailSize.y);
-					
-					g_gameTime.pause(GameTime::PauseMenu);
-					
-					ARX_MENU_Launch(true);
-					MenuFader_start(Fade_Out, -1); // TODO: does this fader even work ?
-					TRUE_PLAYER_MOUSELOOK_ON = false;
-
-					ARX_PLAYER_PutPlayerInNormalStance();
+					ARX_MENU_Pause();
 				}
 			}
 			break;

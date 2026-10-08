@@ -1295,6 +1295,10 @@ void ArxGame::doFrame() {
 			// Begin the VR frame before updating so that the camera uses the predicted head pose
 			g_vr->pollEvents();
 			g_vr->beginFrame();
+			if(g_vr->consumePauseRequest() && ARX_MENU_CanPause()) {
+				// Headset taken off or away, or the runtime menu opened: pause into the main menu like the Escape key
+				ARX_MENU_Pause();
+			}
 			// Everything except the stereo 3D scene is drawn into the virtual screen
 			g_vr->beginUIRender(m_MainWindow->getSize());
 		}

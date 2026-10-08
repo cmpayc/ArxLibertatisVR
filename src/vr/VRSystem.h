@@ -24,6 +24,7 @@
 #include <array>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <openxr/openxr.h>
@@ -76,6 +77,11 @@ public:
 	[[nodiscard]] bool isSessionRunning() const { return m_sessionRunning; }
 	[[nodiscard]] bool isFocused() const { return m_sessionState == XR_SESSION_STATE_FOCUSED; }
 	[[nodiscard]] bool isExitRequested() const { return m_exitRequested; }
+	/*!
+	 * Whether the game should pause since the last call: the session lost input focus (headset taken off, runtime
+	 * menu) or the headset reconnected
+	 */
+	[[nodiscard]] bool consumePauseRequest() { return std::exchange(m_pauseRequested, false); }
 
 	/*!
 	 * Wait for and begin the next frame and locate the eye views.
@@ -85,6 +91,15 @@ public:
 	 */
 	bool beginFrame();
 	void endFrame();
+
+private:
+
+	//! Locate the eye views for the frame, false if the headset is not tracked
+	bool locateViews(XrTime now);
+	//! Request a pause when the headset or the controllers are gone for a while
+	void updatePresence(bool headsetLocated, XrTime now);
+
+public:
 
 	[[nodiscard]] bool isFrameActive() const { return m_frameActive; }
 	[[nodiscard]] Vec2i getEyeSize() const { return m_eyeSize; }
@@ -349,6 +364,10 @@ private:
 	XrFrameState m_frameState;
 	XrTime m_displayTime = 0; //!< When to locate the head and the controllers (the prediction, unless it is invalid)
 	bool m_displayTimeFixed = false; //!< The prediction is invalid (seen after the headset reconnects)
+	bool m_pauseRequested = false; //!< See consumePauseRequest()
+	bool m_present = false; //!< The headset and a controller are tracked (see updatePresence)
+	XrTime m_headsetAwaySince = 0;
+	XrTime m_controllersAwaySince = 0;
 	bool m_frameActive;
 	bool m_shouldRender;
 	bool m_rendered;

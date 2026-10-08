@@ -77,6 +77,10 @@ extern bool g_canResumeGame;
 void ARX_Menu_Manage();
 void ARX_Menu_Render();
 void ARX_MENU_Launch(bool allowResume);
+//! Whether the game is being played and can be paused into the main menu (as with the Escape key)
+bool ARX_MENU_CanPause();
+//! Pause the game into the main menu, as the Escape key does while playing
+void ARX_MENU_Pause();
 void ARX_Menu_Resources_Release();
 void ARX_MENU_Clicked_CREDITS();
 

@@ -738,6 +738,10 @@ void VRSystem::pollEvents() {
 void VRSystem::handleSessionStateChange(XrSessionState state) {
 
 	LogDebug("OpenXR session state " << int(m_sessionState) << " -> " << int(state));
+	if(m_sessionState == XR_SESSION_STATE_FOCUSED && state != XR_SESSION_STATE_FOCUSED) {
+		// The headset was taken off or the runtime shows its own menu: the game no longer gets input
+		m_pauseRequested = true;
+	}
 	m_sessionState = state;
 
 	switch(state) {
@@ -810,6 +814,7 @@ bool VRSystem::beginFrame() {
 	if(m_displayTime <= 0 && now > 0) {
 		if(!m_displayTimeFixed) {
 			LogWarning << "OpenXR: invalid predicted display time " << m_displayTime << ", locating at the current time";
+			m_pauseRequested = true; // The headset was away
 		}
 		m_displayTime = now + std::max(m_frameState.predictedDisplayPeriod, XrDuration(0));
 		m_displayTimeFixed = true;
@@ -825,9 +830,61 @@ bool VRSystem::beginFrame() {
 	updatePointer();
 	updateVRControls();
 
-	if(!m_frameState.shouldRender) {
+	bool located = m_frameState.shouldRender && locateViews(now);
+	updatePresence(located, now);
+	if(!located) {
 		return false;
 	}
+
+	m_shouldRender = true;
+	return true;
+}
+
+void VRSystem::updatePresence(bool headsetLocated, XrTime now) {
+
+	/*
+	 * The headset is away when it is not located or nothing is to be rendered, or no controller is tracked: seen when
+	 * the headset disconnects (Virtual Desktop), which the runtime may not report as a focus loss. After a short while
+	 * the game pauses (see consumePauseRequest), once until everything is back.
+	 */
+	const XrDuration HeadsetGrace = 500'000'000; // ns
+	const XrDuration ControllersGrace = 1'500'000'000; // ns (reaching behind the back can lose both briefly)
+
+	bool controllers = false;
+	for(VRHand hand : { VRHandLeft, VRHandRight }) {
+		const VRHandState & state = m_input.getHand(hand);
+		controllers = controllers || (state.active && state.grip.valid);
+	}
+
+	if(now <= 0) {
+		return;
+	}
+	if(headsetLocated) {
+		m_headsetAwaySince = 0;
+	} else if(!m_headsetAwaySince) {
+		m_headsetAwaySince = now;
+	}
+	if(controllers) {
+		m_controllersAwaySince = 0;
+	} else if(!m_controllersAwaySince) {
+		m_controllersAwaySince = now;
+	}
+
+	if(headsetLocated && controllers) {
+		m_present = true;
+		return;
+	}
+
+	bool away = (m_headsetAwaySince && now - m_headsetAwaySince > HeadsetGrace)
+	            || (m_controllersAwaySince && now - m_controllersAwaySince > ControllersGrace);
+	if(m_present && away) {
+		m_present = false;
+		m_pauseRequested = true;
+	}
+
+}
+
+bool VRSystem::locateViews(XrTime now) {
 
 	XrViewLocateInfo locateInfo = { XR_TYPE_VIEW_LOCATE_INFO };
 	locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -866,12 +923,7 @@ bool VRSystem::beginFrame() {
 	}
 
 	const XrViewStateFlags required = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
-	if((viewState.viewStateFlags & required) != required) {
-		return false;
-	}
-
-	m_shouldRender = true;
-	return true;
+	return (viewState.viewStateFlags & required) == required;
 }
 
 unsigned VRSystem::acquireSwapchainImage(EyeSwapchain & swapchain) {
