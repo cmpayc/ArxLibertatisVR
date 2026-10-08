@@ -466,9 +466,14 @@ bool ArxGame::initWindow(RenderWindow * window) {
 	m_MainWindow->setVSync(noVSync ? 0 : config.video.vsync);
 
 	#if ARX_HAVE_OPENXR
-	if(g_vr && config.vr.desktopView != "fullscreen") {
-		// VR: a small window instead of the full screen (user request), see config.vr.desktopView
-		getWindow()->setWindowSize(Vec2i(1280, 720));
+	if(g_vr) {
+		// VR: the full screen or a small window (user request), whatever the video settings say, see
+		// config.vr.desktopView
+		if(config.vr.desktopView == "fullscreen") {
+			setWindowSize(true);
+		} else {
+			getWindow()->setWindowSize(Vec2i(1280, 720));
+		}
 	} else
 	#endif
 	{
