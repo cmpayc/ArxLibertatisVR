@@ -20,6 +20,8 @@
 #ifndef ARX_GUI_HUD_H
 #define ARX_GUI_HUD_H
 
+#include <algorithm>
+#include <iterator>
 #include <vector>
 
 #include "core/TimeTypes.h"
@@ -109,7 +111,7 @@ class LevelUpIconGui : public HudIconBase {
 	
 public:
 	LevelUpIconGui();
-
+	
 	void init();
 	void update(const Rectf & parent);
 	void updateInput();
@@ -292,26 +294,6 @@ public:
 	void updateRect(const Rectf & parent);
 	void update();
 	void draw();
-
-	/*!
-	 * VR: the icon of a stored spell (in the order of g_precast) with the arrow of the gesture that casts it: above
-	 * the first, left of the second, right of the third. Empty if there is none.
-	 */
-	[[nodiscard]] Rectf vrArea(size_t index) const {
-		if(index >= m_icons.size()) {
-			return Rectf();
-		}
-		Rectf area = m_icons[index].m_rect;
-		float arrow = area.width() * 0.5f;
-		if(index == 0) {
-			area.top -= arrow;
-		} else if(index == 1) {
-			area.left -= arrow;
-		} else if(index == 2) {
-			area.right += arrow;
-		}
-		return area;
-	}
 };
 
 #include "game/magic/Spell.h"
@@ -371,6 +353,10 @@ public:
 	void updateRect(const Rectf & parent);
 	void update();
 	void draw();
+	//! \return true if an icon is shown (a damaged weapon or armor)
+	[[nodiscard]] bool isDamaged() const {
+		return std::any_of(std::begin(m_colors), std::end(m_colors), [](Color c) { return c != Color::black; });
+	}
 };
 
 /*!
@@ -385,7 +371,7 @@ class StealthGauge : public HudItem {
 	
 public:
 	StealthGauge();
-
+	
 	void init();
 	void updateRect(const Rectf & parent);
 	void update();
@@ -449,7 +435,10 @@ public:
 	Rectf manaGaugeArea() { return manaGauge.rect(); }
 	//! Screen area of the damaged equipment icons (weapon and armor status), as laid out in the last frame
 	Rectf damagedEquipmentArea() { return damagedEquipmentGui.rect(); }
-	Rectf precastArea(size_t index) const { return precastSpellsGui.vrArea(index); }
+	//! The damaged equipment icons while one is shown, else empty
+	Rectf damagedEquipmentIconArea() {
+		return damagedEquipmentGui.isDamaged() ? damagedEquipmentGui.rect() : Rectf();
+	}
 	//! The stealth icon while the player is hidden, else empty
 	Rectf stealthArea() { return stealthGauge.isVisible() ? stealthGauge.rect() : Rectf(); }
 	//! The level up icon while there are points to allocate (only drawn outside of combat), else empty

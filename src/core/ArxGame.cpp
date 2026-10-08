@@ -1968,7 +1968,7 @@ void ArxGame::renderLevel() {
 	#if ARX_HAVE_OPENXR
 	if(vrStereo) {
 		drawVRPointerBeam();
-		drawVRItemWheel();
+		drawVRHandMenus();
 		g_vr->endStereoRender(m_MainWindow->getSize());
 		GRenderer->Clear(Renderer::DepthBuffer);
 	}

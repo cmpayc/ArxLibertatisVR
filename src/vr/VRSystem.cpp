@@ -41,6 +41,8 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include "graphics/Draw.h"
+#include "graphics/Renderer.h"
 #include "graphics/opengl/OpenGLUtil.h"
 #include <epoxy/wgl.h>
 
@@ -1245,10 +1247,66 @@ bool VRSystem::beginUIRender(const Vec2i & windowSize) {
 	return true;
 }
 
+void VRSystem::drawWristIconBackings() {
+
+	/*
+	 * Each icon at the wrist (gauges, status icons) gets a round backing like the menus at the hands, and is 30%
+	 * transparent (more visible than the menus). Painted after the interface: the backing under what is already drawn
+	 * (where it does not cover yet), then the coverage of the whole icon area scaled to 70% (the image has premultiplied
+	 * alpha).
+	 */
+	VRHudAreas areas = getVRHudAreas();
+	const Rect * icons[] = { &areas.gauges, &areas.equipment, &areas.stealth, &areas.levelUp, &areas.changeLevel };
+
+	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
+	renderer->setPremultipliedAlphaOutput(false); // The blending below applies to all channels
+	GRenderer->ResetTexture(0);
+	{
+		UseRenderState state(render2D().blend(BlendInvDstAlpha, BlendOne));
+		const Color backing(12, 12, 20, 200); // Premultiplied, like the menus at the hands
+		const size_t Segments = 32;
+		for(const Rect * icon : icons) {
+			if(icon->empty()) {
+				continue;
+			}
+			Vec2f center = Rectf(*icon).center();
+			float radius = 0.5f * float(std::min(icon->width(), icon->height()));
+			TexturedVertex fan[Segments + 2];
+			fan[0] = TexturedVertex(Vec3f(center, 0.f), 1.f, backing.toRGBA(), Vec2f(0.f));
+			for(size_t i = 0; i <= Segments; i++) {
+				float angle = glm::two_pi<float>() * float(i) / float(Segments);
+				Vec2f rim = center + Vec2f(std::cos(angle), std::sin(angle)) * radius;
+				fan[i + 1] = TexturedVertex(Vec3f(rim, 0.f), 1.f, backing.toRGBA(), Vec2f(0.f));
+			}
+			EERIEDRAWPRIM(Renderer::TriangleFan, fan, Segments + 2);
+		}
+	}
+	{
+		UseRenderState state(render2D().blend(BlendZero, BlendSrcAlpha));
+		for(const Rect * icon : icons) {
+			if(!icon->empty()) {
+				// The stealth icon in the view is half transparent (user request), see updateViewIconPanels
+				u8 alpha = (icon == &areas.stealth) ? 128 : 179;
+				EERIEDrawBitmap(Rectf(*icon), 0.f, nullptr, Color(0, 0, 0, alpha));
+			}
+		}
+		// The map too (user request), without a backing
+		if(!areas.map.empty()) {
+			EERIEDrawBitmap(Rectf(areas.map), 0.f, nullptr, Color(0, 0, 0, 179));
+		}
+	}
+	renderer->setPremultipliedAlphaOutput(true);
+
+}
+
 void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 
 	if(!m_uiActive) {
 		return;
+	}
+
+	if(overScene && !config.vr.showHud) {
+		drawWristIconBackings();
 	}
 
 	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
@@ -1312,6 +1370,7 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 	updateWristPanels(areas);
 	updateLootPanel(areas);
 	updateLabelPanel(areas);
+	updateViewIconPanels(areas);
 
 }
 
@@ -1366,23 +1425,38 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 	const float Gap = 0.005f;
 	// Rotation of the panels on the left wrist, clockwise (mirrored on the right wrist)
 	const float Tilt = glm::radians(45.f);
+	// The health and mana gauges are turned back counter-clockwise by this (user request)
+	const float GaugesTilt = glm::radians(-45.f);
+	// The map is turned clockwise by this (user request; the tilt is mirrored on the right hand, see Mount)
+	const float MapTilt = glm::radians(-45.f);
 	// Sideways shift of the panels: to the left on the left wrist, to the right on the right wrist
 	const float Shift = 0.025f;
-	// The stored spell icons above the main hand: size, spacing and place from the wrist joint
-	const float PrecastPixelSize = 0.0008f;
-	const float PrecastSpacing = 0.02f;
-	const float PrecastForward = 0.04f;
-	const float PrecastAbove = 0.035f; // m, up
+	// Where the icons and the map are on the forearm: back from the wrist joint, out from the bone
+	const float ForearmBack = 0.045f;
+	const float ForearmAbove = 0.015f;
+	// The inventory is above where the row of gauges was at the wrist (half the height of a gauge)
+	const float InventoryBase = 0.5f * 80.f * GaugePixelSize;
+
+	//! Where panels are attached: a point and the directions of the panels there, facing out of `normal`
+	struct Mount {
+		Vec3f position;
+		Vec3f across; // Left to right when reading
+		Vec3f up;
+		Vec3f normal;
+		float side; // 1 on the left hand, -1 on the right hand
+		[[nodiscard]] glm::quat orientation(float extraTilt = 0.f) const {
+			Vec3f turnedUp = up * std::cos(extraTilt * side) + across * std::sin(extraTilt * side);
+			return glm::quat_cast(glm::mat3x3(glm::cross(turnedUp, normal), turnedUp, normal));
+		}
+	};
 
 	for(size_t i = 0; i < VRHandCount; i++) {
 
 		const VRHand hand = VRHand(i);
 		const VRHandState & state = m_input.getHand(hand);
 		bool isHudHand = (hand == hudHand);
-		bool precast = std::any_of(std::begin(areas.precast), std::end(areas.precast),
-		                           [](const Rect & area) { return !area.empty(); });
-		if(!state.grip.valid || (isHudHand ? (areas.health.empty() && areas.mana.empty() && areas.inventory.empty())
-		                                   : (areas.map.empty() && !precast))) {
+		if(!state.grip.valid || (isHudHand ? (areas.gauges.empty() && areas.inventory.empty())
+		                                   : areas.map.empty())) {
 			continue;
 		}
 
@@ -1405,93 +1479,103 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 			}
 		}
 		float side = (hand == VRHandLeft) ? 1.f : -1.f;
-		Vec3f normal = grip * Vec3f(side, 0.f, 0.f);
-		Vec3f fingers = grip * Vec3f(0.f, 0.f, -1.f);
-		Vec3f fingersRight = glm::cross(fingers, normal);
-		float tilt = Tilt * side;
-		Vec3f up = fingers * std::cos(tilt) + fingersRight * std::sin(tilt);
-		Vec3f across = glm::cross(up, normal); // Left to right when reading
-		Vec3f wrist = wristJoint + grip * Vec3f(0.f, 0.f, 0.03f) + normal * 0.025f;
+		auto mountAt = [&](const Vec3f & joint, const Vec3f & fingers, const Vec3f & normal, const Vec3f & offset) {
+			Vec3f fingersRight = glm::cross(fingers, normal);
+			float tilt = Tilt * side;
+			Mount mount;
+			mount.up = fingers * std::cos(tilt) + fingersRight * std::sin(tilt);
+			mount.across = glm::cross(mount.up, normal);
+			mount.normal = normal;
+			mount.position = joint + offset;
+			mount.side = side;
+			return mount;
+		};
+		Vec3f wristNormal = grip * Vec3f(side, 0.f, 0.f);
+		Vec3f wristFingers = grip * Vec3f(0.f, 0.f, -1.f);
+		Mount wrist = mountAt(wristJoint, wristFingers, wristNormal,
+		                      grip * Vec3f(0.f, 0.f, 0.03f) + wristNormal * 0.025f);
 
-		if(!isHudHand && precast) {
-			/*
-			 * The stored spells above the hand, facing the eyes and upright, placed like the gestures that cast them
-			 * (see VRControls): the first above, the second to the left, the third to the right
-			 */
-			Vec3f center = wristJoint + fingers * PrecastForward + Vec3f(0.f, PrecastAbove, 0.f);
-			Vec3f toHead = head - center;
-			if(glm::length(toHead) > 0.05f) {
-				Vec3f facing = glm::normalize(toHead);
-				Vec3f panelUp = Vec3f(0.f, 1.f, 0.f) - facing * facing.y;
-				if(glm::length(panelUp) > 0.1f) {
-					panelUp = glm::normalize(panelUp);
-					Vec3f panelRight = glm::cross(panelUp, facing);
-					glm::quat facingOrientation = glm::quat_cast(glm::mat3x3(panelRight, panelUp, facing));
-					const Vec2f slots[] = { Vec2f(0.f, 1.f), Vec2f(-1.f, 0.f), Vec2f(1.f, 0.f) };
-					float pixelSize = PrecastPixelSize / areas.hudScale;
-					for(size_t slot = 0; slot < std::size(areas.precast); slot++) {
-						// The arrow sticks out on the outer side, the icon stays at its place
-						const Rect & area = areas.precast[slot];
-						float arrow = 0.5f * float(std::abs(area.width() - area.height())) * pixelSize;
-						Vec3f direction = panelRight * slots[slot].x + panelUp * slots[slot].y;
-						Vec3f position = center + direction * (PrecastSpacing + arrow);
-						addUIPanel(area, pixelSize, position, facingOrientation, false);
-					}
-				}
+		/*
+		 * The icons and the map are on the forearm, a little back from the wrist (user request), so that they do not
+		 * turn when the hand bends: along the forearm, facing the palm side (they turn with it). The inventory stays
+		 * at the wrist.
+		 */
+		Mount forearm = wrist;
+		Vec3f elbow;
+		Vec3f joint;
+		glm::quat unused;
+		Vec3f elbowPosition;
+		Vec3f jointPosition;
+		if(getVRForearm(hand, elbow, joint)
+		   && worldPoseToTracking(elbow, glm::quat(1.f, 0.f, 0.f, 0.f), elbowPosition, unused)
+		   && worldPoseToTracking(joint, glm::quat(1.f, 0.f, 0.f, 0.f), jointPosition, unused)
+		   && glm::distance(elbowPosition, jointPosition) > 0.05f) {
+			Vec3f along = glm::normalize(jointPosition - elbowPosition);
+			Vec3f palm = wristNormal - along * glm::dot(wristNormal, along);
+			if(glm::length(palm) > 0.1f) {
+				palm = glm::normalize(palm);
+				forearm = mountAt(jointPosition, along, palm, -along * ForearmBack + palm * ForearmAbove);
 			}
-		}
-		if(!isHudHand && areas.map.empty()) {
-			continue;
 		}
 
 		// Like the body, it can only be seen from the front (quad layers are not hidden by the arm)
-		if(glm::dot(normal, head - wrist) <= 0.f) {
-			continue;
-		}
-
-		glm::quat orientation = glm::quat_cast(glm::mat3x3(across, up, normal));
-		auto add = [&](const Rect & area, float pixelSize, Vec2f center, bool interactive) {
-			Vec3f position = wrist + across * (center.x - Shift * side) + up * center.y;
-			return addUIPanel(area, pixelSize, position, orientation, interactive);
+		auto visible = [&](const Mount & mount) {
+			return glm::dot(mount.normal, head - mount.position) > 0.f;
+		};
+		auto add = [&](const Mount & mount, const Rect & area, float pixelSize, Vec2f center, bool interactive,
+		               float extraTilt = 0.f) {
+			Vec3f position = mount.position + mount.across * (center.x - Shift * side) + mount.up * center.y;
+			if(!addUIPanel(area, pixelSize, position, mount.orientation(extraTilt), interactive)) {
+				return false;
+			}
+			m_uiPanels.back().onWrist = true;
+			return true;
 		};
 		auto size = [](const Rect & area, float pixelSize) {
 			return area.empty() ? Vec2f(0.f) : Vec2f(float(area.width()), float(area.height())) * pixelSize;
 		};
 
 		if(!isHudHand) {
-			add(areas.map, MapPixelSize / areas.mapScale, Vec2f(0.f), false);
+			if(visible(forearm)) {
+				add(forearm, areas.map, MapPixelSize / areas.mapScale, Vec2f(0.f), false, MapTilt);
+			}
 			continue;
 		}
 
-		// Health, mana, the damaged equipment status and the stealth, level up and stairs icons in a row, bottoms
-		// aligned; the inventory above them
+		/*
+		 * The health and mana gauges (in one circle, turned back), the damaged equipment status and the stealth, level
+		 * up and stairs icons in a row on the forearm, centered vertically
+		 */
 		float gaugePixelSize = GaugePixelSize / areas.hudScale;
-		const Rect * row[] = { &areas.health, &areas.mana, &areas.equipment, &areas.stealth, &areas.levelUp,
-		                       &areas.changeLevel };
-		float rowWidth = 0.f;
-		float rowHeight = 0.f;
-		for(const Rect * area : row) {
-			Vec2f extent = size(*area, gaugePixelSize);
-			if(extent.x > 0.f) {
-				rowWidth += (rowWidth > 0.f ? Gap : 0.f) + extent.x;
-				rowHeight = std::max(rowHeight, extent.y);
+		if(visible(forearm)) {
+			// The stealth icon is in the view instead (see updateViewIconPanels)
+			const Rect * row[] = { &areas.gauges, &areas.equipment, &areas.levelUp, &areas.changeLevel };
+			float rowWidth = 0.f;
+			for(const Rect * area : row) {
+				Vec2f extent = size(*area, gaugePixelSize);
+				if(extent.x > 0.f) {
+					rowWidth += (rowWidth > 0.f ? Gap : 0.f) + extent.x;
+				}
+			}
+			// Shifted to the right by half the gauges circle (user request)
+			float x = -0.5f * rowWidth + 0.5f * size(areas.gauges, gaugePixelSize).x;
+			for(const Rect * area : row) {
+				Vec2f extent = size(*area, gaugePixelSize);
+				if(extent.x > 0.f) {
+					bool gauges = (area == &areas.gauges);
+					add(forearm, *area, gaugePixelSize, Vec2f(x + 0.5f * extent.x, 0.f), gauges,
+					    gauges ? GaugesTilt : 0.f);
+					x += extent.x + Gap;
+				}
 			}
 		}
-		float bottom = -0.5f * rowHeight;
-		float x = -0.5f * rowWidth;
-		for(const Rect * area : row) {
-			Vec2f extent = size(*area, gaugePixelSize);
-			if(extent.x > 0.f) {
-				Vec2f center(x + 0.5f * extent.x, bottom + 0.5f * extent.y);
-				add(*area, gaugePixelSize, center, area == &areas.health || area == &areas.mana);
-				x += extent.x + Gap;
-			}
-		}
-		if(!areas.inventory.empty()) {
+
+		// The inventory at the wrist, as before the icons moved to the forearm
+		if(!areas.inventory.empty() && visible(wrist)) {
 			float inventoryPixelSize = InventoryPixelSize / areas.hudScale;
 			Vec2f inventory = size(areas.inventory, inventoryPixelSize);
-			float top = bottom + rowHeight;
-			if(add(areas.inventory, inventoryPixelSize, Vec2f(0.f, top + Gap + 0.5f * inventory.y), true)) {
+			if(add(wrist, areas.inventory, inventoryPixelSize, Vec2f(0.f, InventoryBase + Gap + 0.5f * inventory.y),
+			       true)) {
 				m_uiPanels.back().useOnTap = true;
 			}
 		}
@@ -1545,6 +1629,25 @@ void VRSystem::updateLootPanel(const VRHudAreas & areas) {
 
 	const float LootPixelSize = 0.0012f; // meters per interface pixel: a sheet of about 30 cm
 	addUIPanel(areas.loot, LootPixelSize / areas.hudScale, position, orientation, true);
+
+}
+
+void VRSystem::updateViewIconPanels(const VRHudAreas & areas) {
+
+	// The stealth icon in the lower left of the view, following the head (user request)
+	if(areas.stealth.empty()) {
+		return;
+	}
+
+	const Vec3f Offset(-0.38f, -0.32f, -1.f); // m in the view: left, down and ahead
+	const float Width = 0.05f; // m
+
+	const XrPosef & left = m_views[0].pose;
+	const XrPosef & right = m_views[1].pose;
+	Vec3f head = (Vec3f(left.position.x, left.position.y, left.position.z)
+	              + Vec3f(right.position.x, right.position.y, right.position.z)) * 0.5f;
+	glm::quat orientation(left.orientation.w, left.orientation.x, left.orientation.y, left.orientation.z);
+	addUIPanel(areas.stealth, Width / float(areas.stealth.width()), head + orientation * Offset, orientation, false);
 
 }
 
@@ -1786,6 +1889,7 @@ void VRSystem::updatePointer() {
 	bool onUI = false;
 	Vec2s mouse(0);
 	bool useOnTap = false;
+	bool onWrist = false;
 	float nearest = std::numeric_limits<float>::max();
 	for(const UIPanel & panel : m_visiblePanels) {
 
@@ -1819,11 +1923,13 @@ void VRSystem::updatePointer() {
 		nearest = distance;
 		onUI = true;
 		useOnTap = panel.useOnTap;
+		onWrist = panel.onWrist;
 		mouse = Vec2s(s16(float(panel.area.left) + u * float(panel.area.width() - 1)),
 		              s16(float(panel.area.top) + v * float(panel.area.height() - 1)));
 
 	}
-	if(onUI && inGame) {
+	// No beam to the panels at the wrist, the cursor on them is enough
+	if(onUI && inGame && !onWrist) {
 		Vec3f aimDirection = hand.aim.orientation * Vec3f(0.f, 0.f, -1.f);
 		setVRPointerBeamToUI(hand.aim.position, hand.aim.position + aimDirection * nearest);
 	}

@@ -33,15 +33,13 @@ class Entity;
 struct VRHudAreas {
 
 	Rect screen;    //!< Book, notes and containers
-	Rect health;    //!< Health gauge
-	Rect mana;      //!< Mana gauge
+	Rect gauges;    //!< Health and mana gauges, next to each other
 	Rect equipment; //!< Damaged equipment icons (weapon and armor status)
-	Rect stealth;   //!< Stealth icon, while hidden
+	Rect stealth;   //!< Stealth icon, while hidden (shown in the lower left of the view)
 	Rect levelUp;   //!< Level up icon, while there are points to allocate
 	Rect changeLevel; //!< Stairs icon, while the player can change level (by jumping)
 	Rect inventory; //!< Player inventory, while open
 	Rect map;       //!< Mini map
-	Rect precast[3]; //!< Icons of the stored spells (cast with gestures, see VRControls), above the main hand
 	Rect loot;      //!< Inventory of a dead NPC, shown lying on the body
 	Rect subtitles; //!< Subtitles of in-game cutscenes, below the view
 	Rect info;      //!< Names of pointed objects and notifications (top of the screen), above the view

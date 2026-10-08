@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 
 #include "core/Config.h"
 #include "core/Core.h"
@@ -43,6 +44,7 @@
 #include "graphics/Renderer.h"
 #include "graphics/data/Mesh.h"
 #include "graphics/data/TextureContainer.h"
+#include "graphics/texture/TextureStage.h"
 #include "gui/Cursor.h"
 #include "gui/book/Book.h"
 #include "gui/Interface.h"
@@ -245,71 +247,83 @@ Entity * keepVRAimTarget(const VRPose & aim, Entity * target, bool direct, const
 	return target;
 }
 
-
 /*!
- * Stored spells are cast with the main hand: a fist (grip and trigger) moved up casts the first one, to the left the
- * second one, to the right the third one (like their icons on the back of the hand, see VRSystem). Moving forward is
- * a punch and casts nothing. Not in the magic mode, where the grip stores the spell drawn instead.
+ * The spell wheel: a fist of the main hand (grip and trigger) opens it at the fist when spells are stored. Moving the
+ * fist picks a stored spell (the first up, the second to the left, the third to the right, like they are shown above
+ * the hand, see drawVRHandMenus) or cancel (down), letting go casts the spell picked. Moving forward is a punch and
+ * picks nothing. Not in the magic mode, where the grip stores the spell drawn instead.
  */
-bool g_castGesture = false; // The main hand makes a fist that may cast a stored spell
-bool g_castGestureDone = false;
-Vec3f g_castGestureStart(0.f);
+const Vec2f g_spellWheelDirections[] = { Vec2f(0.f, 1.f), Vec2f(-1.f, 0.f), Vec2f(1.f, 0.f), Vec2f(0.f, -1.f) };
+const size_t SpellWheelCancel = 3; // The last part
+bool g_spellWheelOpen = false;
+Vec3f g_spellWheelCenter(0.f); // Where the fist was made, in the tracking space
+int g_spellWheelSelected = -1;
 
-void updatePrecastGestures() {
+//! The part of a wheel in the direction a hand moved from its center, as seen from the head, -1 for none
+int getWheelPart(const Vec3f & moved, const Vec2f * directions, size_t count) {
+	
+	const float DeadZone = 0.04f; // m the hand moves before a part is picked
+	
+	// Tracking space: y up
+	const XrQuaternionf & q = g_vr->getView(0).pose.orientation;
+	glm::quat head(q.w, q.x, q.y, q.z);
+	Vec2f offset(glm::dot(moved, head * Vec3f(1.f, 0.f, 0.f)), glm::dot(moved, head * Vec3f(0.f, 1.f, 0.f)));
+	float forward = std::abs(glm::dot(moved, head * Vec3f(0.f, 0.f, -1.f)));
+	if(glm::length(offset) <= DeadZone || glm::length(offset) < forward) {
+		return -1; // Not far enough, or a punch
+	}
+	
+	int part = -1;
+	float best = -2.f;
+	for(size_t i = 0; i < count; i++) {
+		float alignment = glm::dot(directions[i], glm::normalize(offset));
+		if(alignment > best) {
+			best = alignment;
+			part = int(i);
+		}
+	}
+	return part;
+}
 
-	const float GestureDistance = 0.18f; // m the fist moves
-	const float Dominance = 1.5f; // How much more than the other directions it moves in the gesture direction
+void updateSpellWheel() {
 
 	VRHand hand = dominantHand();
 	const VRHandState & state = g_vr->getInput().getHand(hand);
 	bool fist = state.isPressed(VRButtonGrip) && state.isPressed(VRButtonTrigger) && state.grip.valid;
-	if(!fist || g_precast.empty() || g_vr->isMagicMode() || ARXmenu.mode() != Mode_InGame || BLOCK_PLAYER_CONTROLS
-	   || isVRArcheryActive() || isVRGrabbing() || g_vr->isPointingAtUI()) {
-		g_castGesture = false;
-		g_castGestureDone = false;
-		return;
-	}
-	if(!g_castGesture) {
-		g_castGesture = true;
-		g_castGestureDone = false;
-		g_castGestureStart = state.grip.position;
-		return;
-	}
-	if(g_castGestureDone) {
-		return; // One spell per fist
-	}
+	bool usable = !g_precast.empty() && !g_vr->isMagicMode() && ARXmenu.mode() == Mode_InGame
+	              && !BLOCK_PLAYER_CONTROLS && !isVRArcheryActive() && !isVRGrabbing();
 
-	// In the directions of the head, horizontally (tracking space: y up)
-	const XrQuaternionf & q = g_vr->getView(0).pose.orientation;
-	Vec3f right = glm::quat(q.w, q.x, q.y, q.z) * Vec3f(1.f, 0.f, 0.f);
-	right.y = 0.f;
-	if(glm::length(right) < 0.01f) {
-		return;
-	}
-	right = glm::normalize(right);
-	Vec3f up(0.f, 1.f, 0.f);
-	Vec3f forward = glm::cross(up, right);
-	Vec3f moved = state.grip.position - g_castGestureStart;
-	float x = glm::dot(moved, right);
-	float y = glm::dot(moved, up);
-	float z = std::abs(glm::dot(moved, forward));
-
-	size_t slot = size_t(-1);
-	if(y > GestureDistance && y > Dominance * std::max(std::abs(x), z)) {
-		slot = 0;
-	} else if(std::abs(x) > GestureDistance && std::abs(x) > Dominance * std::max(std::abs(y), z)) {
-		slot = (x < 0.f) ? 1 : 2;
-	}
-	if(slot == size_t(-1)) {
+	if(!g_spellWheelOpen) {
+		if(fist && usable && !g_vr->isPointingAtUI()
+		   && (state.wasPressed(VRButtonGrip) || state.wasPressed(VRButtonTrigger))) {
+			g_spellWheelOpen = true;
+			g_spellWheelCenter = state.grip.position;
+			g_spellWheelSelected = -1;
+		}
 		return;
 	}
 
-	g_castGestureDone = true;
-	if(slot < g_precast.size()) {
-		ARX_SPELLS_Precast_Launch(PrecastHandle(slot));
-		g_vr->getInput().vibrate(hand, 0.8f, 0.12f);
-	} else {
-		g_vr->getInput().vibrate(hand, 0.2f, 0.04f); // No spell stored there
+	if(!fist || !usable) {
+		g_spellWheelOpen = false;
+		if(usable && g_spellWheelSelected >= 0 && size_t(g_spellWheelSelected) != SpellWheelCancel) {
+			if(size_t(g_spellWheelSelected) < g_precast.size()) {
+				ARX_SPELLS_Precast_Launch(PrecastHandle(g_spellWheelSelected));
+				g_vr->getInput().vibrate(hand, 0.8f, 0.12f);
+			} else {
+				g_vr->getInput().vibrate(hand, 0.2f, 0.04f); // No spell stored there
+			}
+		}
+		g_spellWheelSelected = -1;
+		return;
+	}
+
+	int selected = getWheelPart(state.grip.position - g_spellWheelCenter, g_spellWheelDirections,
+	                            std::size(g_spellWheelDirections));
+	if(selected != g_spellWheelSelected) {
+		g_spellWheelSelected = selected;
+		if(selected >= 0) {
+			g_vr->getInput().vibrate(hand, 0.2f, 0.02f);
+		}
 	}
 }
 
@@ -414,7 +428,7 @@ void updateVRControls() {
 	const VRHandState & main = input.getHand(dominantHand());
 	const VRHandState & off = input.getHand(offHand());
 
-	updatePrecastGestures();
+	updateSpellWheel();
 	updateItemWheel();
 
 	/*
@@ -963,57 +977,158 @@ bool isVRItemWheelOpen() {
 	return g_wheelOpen;
 }
 
-void drawVRItemWheel() {
+namespace {
+
+/*
+ * The menus at the hands (the potion wheel at the off hand, the stored spells at the main hand) look the same: round
+ * parts of the same size around a center, facing the eyes
+ */
+const float HandMenuRadius = 3.f; // cm from the center to the middle of a part
+const float HandMenuPartRadius = 1.2f; // cm
+const float HandMenuOpenAlpha = 0.7f; // The menus while open are 30% transparent
+const float HandMenuShownAlpha = 0.3f; // The stored spells shown above the hand otherwise are 70% transparent
+float g_handMenuAlpha = HandMenuOpenAlpha; // Of what is being drawn
+const Vec3f HandMenuAbove(0.f, 0.05f, 0.f); // m above the controller (tracking space: y up)
+
+struct HandMenuView {
+	Vec3f right;
+	Vec3f down;
+	Vec3f toEye;
+};
+
+HandMenuView getHandMenuView() {
+	return { Vec3f(g_preparedCamera.m_viewToWorld[0]), Vec3f(g_preparedCamera.m_viewToWorld[1]),
+	         -Vec3f(g_preparedCamera.m_viewToWorld[2]) };
+}
+
+//! Where a part in a direction (right and up, as seen from the head) is from the center
+Vec3f getHandMenuOffset(const HandMenuView & view, Vec2f direction) {
+	return (view.right * direction.x - view.down * direction.y) * HandMenuRadius;
+}
+
+void drawHandMenuQuad(TextureContainer * texture, const Vec3f & middle, const Vec3f & x, const Vec3f & y,
+                      Color color) {
+	TexturedVertex quad[4];
+	worldToClipSpace(middle - x - y, quad[0]);
+	worldToClipSpace(middle + x - y, quad[1]);
+	worldToClipSpace(middle - x + y, quad[2]);
+	worldToClipSpace(middle + x + y, quad[3]);
+	quad[0].uv = Vec2f(0.f, 0.f);
+	quad[1].uv = Vec2f(texture->uv.x, 0.f);
+	quad[2].uv = Vec2f(0.f, texture->uv.y);
+	quad[3].uv = texture->uv;
+	color.a = u8(float(color.a) * g_handMenuAlpha);
+	quad[0].color = quad[1].color = quad[2].color = quad[3].color = color.toRGBA();
+	GRenderer->SetTexture(0, texture);
+	EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
+	GRenderer->ResetTexture(0);
+}
+
+//! A round part with an icon (none for an empty part)
+void drawHandMenuPart(const HandMenuView & view, const Vec3f & middle, TextureContainer * icon, Color background,
+                      Color iconColor) {
+	
+	const size_t Segments = 24;
+	TexturedVertex fan[Segments + 2];
+	worldToClipSpace(middle, fan[0]);
+	for(size_t i = 0; i <= Segments; i++) {
+		float angle = glm::two_pi<float>() * float(i) / float(Segments);
+		Vec3f rim = middle + (view.right * std::cos(angle) + view.down * std::sin(angle)) * HandMenuPartRadius;
+		worldToClipSpace(rim, fan[i + 1]);
+	}
+	background.a = u8(float(background.a) * g_handMenuAlpha);
+	for(TexturedVertex & vertex : fan) {
+		vertex.color = background.toRGBA();
+	}
+	GRenderer->ResetTexture(0);
+	EERIEDRAWPRIM(Renderer::TriangleFan, fan, Segments + 2);
+	
+	if(icon) {
+		float size = HandMenuPartRadius * 0.68f; // The square icon inside the circle
+		drawHandMenuQuad(icon, middle + view.toEye * 0.1f, view.right * size, view.down * size, iconColor);
+	}
+}
+
+const Color HandMenuBackground(15, 15, 25, 200);
+const Color HandMenuPicked(170, 140, 70, 255);
+const Color HandMenuCancelPicked(150, 40, 30, 255);
+
+//! The potion wheel at the off hand (see updateItemWheel): the picked part bright, potions not carried empty
+void drawItemWheel(const HandMenuView & view) {
 	
 	Vec3f center;
-	if(!g_wheelOpen || !isVRPlayerView() || !trackingPointToWorld(g_wheelCenter, center)) {
+	if(!g_wheelOpen || !trackingPointToWorld(g_wheelCenter + HandMenuAbove, center)) {
 		return;
 	}
-	
-	// Facing the eyes, the parts around the hand: the picked one bright, potions not carried dim
-	const float Radius = 7.f; // cm
-	const float Size = 2.6f; // cm, half the width of a part
-	const Vec3f right = Vec3f(g_preparedCamera.m_viewToWorld[0]);
-	const Vec3f down = Vec3f(g_preparedCamera.m_viewToWorld[1]);
-	const Vec3f toEye = -Vec3f(g_preparedCamera.m_viewToWorld[2]);
-	
-	UseRenderState state(render3D().depthWrite(false).blend());
-	auto drawQuad = [&](TextureContainer * texture, const Vec3f & middle, float size, Color color) {
-		TexturedVertex quad[4];
-		worldToClipSpace(middle - (right + down) * size, quad[0]);
-		worldToClipSpace(middle + (right - down) * size, quad[1]);
-		worldToClipSpace(middle + (down - right) * size, quad[2]);
-		worldToClipSpace(middle + (right + down) * size, quad[3]);
-		Vec2f uv = texture ? texture->uv : Vec2f(1.f);
-		quad[0].uv = Vec2f(0.f, 0.f);
-		quad[1].uv = Vec2f(uv.x, 0.f);
-		quad[2].uv = Vec2f(0.f, uv.y);
-		quad[3].uv = uv;
-		quad[0].color = quad[1].color = quad[2].color = quad[3].color = color.toRGBA();
-		if(texture) {
-			GRenderer->SetTexture(0, texture);
-		} else {
-			GRenderer->ResetTexture(0);
-		}
-		EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
-	};
+	g_handMenuAlpha = HandMenuOpenAlpha;
 	
 	for(size_t i = 0; i < std::size(g_wheelSlots); i++) {
 		const ItemWheelSlot & slot = g_wheelSlots[i];
 		bool selected = (int(i) == g_wheelSelected);
-		Vec3f middle = center + (right * slot.direction.x - down * slot.direction.y) * Radius;
 		bool cancel = slot.className.empty();
 		Entity * item = cancel ? nullptr : getInventoryItemWithLowestDurability(slot.className);
-		Color background = selected ? (cancel ? Color(150, 40, 30, 210) : Color(170, 140, 70, 210))
-		                            : Color(15, 15, 25, 150);
-		drawQuad(nullptr, middle, Size, background);
-		if(cancel) {
-			if(TextureContainer * circle = cursorCombineTexture(false)) {
-				drawQuad(circle, middle + toEye * 0.1f, Size * 0.7f, selected ? Color::white : Color(170, 170, 170));
-			}
-		} else if(item && item->m_icon) {
-			drawQuad(item->m_icon, middle + toEye * 0.1f, Size * 0.85f, Color::white);
-		}
+		Color background = selected ? (cancel ? HandMenuCancelPicked : HandMenuPicked) : HandMenuBackground;
+		TextureContainer * icon = cancel ? cursorCombineTexture(false) : (item ? item->m_icon : nullptr);
+		Color iconColor = (cancel && !selected) ? Color(170, 170, 170) : Color::white;
+		drawHandMenuPart(view, center + getHandMenuOffset(view, slot.direction), icon, background, iconColor);
 	}
-	GRenderer->ResetTexture(0);
+}
+
+/*!
+ * The stored spells at the main hand: shown above it all the time, and while the fist is made the spell wheel instead,
+ * at the same place (see updateSpellWheel): the first up, the second to the left, the third to the right, cancel down
+ */
+void drawStoredSpells(const HandMenuView & view) {
+	
+	const VRHandState & hand = g_vr->getInput().getHand(dominantHand());
+	if(g_precast.empty() || ARXmenu.mode() != Mode_InGame || (player.Interface & INTER_PLAYERBOOK)
+	   || player.lifePool.current <= 0.f || !hand.grip.valid) {
+		return;
+	}
+	Vec3f center;
+	Vec3f anchor = (g_spellWheelOpen ? g_spellWheelCenter : hand.grip.position) + HandMenuAbove;
+	g_handMenuAlpha = g_spellWheelOpen ? HandMenuOpenAlpha : HandMenuShownAlpha;
+	if(!trackingPointToWorld(anchor, center)) {
+		return;
+	}
+	
+	for(size_t i = 0; i < std::size(g_spellWheelDirections); i++) {
+		const Vec2f & direction = g_spellWheelDirections[i];
+		Vec3f middle = center + getHandMenuOffset(view, direction);
+		bool selected = g_spellWheelOpen && int(i) == g_spellWheelSelected;
+		if(i == SpellWheelCancel) {
+			if(g_spellWheelOpen) {
+				drawHandMenuPart(view, middle, cursorCombineTexture(false),
+				                 selected ? HandMenuCancelPicked : HandMenuBackground,
+				                 selected ? Color::white : Color(170, 170, 170));
+			}
+			continue;
+		}
+		TextureContainer * icon = nullptr;
+		Color iconColor = Color::white;
+		if(i < g_precast.size()) {
+			icon = spellicons[g_precast[PrecastHandle(i)].typ].tc;
+			if(g_precast[PrecastHandle(i)].launch_time > 0) {
+				iconColor = Color::gray(0.4f); // Being cast
+			}
+		}
+		drawHandMenuPart(view, middle, icon, selected ? HandMenuPicked : HandMenuBackground, iconColor);
+	}
+}
+
+} // anonymous namespace
+
+void drawVRHandMenus() {
+	
+	if(!isVRActive() || !isVRPlayerView()) {
+		return;
+	}
+	
+	HandMenuView view = getHandMenuView();
+	UseRenderState state(render3D().depthWrite(false).blend());
+	// The icons are transparent too: their texture alpha times the vertex alpha (the default ignores the latter)
+	GRenderer->GetTextureStage(0)->setAlphaOp(TextureStage::OpModulate);
+	drawItemWheel(view);
+	drawStoredSpells(view);
+	GRenderer->GetTextureStage(0)->setAlphaOp(TextureStage::OpSelectArg1);
 }

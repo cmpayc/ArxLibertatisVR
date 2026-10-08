@@ -110,7 +110,7 @@ bool endVRLastSpell();
 //! \return true while the potion wheel is open (the off trigger alone, in the world)
 [[nodiscard]] bool isVRItemWheelOpen();
 
-//! Draw the potion wheel at the off hand, in the world (during the stereo render, like the pointer beam)
-void drawVRItemWheel();
+//! Draw the menus at the hands in the world: the potion wheel and the stored spells (during the stereo render)
+void drawVRHandMenus();
 
 #endif // ARX_VR_VRCONTROLS_H

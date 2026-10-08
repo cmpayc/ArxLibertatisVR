@@ -929,12 +929,7 @@ bool PrecastSpellsGui::isVisible() {
 void PrecastSpellsGui::updateRect(const Rectf & parent) {
 	
 	Vec2f size = m_iconSize * Vec2f(g_precast.size(), 1);
-	#if ARX_HAVE_OPENXR
-	if(isVRActive()) {
-		size.x *= 2.f; // Room for the gesture arrows (see vrArea)
-	}
-	#endif
-
+	
 	m_rect = createChild(parent, Anchor_BottomRight, size * m_scale, Anchor_BottomLeft);
 	
 	if(g_playerInventoryHud.rect().overlaps(m_rect + Vec2f(0.0f, indicatorVertSpacing))) {
@@ -966,13 +961,7 @@ void PrecastSpellsGui::update() {
 		Color color = Color::rgb(0, val * 0.5f, val);
 		
 		Rectf childRect = createChild(m_rect, Anchor_BottomLeft, m_iconSize * m_scale, Anchor_BottomLeft);
-		float step = m_iconSize.x * m_scale;
-		#if ARX_HAVE_OPENXR
-		if(isVRActive()) {
-			step *= 2.f; // Room for the gesture arrows (see vrArea)
-		}
-		#endif
-		childRect.move(size_t(handle) * step, 0);
+		childRect.move(size_t(handle) * m_iconSize.x * m_scale, 0);
 		
 		SpellType typ = precastSlot.typ;
 		
@@ -993,39 +982,7 @@ void PrecastSpellsGui::update() {
 }
 
 void PrecastSpellsGui::draw() {
-
-	#if ARX_HAVE_OPENXR
-	if(isVRActive()) {
-		// VR: additive icons have no coverage in the interface layer, give them a dark backing to be visible
-		{
-			UseRenderState backing(render2D().blend());
-			for(size_t i = 0; i < m_icons.size(); i++) {
-				EERIEDrawBitmap(vrArea(i), 0.011f, nullptr, Color(0, 0, 0, 160));
-			}
-		}
-		// Arrows of the gestures that cast them (see VRControls): up, left, right
-		static TextureContainer * arrow = TextureContainer::LoadUI("graph/interface/icons/arrow_left");
-		UseRenderState state(render2D().blendAdditive());
-		for(size_t i = 0; i < m_icons.size() && i < 3 && arrow; i++) {
-			const Rectf & icon = m_icons[i].m_rect;
-			float a = icon.width() * 0.5f;
-			Color color = Color::rgb(0.8f, 0.7f, 0.4f);
-			if(i == 0) {
-				Rectf rect(icon.left + a * 0.5f, icon.top - a, icon.right - a * 0.5f, icon.top);
-				EERIEDrawBitmapUVs(rect, 0.01f, arrow, color, Vec2f(0.f, 1.f), Vec2f(0.f, 0.f), Vec2f(1.f, 1.f),
-				                   Vec2f(1.f, 0.f));
-			} else if(i == 1) {
-				Rectf rect(icon.left - a, icon.top + a * 0.5f, icon.left, icon.bottom - a * 0.5f);
-				EERIEDrawBitmap(rect, 0.01f, arrow, color);
-			} else {
-				Rectf rect(icon.right, icon.top + a * 0.5f, icon.right + a, icon.bottom - a * 0.5f);
-				EERIEDrawBitmapUVs(rect, 0.01f, arrow, color, Vec2f(1.f, 0.f), Vec2f(0.f, 0.f), Vec2f(1.f, 1.f),
-				                   Vec2f(0.f, 1.f));
-			}
-		}
-	}
-	#endif
-
+	
 	UseRenderState state(render2D().blendAdditive());
 	
 	for(PrecastSpellIconSlot & slot : m_icons) {
@@ -1254,15 +1211,6 @@ void DamagedEquipmentGui::update() {
 
 void DamagedEquipmentGui::draw() {
 
-	#if ARX_HAVE_OPENXR
-	bool damaged = std::any_of(std::begin(m_colors), std::end(m_colors), [](Color c) { return c != Color::black; });
-	if(isVRActive() && damaged) {
-		// VR: additive icons have no coverage in the interface layer, give them a dark backing to be visible
-		UseRenderState backing(render2D().blend());
-		EERIEDrawBitmap(m_rect, 0.001f, nullptr, Color(0, 0, 0, 160));
-	}
-	#endif
-
 	UseRenderState state(render2D().blendAdditive());
 	
 	for(long i = 0; i < 5; i++) {
@@ -1326,17 +1274,9 @@ void StealthGauge::draw() {
 	if(!m_visible) {
 		return;
 	}
-
-	#if ARX_HAVE_OPENXR
-	if(isVRActive()) {
-		// VR: additive icons have no coverage in the interface layer, give them a dark backing to be visible
-		UseRenderState backing(render2D().blend());
-		EERIEDrawBitmap(m_rect, 0.011f, nullptr, Color(0, 0, 0, 160));
-	}
-	#endif
-
+	
 	UseRenderState state(render2D().blendAdditive());
-
+	
 	EERIEDrawBitmap(m_rect, 0.01f, m_texture, m_color);
 }
 
@@ -1451,6 +1391,23 @@ void HudRoot::draw() {
 	hudSlider.left  -= lSLID_VALUE;
 	hudSlider.right += lSLID_VALUE;
 	
+	// The gauges are in the bottom corners
+	Rectf gaugeArea = hudSlider;
+	bool gaugesTogether = false;
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		/*
+		 * VR: the mana gauge next to the health gauge, away from the edges, for their round backing at the wrist (see
+		 * VRSystem::drawWristIconBackings), the icons next to them further away
+		 */
+		float margin = 40.f * m_scale;
+		gaugeArea = Rectf(gaugeArea.left + margin, gaugeArea.top, gaugeArea.right - margin, gaugeArea.bottom - margin);
+		gaugesTogether = true;
+	}
+	#endif
+	const float gaugesGap = 4.f * m_scale;
+	const float gaugesMargin = 40.f * m_scale;
+	
 	
 	hitStrengthGauge.updateRect(Rectf(g_size));
 	hitStrengthGauge.update();
@@ -1471,6 +1428,9 @@ void HudRoot::draw() {
 	{
 		Rectf spacer;
 		spacer.left = healthGauge.rect().right;
+		if(gaugesTogether) {
+			spacer.left += gaugesGap + healthGauge.rect().width() + gaugesMargin; // After the mana gauge
+		}
 		spacer.bottom = float(g_size.bottom);
 		spacer.top = spacer.bottom - indicatorVertSpacing;
 		spacer.right = spacer.left + indicatorHorizSpacing;
@@ -1508,7 +1468,7 @@ void HudRoot::draw() {
 		cursorSetInteraction();
 	}
 	
-	healthGauge.updateRect(hudSlider);
+	healthGauge.updateRect(gaugeArea);
 	healthGauge.updateInput(mousePos);
 	healthGauge.update();
 	
@@ -1539,7 +1499,12 @@ void HudRoot::draw() {
 	memorizedRunesHud.draw();
 	
 	if(player.Interface & INTER_LIFE_MANA) {
-		manaGauge.update(hudSlider);
+		Rectf manaArea = gaugeArea;
+		if(gaugesTogether) {
+			manaArea.left = healthGauge.rect().right + gaugesGap;
+			manaArea.right = manaArea.left + healthGauge.rect().width();
+		}
+		manaGauge.update(manaArea);
 		manaGauge.updateInput(mousePos);
 		manaGauge.draw();
 		
@@ -1556,7 +1521,8 @@ void HudRoot::draw() {
 	if(!(player.Interface & INTER_COMBATMODE) && (player.Interface & INTER_MINIBACK)) {
 		
 		{
-			Rectf spacer = createChild(manaGauge.rect(), Anchor_TopRight, Vec2f(0, 3), Anchor_BottomRight);
+			Vec2f gap(0.f, gaugesTogether ? gaugesMargin : 3.f); // Out of the round backing of the gauges
+			Rectf spacer = createChild(manaGauge.rect(), Anchor_TopRight, gap, Anchor_BottomRight);
 			backpackIconGui.update(spacer);
 		}
 		

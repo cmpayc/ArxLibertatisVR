@@ -182,9 +182,13 @@ private:
 	                bool interactive);
 	//! Attach the HUD to the wrists, see \ref VRHudAreas
 	void updateWristPanels(const VRHudAreas & areas);
+	//! Round backings, 30% transparent, for the icons at the wrist, painted into the interface image
+	void drawWristIconBackings();
 	//! Show the loot of a dead NPC like a sheet of paper lying on the body, see \ref VRHudAreas
 	void updateLootPanel(const VRHudAreas & areas);
 	//! Show the name of the pointed object above it, facing the user, see VRHudAreas
+	//! Show icons in the view, following the head: the stealth icon, see \ref VRHudAreas
+	void updateViewIconPanels(const VRHudAreas & areas);
 	void updateLabelPanel(const VRHudAreas & areas);
 	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
 	void updatePointer();
@@ -244,6 +248,7 @@ private:
 		XrExtent2Df extent;
 		bool interactive; // The laser pointer can click on it
 		bool useOnTap = false; // A short trigger click uses the item (right click), holding it drags
+		bool onWrist = false; // At a wrist (health, mana, inventory): no beam is drawn to it
 	};
 	std::vector<UIPanel> m_uiPanels; // Submitted in this frame
 	std::vector<UIPanel> m_visiblePanels; // Shown in the last frame

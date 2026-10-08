@@ -19,8 +19,8 @@
 
 #include "vr/VRHud.h"
 
+#include <algorithm>
 #include <cmath>
-#include <iterator>
 
 #include "cinematic/CinematicController.h"
 #include "core/Config.h"
@@ -47,6 +47,17 @@ namespace {
 Rect toPixels(const Rectf & area) {
 	return Rect(s32(std::floor(area.left)), s32(std::floor(area.top)),
 	            s32(std::ceil(area.right)), s32(std::ceil(area.bottom)));
+}
+
+//! The square around an icon with its round backing (see VRSystem::endUIRender), empty for none
+Rect toIconArea(const Rectf & icon) {
+	if(icon.width() <= 0.f || icon.height() <= 0.f) {
+		return Rect();
+	}
+	// The circle around the whole icon (its corners too), a little larger
+	float half = 0.55f * std::sqrt(icon.width() * icon.width() + icon.height() * icon.height());
+	Vec2f center = icon.center();
+	return toPixels(Rectf(center.x - half, center.y - half, center.x + half, center.y + half));
 }
 
 Rect merge(const Rect & a, const Rect & b) {
@@ -120,22 +131,15 @@ VRHudAreas getVRHudAreas() {
 	}
 	
 	if(player.Interface & INTER_LIFE_MANA) {
-		areas.health = toPixels(g_hudRoot.healthGaugeArea());
-		areas.mana = toPixels(g_hudRoot.manaGaugeArea());
-		areas.equipment = toPixels(g_hudRoot.damagedEquipmentArea());
+		// Next to each other in VR (see HudRoot::draw), in one circle
+		areas.gauges = toIconArea(g_hudRoot.healthGaugeArea() | g_hudRoot.manaGaugeArea());
+		areas.equipment = toIconArea(g_hudRoot.damagedEquipmentIconArea());
 	}
-	areas.stealth = toPixels(g_hudRoot.stealthArea());
-	areas.changeLevel = toPixels(g_hudRoot.changeLevelArea());
+	areas.stealth = toIconArea(g_hudRoot.stealthArea());
+	areas.changeLevel = toIconArea(g_hudRoot.changeLevelArea());
 	if(!(player.Interface & INTER_COMBATMODE) && (player.Interface & INTER_MINIBACK)) {
-		areas.levelUp = toPixels(g_hudRoot.levelUpArea()); // Only drawn then
+		areas.levelUp = toIconArea(g_hudRoot.levelUpArea()); // Only drawn then
 	}
-	
-	if(!(player.Interface & INTER_PLAYERBOOK)) {
-		for(size_t i = 0; i < std::size(areas.precast); i++) {
-			areas.precast[i] = toPixels(g_hudRoot.precastArea(i));
-		}
-	}
-	
 	if(player.Interface & (INTER_INVENTORY | INTER_INVENTORYALL)) {
 		areas.inventory = toPixels(g_playerInventoryHud.openArea());
 	}

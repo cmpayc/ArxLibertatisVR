@@ -361,6 +361,7 @@ struct WristPose {
 	bool valid = false;
 	Vec3f position = Vec3f(0.f);
 	glm::quat gripOrientation = glm::quat(1.f, 0.f, 0.f, 0.f);
+	Vec3f elbow = Vec3f(0.f);
 };
 WristPose g_wristPoses[VRHandCount];
 
@@ -586,6 +587,7 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	pose.valid = true;
 	pose.position = skeleton.bones[arm.wrist].anim.trans;
 	pose.gripOrientation = gripOrientation;
+	pose.elbow = skeleton.bones[arm.elbow].anim.trans;
 
 }
 
@@ -978,6 +980,18 @@ bool getVRBeltTransform(VRHand side, const EERIE_3DOBJ & item, float scale, Tran
 	centre = g_hipPositions[side] + outward * BeltOffset;
 	Vec3f middle = item.vertexlist[bottom].v + axis * 0.5f; // Object space, drawn as rotation * vertex * scale + pos
 	transform = TransformInfo(centre - (rotation * middle) * scale, rotation, scale);
+	return true;
+}
+
+bool getVRForearm(VRHand hand, Vec3f & elbow, Vec3f & wrist) {
+	
+	const WristPose & pose = g_wristPoses[hand];
+	if(!isVRActive() || !pose.valid || glm::distance(pose.elbow, pose.position) < 1.f) {
+		return false;
+	}
+	
+	elbow = pose.elbow;
+	wrist = pose.position;
 	return true;
 }
 

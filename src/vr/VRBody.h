@@ -50,6 +50,10 @@ void applyVRBodyIK(Entity & player, Skeleton & skeleton);
  */
 bool getVRWristPose(VRHand hand, Vec3f & position, glm::quat & gripOrientation);
 
+//! The elbow and wrist joints of the posed player model, in the world, in the last frame - to attach things to the
+//! forearm (they do not turn when the hand bends)
+bool getVRForearm(VRHand hand, Vec3f & elbow, Vec3f & wrist);
+
 //! The hip joint of the posed player model on the given side, in the world, in the last frame
 bool getVRHipPosition(VRHand side, Vec3f & position);
 
