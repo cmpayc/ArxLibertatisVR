@@ -65,6 +65,8 @@ int g_previousHands = 0;
 Vec2f g_headVelocity(0.f); // horizontal, m/s
 Vec2f g_handsVelocity(0.f);
 float g_settleTime = 0.f; // how long the head has been offset without leaning
+bool g_uprightHeightValid = false;
+float g_uprightHeight = 0.f; // head height when standing upright (stage space, meters, slowly averaged)
 bool g_userEyeHeightValid = false;
 float g_userEyeHeight = 0.f; // highest the head has been: the user's standing eye height (stage space, meters)
 float g_bodyScale = 1.f; // scale of the player model to match the user's height
@@ -95,14 +97,44 @@ glm::quat toQuat(const XrQuaternionf & q) {
 	return glm::quat(q.w, q.x, q.y, q.z);
 }
 
-//! The player body turns with the head (smoothed)
+/*!
+ * The player body faces where the controllers point (user request, as in other VR games): turning only the head
+ * looks around without turning the body. The neck only twists so far: past that the body is turned with the head.
+ * Without tracked controllers the body faces where the head looks.
+ */
 void updateBodyYaw(float headYaw) {
-	
+
+	const float MaxNeckTwist = 45.f; // degrees between the head and the body
+
+	// The horizontal directions of both controllers, each weighted by how level it points
+	Vec2f sum(0.f);
+	for(VRHand hand : { VRHandLeft, VRHandRight }) {
+		const VRHandState & state = g_vr->getInput().getHand(hand);
+		Vec3f origin, direction;
+		if(state.active && state.aim.valid
+		   && trackingRayToWorld(state.aim.position, state.aim.orientation, origin, direction)) {
+			sum += Vec2f(direction.x, direction.z);
+		}
+	}
+	float targetYaw = headYaw;
+	if(glm::length(sum) > 0.3f) {
+		float handsYaw = Camera::getLookAtAngle(Vec3f(0.f), Vec3f(sum.x, 0.f, sum.y)).getYaw();
+		targetYaw = headYaw + glm::clamp(vr::wrapDegrees(handsYaw - headYaw), -MaxNeckTwist, MaxNeckTwist);
+	}
+
 	float bodyYaw = player.angle.getYaw();
-	float difference = vr::wrapDegrees(headYaw - bodyYaw);
-	
+	float difference = vr::wrapDegrees(targetYaw - bodyYaw);
+
+	// The neck limit is kept at once, the rest is smoothed (controllers are less steady than the head)
+	float twist = vr::wrapDegrees(headYaw - bodyYaw);
+	if(std::abs(twist) > MaxNeckTwist) {
+		float overshoot = twist - glm::clamp(twist, -MaxNeckTwist, MaxNeckTwist);
+		bodyYaw += overshoot;
+		difference -= overshoot;
+	}
+
 	float dt = g_vr->getFrameDuration();
-	bodyYaw += difference * (1.f - std::exp(-dt * 12.f));
+	bodyYaw += difference * (1.f - std::exp(-dt * 8.f));
 	player.angle.setYaw(MAKEANGLE(bodyYaw));
 	player.desiredangle.setYaw(player.angle.getYaw());
 	
@@ -303,20 +335,39 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 		root += headDelta * follow;
 		
 		/*
-		 * A lean rotates around the hips and lowers the head. An offset without that drop (shifting the shoulders,
-		 * leftovers of earlier movement) settles: the feet slowly move back under the head.
+		 * A lean rotates around the hips and lowers the head, and leaning to the side usually tilts it. An offset
+		 * with the head upright (shifting the shoulders, the feet having followed the hands during a lean that has
+		 * ended) settles: the feet move back under the head. The drop is measured from the recent standing height,
+		 * not the height at the last recenter (standing a little lower than then kept the feet from settling).
 		 */
 		Vec2f lean = headXZ - root;
 		float leanLength = glm::length(lean);
 		float expectedDrop = HipToEyes - std::sqrt(std::max(HipToEyes * HipToEyes - leanLength * leanLength, 0.f));
-		float drop = -head.y;
-		if(leanLength > 0.05f && drop < expectedDrop * 0.5f) {
+		Vec3f headRight = toQuat(views[0]->pose.orientation) * Vec3f(1.f, 0.f, 0.f);
+		bool tilted = std::abs(headRight.y) > std::sin(glm::radians(10.f));
+		/*
+		 * The upright head height: a slow average (3 s) while the head is level, not the highest the head has been
+		 * (seen: 14 cm above the relaxed stance, so every stance counted as a lean). A forward lean held for long
+		 * becomes the new upright height and settles.
+		 */
+		if(!g_uprightHeightValid) {
+			g_uprightHeight = headStage.y;
+			g_uprightHeightValid = true;
+		} else if(!tilted) {
+			g_uprightHeight += (headStage.y - g_uprightHeight) * (1.f - std::exp(-dt / 3.f));
+		}
+		float drop = std::max(g_uprightHeight - headStage.y, 0.f);
+		bool leaning = tilted || drop > expectedDrop * 0.5f + 0.02f;
+		// Also while still straightening up (user request: the body came back only after a while); once started, all
+		// the way under the head
+		float settleFrom = (g_settleTime > 0.f) ? 0.01f : 0.04f;
+		if(leanLength > settleFrom && !leaning) {
 			g_settleTime += dt;
 		} else {
 			g_settleTime = 0.f;
 		}
-		if(g_settleTime > 1.f) {
-			root += lean * (1.f - std::exp(-dt * 2.f));
+		if(g_settleTime > 0.15f) {
+			root += lean * (1.f - std::exp(-dt * 5.f));
 		}
 		
 		lean = headXZ - root;
