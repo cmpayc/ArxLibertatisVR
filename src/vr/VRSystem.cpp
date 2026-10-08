@@ -1479,7 +1479,7 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 	// The inventory is turned counter-clockwise by this (user request: its left side lower)
 	const float InventoryTilt = glm::radians(-15.f);
 	// The inventory is further out from the wrist than the panels were (user request)
-	const float InventoryOut = 0.0075f;
+	const float InventoryOut = 0.0175f;
 	// The map is turned clockwise by this (user request; the tilt is mirrored on the right hand, see Mount)
 	const float MapTilt = glm::radians(-45.f);
 	// Sideways shift of the panels: to the left on the left wrist, to the right on the right wrist
@@ -1608,7 +1608,8 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 				Vec2f extent = size(*area, gaugePixelSize);
 				if(extent.x > 0.f) {
 					bool gauges = (area == &areas.gauges);
-					add(forearm, *area, gaugePixelSize, Vec2f(x + 0.5f * extent.x, 0.f), gauges,
+					// Not clicked (user request: only the inventory on the wrist is)
+					add(forearm, *area, gaugePixelSize, Vec2f(x + 0.5f * extent.x, 0.f), false,
 					    gauges ? GaugesTilt : 0.f);
 					x += extent.x + Gap;
 				}
