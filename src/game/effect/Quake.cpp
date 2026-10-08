@@ -67,6 +67,25 @@ void RemoveQuakeFX() {
 	QuakeFx.intensity = 0.f;
 }
 
+float getQuakeStrength() {
+
+	if(QuakeFx.intensity <= 0.f) {
+		return 0.f;
+	}
+
+	GameDuration tim = g_gameTime.now() - QuakeFx.start;
+	if(tim >= QuakeFx.duration) {
+		QuakeFx.intensity = 0.f;
+		return 0.f;
+	}
+
+	if(!config.video.screenShake) {
+		return 0.f;
+	}
+
+	return QuakeFx.intensity * (1.f - (tim / QuakeFx.duration)) * 0.01f;
+}
+
 void ManageQuakeFX(Camera * cam) {
 	if(QuakeFx.intensity > 0.f) {
 		GameDuration tim = g_gameTime.now() - QuakeFx.start;

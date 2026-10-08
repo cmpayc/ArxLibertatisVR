@@ -36,6 +36,7 @@
 #include "game/Spells.h"
 #include "game/magic/Precast.h"
 #include "game/magic/SpellData.h"
+#include "game/effect/Quake.h"
 #include "graphics/Draw.h"
 #include "graphics/Math.h"
 #include "graphics/Raycast.h"
@@ -410,6 +411,21 @@ void updateItemWheel() {
 	}
 }
 
+/*!
+ * Earthquakes and explosions shake the camera in the game: in VR that would be uncomfortable (the camera is not shaken,
+ * see updateActiveCamera), both controllers vibrate with the strength of the shaking instead
+ */
+void updateQuakeVibration() {
+	float strength = getQuakeStrength();
+	if(strength <= 0.f) {
+		return;
+	}
+	float amplitude = glm::clamp(strength * 0.5f, 0.1f, 1.f);
+	for(VRHand hand : { VRHandLeft, VRHandRight }) {
+		g_vr->getInput().vibrate(hand, amplitude, 0.05f); // Renewed every frame while it lasts
+	}
+}
+
 } // anonymous namespace
 
 bool isVRActive() {
@@ -431,6 +447,7 @@ void updateVRControls() {
 	const VRHandState & off = input.getHand(offHand());
 
 	updateSpellWheel();
+	updateQuakeVibration();
 	updateItemWheel();
 
 	/*

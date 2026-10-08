@@ -29,4 +29,10 @@ void RemoveQuakeFX();
 
 void ManageQuakeFX(Camera * cam);
 
+/*!
+ * The strength of the current quake (as the camera would shake, about 0 to 2), 0 if there is none or screen shaking is
+ * disabled - for effects in place of shaking the camera (VR: the controllers vibrate)
+ */
+float getQuakeStrength();
+
 #endif // ARX_GAME_EFFECT_QUAKE_H
