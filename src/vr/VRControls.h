@@ -121,4 +121,8 @@ void stowVRHeldItems();
 //! Draw a screen effect (hit flash, fade...) over the whole view in both eyes: \ref g_fullScreenColorHook
 bool drawVRFullView(Color color);
 
+//! Comfort vignette: darken the edges of the view while moving artificially, see config.vr.vignette (during the stereo
+//! render)
+void drawVRVignette();
+
 #endif // ARX_VR_VRCONTROLS_H

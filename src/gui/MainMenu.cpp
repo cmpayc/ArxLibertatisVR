@@ -1457,6 +1457,20 @@ public:
 		updateTurnWidgets();
 
 		{
+			std::string_view label = getLocalised("system_menus_options_vr_vignette", "Comfort vignette");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->addEntry(getLocalised("system_menus_options_vr_vignette_off", "Off"));
+			cb->addEntry(getLocalised("system_menus_options_vr_vignette_low", "Low"));
+			cb->addEntry(getLocalised("system_menus_options_vr_vignette_medium", "Medium"));
+			cb->addEntry(getLocalised("system_menus_options_vr_vignette_high", "High"));
+			cb->setValue(config.vr.vignette);
+			cb->valueChanged = [](int pos, std::string_view /* string */) noexcept {
+				config.vr.vignette = pos;
+			};
+			addCenter(std::move(cb));
+		}
+
+		{
 			std::string_view label = getLocalised("system_menus_options_vr_movement", "Move towards");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
 			cb->addEntry(getLocalised("system_menus_options_vr_movement_head", "Head"));

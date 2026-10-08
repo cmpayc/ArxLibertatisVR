@@ -2017,6 +2017,7 @@ void ArxGame::renderLevel() {
 	if(vrStereo) {
 		drawVRPointerBeam();
 		drawVRHandMenus();
+		drawVRVignette();
 		drawFadeInView(); // Over the whole view, both eyes
 		g_vr->endStereoRender(m_MainWindow->getSize());
 		GRenderer->Clear(Renderer::DepthBuffer);

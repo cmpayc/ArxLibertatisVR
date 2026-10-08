@@ -426,6 +426,30 @@ void updateQuakeVibration() {
 	}
 }
 
+float g_vignette = 0.f; //!< How far the comfort vignette is closed, 0 to 1 (see drawVRVignette)
+
+//! The comfort vignette closes while the player moves with the stick or turns smoothly, and opens again after
+void updateVignette(const VRHandState & main) {
+
+	float target = 0.f;
+	if(config.vr.vignette > 0 && ARXmenu.mode() == Mode_InGame && !BLOCK_PLAYER_CONTROLS) {
+		Vec2f stick(0.f);
+		float yaw = 0.f;
+		if(getVRLocomotion(stick, yaw)) {
+			target = std::min(glm::length(stick), 1.f);
+		}
+		if(!config.vr.snapTurn) {
+			target = std::max(target, std::abs(applyDeadZone(Vec2f(main.thumbstick.x, 0.f)).x));
+		}
+	}
+
+	// Closes quickly when the motion starts, opens a bit more slowly
+	float rate = (target > g_vignette) ? 6.f : 3.f;
+	float step = rate * g_vr->getFrameDuration();
+	g_vignette = (target > g_vignette) ? std::min(g_vignette + step, target) : std::max(g_vignette - step, target);
+
+}
+
 } // anonymous namespace
 
 bool isVRActive() {
@@ -570,6 +594,8 @@ void updateVRControls() {
 	} else if(turn != 0.f) {
 		g_pendingTurn -= turn * config.vr.smoothTurnSpeed * g_vr->getFrameDuration();
 	}
+
+	updateVignette(main);
 
 }
 
@@ -1320,4 +1346,61 @@ bool drawVRFullView(Color color) {
 	GRenderer->ResetTexture(0);
 	EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
 	return true;
+}
+
+void drawVRVignette() {
+
+	if(g_vignette <= 0.f || config.vr.vignette <= 0 || !isVRActive() || !g_vr->isRenderingStereo()) {
+		return;
+	}
+
+	Vec3f eyes;
+	glm::mat3x3 head;
+	if(!getVRHeadPose(eyes, head)) {
+		return;
+	}
+
+	/*
+	 * A ring around the view direction on a plane in front of the eyes: clear inside, a gradient to black, then black
+	 * out to the side. While closing it moves in from outside the field of view to the clear radius of the setting.
+	 */
+	struct Angles { float clear; float black; };
+	const Angles Open = { 70.f, 85.f };
+	const Angles Closed[] = { { 40.f, 55.f }, { 32.f, 48.f }, { 24.f, 40.f } }; // Low, medium, high
+	const Angles & closed = Closed[std::clamp(config.vr.vignette, 1, 3) - 1];
+	float t = glm::smoothstep(0.f, 1.f, g_vignette);
+	float clear = glm::radians(glm::mix(Open.clear, closed.clear, t));
+	float black = glm::radians(glm::mix(Open.black, closed.black, t));
+	const float Outside = glm::radians(88.f);
+
+	const float Distance = 50.f; // cm in front of the eyes
+	Vec3f forward = head * Vec3f(0.f, 0.f, 1.f);
+	Vec3f right = head * Vec3f(1.f, 0.f, 0.f);
+	Vec3f up = head * Vec3f(0.f, 1.f, 0.f);
+	Vec3f center = eyes + forward * Distance;
+
+	constexpr size_t Segments = 48;
+	auto drawRing = [&](float innerAngle, float outerAngle, float innerAlpha, float outerAlpha) {
+		float inner = Distance * std::tan(innerAngle);
+		float outer = Distance * std::tan(outerAngle);
+		ColorRGBA innerColor = Color(0, 0, 0, u8(innerAlpha * 255.f)).toRGBA();
+		ColorRGBA outerColor = Color(0, 0, 0, u8(outerAlpha * 255.f)).toRGBA();
+		TexturedVertex strip[(Segments + 1) * 2];
+		for(size_t i = 0; i <= Segments; i++) {
+			float angle = float(i) / float(Segments) * glm::two_pi<float>();
+			Vec3f direction = right * std::cos(angle) + up * std::sin(angle);
+			worldToClipSpace(center + direction * inner, strip[i * 2]);
+			worldToClipSpace(center + direction * outer, strip[i * 2 + 1]);
+			strip[i * 2].color = innerColor;
+			strip[i * 2 + 1].color = outerColor;
+			strip[i * 2].uv = strip[i * 2 + 1].uv = Vec2f(0.f);
+		}
+		EERIEDRAWPRIM(Renderer::TriangleStrip, strip, std::size(strip));
+	};
+
+	UseRenderState state(render2D());
+	GRenderer->ResetTexture(0);
+	drawRing(clear, black, 0.f, 1.f);
+	drawRing(black, Outside, 1.f, 1.f);
+
 }

@@ -261,6 +261,9 @@ public:
 		 */
 		std::string desktopView;
 
+		//! Darken the edges of the view while moving with the stick or turning smoothly: 0 (off) to 3 (strongest)
+		int vignette;
+
 	} vr;
 	
 	// section 'key'

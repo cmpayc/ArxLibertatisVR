@@ -93,7 +93,8 @@ constexpr const int
 	quicksaveSlots = 3,
 	bufferSize = 0,
 	quickLevelTransition = JumpToChangeLevel,
-	vrSnapTurnAngle = 30;
+	vrSnapTurnAngle = 30,
+	vrVignette = 0;
 
 constexpr const bool
 	fullscreen = true,
@@ -314,7 +315,8 @@ constexpr const std::string_view
 	vrThrowStrength = "throw_strength",
 	vrShowHud = "show_hud",
 	vrDebugRay = "debug_ray",
-	vrDesktopView = "desktop_view";
+	vrDesktopView = "desktop_view",
+	vrVignette = "vignette";
 
 // Input key options
 constexpr const std::string_view actions[NUM_ACTION_KEY] = {
@@ -603,6 +605,7 @@ bool Config::save() {
 	writer.writeKey(Key::vrShowHud, vr.showHud);
 	writer.writeKey(Key::vrDebugRay, vr.debugRay);
 	writer.writeKey(Key::vrDesktopView, vr.desktopView);
+	writer.writeKey(Key::vrVignette, vr.vignette);
 
 	// key
 	writer.beginSection(Section::Key);
@@ -765,6 +768,7 @@ bool Config::init(const fs::path & file) {
 	vr.showHud = reader.getKey(Section::VR, Key::vrShowHud, Default::vrShowHud);
 	vr.debugRay = reader.getKey(Section::VR, Key::vrDebugRay, Default::vrDebugRay);
 	vr.desktopView = reader.getKey(Section::VR, Key::vrDesktopView, Default::vrDesktopView);
+	vr.vignette = glm::clamp(reader.getKey(Section::VR, Key::vrVignette, Default::vrVignette), 0, 3);
 
 	// Get action key settings
 	for(size_t i = 0; i < NUM_ACTION_KEY; i++) {
