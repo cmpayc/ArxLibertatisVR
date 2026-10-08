@@ -1353,7 +1353,7 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 		// Desktop view: the interface on its own for menus
 		drawTextureToWindow(m_uiColor, windowSize, true);
 		if(image) {
-			updateUIPlacement(false);
+			updateUIPlacement(true); // Following the head (user request), like the panels in the game
 			addScreenPanel(Rect(m_uiSize.x, m_uiSize.y), true);
 		}
 		return;
@@ -1954,7 +1954,7 @@ void VRSystem::submitWindowAsUI(const Vec2i & windowSize) {
 
 	releaseSwapchainImage(m_uiSwapchain);
 
-	updateUIPlacement(false);
+	updateUIPlacement(true); // Following the head like the menus
 	addScreenPanel(Rect(m_uiSize.x, m_uiSize.y), true);
 
 }
