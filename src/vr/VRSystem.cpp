@@ -1114,7 +1114,7 @@ void VRSystem::endStereoRender(const Vec2i & windowSize) {
 	}
 
 	// Show the center of the left eye in the window, cropped to the window aspect ratio
-	if(windowSize.x > 0 && windowSize.y > 0) {
+	if(windowSize.x > 0 && windowSize.y > 0 && isDesktopViewShown()) {
 		Vec2i crop = m_eyeSize;
 		if(m_eyeSize.x * windowSize.y > windowSize.x * m_eyeSize.y) {
 			crop.x = m_eyeSize.y * windowSize.x / windowSize.y;
@@ -1753,6 +1753,10 @@ bool VRSystem::getInventoryPanel(Texture *& texture, Vec3f & position, glm::quat
 	return true;
 }
 
+bool VRSystem::isDesktopViewShown() {
+	return config.vr.desktopView != "off";
+}
+
 VRHand VRSystem::getPointerHand() const {
 	VRHand main = config.vr.leftHanded ? VRHandLeft : VRHandRight;
 	if(m_bookOpen && m_bookHand == main) {
@@ -2086,6 +2090,10 @@ void VRSystem::drawPanelsToWindow(const Vec2i & windowSize) {
 
 void VRSystem::drawToWindow(unsigned texture, const Vec2i & windowSize, bool clear,
                             const std::function<void()> & draw) {
+
+	if(!isDesktopViewShown()) {
+		return; // Nothing is drawn to the window (see config.vr.desktopView)
+	}
 
 	// Draw with the fixed-function pipeline, saving and restoring all state the renderer caches
 	GLint previousFramebuffer = 0;

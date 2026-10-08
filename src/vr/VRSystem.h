@@ -220,6 +220,8 @@ private:
 	//! The open book held in a hand, see \ref VRHudAreas
 	void updateBookPanel(const VRHudAreas & areas);
 	void updateLabelPanel(const VRHudAreas & areas);
+	//! \return false if nothing is drawn to the desktop window (see config.vr.desktopView)
+	static bool isDesktopViewShown();
 	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
 	//! The panels of this frame as the left eye sees them, over the desktop view (like the headset)
 	void drawPanelsToWindow(const Vec2i & windowSize);

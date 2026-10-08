@@ -464,8 +464,16 @@ bool ArxGame::initWindow(RenderWindow * window) {
 	noVSync = noVSync || g_vr; // The OpenXR runtime paces frames
 	#endif
 	m_MainWindow->setVSync(noVSync ? 0 : config.video.vsync);
-	
-	setWindowSize(config.video.fullscreen);
+
+	#if ARX_HAVE_OPENXR
+	if(g_vr && config.vr.desktopView != "fullscreen") {
+		// VR: a small window instead of the full screen (user request), see config.vr.desktopView
+		getWindow()->setWindowSize(Vec2i(1280, 720));
+	} else
+	#endif
+	{
+		setWindowSize(config.video.fullscreen);
+	}
 	
 	if(!m_MainWindow->initialize()) {
 		m_MainWindow = nullptr;
@@ -1064,7 +1072,13 @@ void ArxGame::onWindowGotFocus(const Window & /* window */) {
 }
 
 void ArxGame::onWindowLostFocus(const Window & /* window */) {
-	
+
+	#if ARX_HAVE_OPENXR
+	if(g_vr && g_vr->hasSession()) {
+		return; // The headset is played, not the desktop window (it may even be hidden)
+	}
+	#endif
+
 	// TODO(option-control) add a config option for this
 	ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
 	TRUE_PLAYER_MOUSELOOK_ON = false;
@@ -1124,7 +1138,12 @@ void ArxGame::run() {
 		
 		platform::reapZombies();
 		
-		if(m_MainWindow->isVisible() && !m_MainWindow->isMinimized() && m_bReady) {
+		bool showing = m_MainWindow->isVisible() && !m_MainWindow->isMinimized();
+		#if ARX_HAVE_OPENXR
+		// In VR the headset shows the game, whatever happens to the desktop window (it may be hidden)
+		showing = showing || (g_vr && g_vr->hasSession());
+		#endif
+		if(showing && m_bReady) {
 			doFrame();
 			m_MainWindow->processEvents(/*waitForEvent = */false);
 		} else {
@@ -1142,7 +1161,12 @@ void ArxGame::run() {
  */
 void ArxGame::doFrame() {
 	
-	if(config.video.fpsLimit && !benchmark::isEnabled()) {
+	bool limitFps = config.video.fpsLimit && !benchmark::isEnabled();
+	#if ARX_HAVE_OPENXR
+	// The OpenXR runtime paces the frames (at the headset's rate, not the monitor's)
+	limitFps = limitFps && !g_vr;
+	#endif
+	if(limitFps) {
 		
 		PlatformInstant now = platform::getTime();
 		

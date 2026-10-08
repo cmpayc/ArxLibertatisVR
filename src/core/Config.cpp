@@ -72,7 +72,8 @@ constexpr const std::string_view
 	extensionOverride,
 	thumbnailSize = BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_WIDTH) "x"
 	                BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_HEIGHT),
-	vrRuntime = "auto";
+	vrRuntime = "auto",
+	vrDesktopView = "fullscreen";
 
 constexpr const int
 	refreshRate = 0,
@@ -312,7 +313,8 @@ constexpr const std::string_view
 	vrBodyRadius = "body_radius",
 	vrThrowStrength = "throw_strength",
 	vrShowHud = "show_hud",
-	vrDebugRay = "debug_ray";
+	vrDebugRay = "debug_ray",
+	vrDesktopView = "desktop_view";
 
 // Input key options
 constexpr const std::string_view actions[NUM_ACTION_KEY] = {
@@ -600,6 +602,7 @@ bool Config::save() {
 	writer.writeKey(Key::vrThrowStrength, vr.throwStrength);
 	writer.writeKey(Key::vrShowHud, vr.showHud);
 	writer.writeKey(Key::vrDebugRay, vr.debugRay);
+	writer.writeKey(Key::vrDesktopView, vr.desktopView);
 
 	// key
 	writer.beginSection(Section::Key);
@@ -761,6 +764,7 @@ bool Config::init(const fs::path & file) {
 	vr.throwStrength = glm::clamp(reader.getKey(Section::VR, Key::vrThrowStrength, Default::vrThrowStrength), 0.f, 5.f);
 	vr.showHud = reader.getKey(Section::VR, Key::vrShowHud, Default::vrShowHud);
 	vr.debugRay = reader.getKey(Section::VR, Key::vrDebugRay, Default::vrDebugRay);
+	vr.desktopView = reader.getKey(Section::VR, Key::vrDesktopView, Default::vrDesktopView);
 
 	// Get action key settings
 	for(size_t i = 0; i < NUM_ACTION_KEY; i++) {

@@ -254,6 +254,12 @@ public:
 		bool showHud;
 		//! Draw the in-world hand ray for debugging
 		bool debugRay;
+		/*!
+		 * The desktop window while playing in VR: "fullscreen" (the video settings), "window" (1280x720) or "off"
+		 * (a 1280x720 window that is not drawn to). The interface is drawn at the window's resolution for the headset
+		 * too: a smaller window makes it cheaper and less sharp.
+		 */
+		std::string desktopView;
 
 	} vr;
 	
