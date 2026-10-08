@@ -53,6 +53,9 @@ Entity * getVRCarriedItem(const Entity & entity, TransformInfo & transform);
 //! \return true while a hand is at the torch on the belt: its grip takes the torch (not a click or grab)
 [[nodiscard]] bool isVRHandAtBeltTorch(VRHand hand);
 
+//! Put the lit torch away, unlit, on the belt (the hands are needed, e.g. for the book)
+void hangVRTorchOnBelt();
+
 //! Swing detection and hit checks, in place of ManageCombatModeAnimations - once per frame in combat mode
 void updateVRCombat();
 

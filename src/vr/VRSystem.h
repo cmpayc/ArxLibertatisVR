@@ -33,6 +33,8 @@
 #include "math/Types.h"
 #include "vr/VRInput.h"
 
+class Texture;
+
 struct VRHudAreas;
 
 
@@ -152,6 +154,31 @@ public:
 	[[nodiscard]] bool isMagicMode() const { return m_magicMode; }
 	//! \return true if the spell drawn in the last magic mode is stored instead of cast (the grip held while drawing)
 	[[nodiscard]] bool isMagicPrecast() const { return m_magicPrecast; }
+	
+	//! \return true while the book is open, held in a hand (see updateBookPanel)
+	[[nodiscard]] bool isBookInHand() const { return m_bookOpen; }
+	//! The hand holding the open book
+	[[nodiscard]] VRHand getBookHand() const { return m_bookHand; }
+	//! The hand pointing at panels and the world: the main hand, the other one while the main hand holds the book
+	[[nodiscard]] VRHand getPointerHand() const;
+	/*!
+	 * Where the open book is held, in the tracking space: the center of its pages (held by a bottom corner, facing the
+	 * user) and the size of its cover in metres
+	 */
+	bool getBookPose(Vec3f & position, glm::quat & orientation, Vec2f & coverSize) const;
+	/*!
+	 * The book as it is drawn in the interface (upside down: OpenGL images start at the bottom) and its size with the
+	 * bookmarks in metres, nullptr while it is closed
+	 */
+	[[nodiscard]] Texture * getBookTexture(Vec2f & panelSize) const {
+		panelSize = m_bookPanel.size;
+		return (m_bookOpen && m_bookPanel.active) ? m_bookPanel.texture : nullptr;
+	}
+	/*!
+	 * The open inventory at the wrist, drawn in the world like the book: its texture (upside down), where it is in the
+	 * tracking space now (attached to the wrist) and its size in metres, false if it is not shown
+	 */
+	bool getInventoryPanel(Texture *& texture, Vec3f & position, glm::quat & orientation, Vec2f & size) const;
 
 	//! Acquire the current swapchain image for an eye and return its OpenGL texture name
 	unsigned acquireEyeImage(size_t eye);
@@ -189,6 +216,8 @@ private:
 	//! Show the name of the pointed object above it, facing the user, see VRHudAreas
 	//! Show icons in the view, following the head: the stealth icon, see \ref VRHudAreas
 	void updateViewIconPanels(const VRHudAreas & areas);
+	//! The open book held in a hand, see \ref VRHudAreas
+	void updateBookPanel(const VRHudAreas & areas);
 	void updateLabelPanel(const VRHudAreas & areas);
 	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
 	void updatePointer();
@@ -248,7 +277,8 @@ private:
 		XrExtent2Df extent;
 		bool interactive; // The laser pointer can click on it
 		bool useOnTap = false; // A short trigger click uses the item (right click), holding it drags
-		bool onWrist = false; // At a wrist (health, mana, inventory): no beam is drawn to it
+		bool noBeam = false; // No beam is drawn to it, the cursor is enough (the wrists, the book)
+		bool hidden = false; // Not shown as a quad layer, only pointed at (drawn in the world: the book)
 	};
 	std::vector<UIPanel> m_uiPanels; // Submitted in this frame
 	std::vector<UIPanel> m_visiblePanels; // Shown in the last frame
@@ -272,6 +302,29 @@ private:
 	bool m_triggerOnItem; // The trigger was pressed on an item in the world (a tap, not magic)
 	bool m_magicDrawing; // The trigger press may draw a rune or tap to toggle the magic mode (see updatePointer)
 	bool m_magicMode; // Toggled by a tap of the trigger in the world: the game's magic mode is held
+	bool m_bookOpen; // The book is open, held in a hand
+	VRHand m_bookHand;
+	float m_bookPixelSize; // m per interface pixel of the book panel
+	Vec2f m_bookCoverSize; // m
+	/*!
+	 * An interface panel drawn in the world, so that the hands are in front of it (a quad layer would cover them): a
+	 * copy of its part of the interface, and where it is relative to the wrist it is attached to
+	 */
+	struct WorldPanel {
+		Texture * texture = nullptr;
+		Vec2i textureSize = Vec2i(0);
+		Vec2f size = Vec2f(0.f); // m
+		bool active = false;
+		VRHand hand = VRHandLeft;
+		Vec3f localPosition = Vec3f(0.f);
+		glm::quat localOrientation = glm::quat(1.f, 0.f, 0.f, 0.f);
+	};
+	WorldPanel m_bookPanel; // With the bookmarks
+	WorldPanel m_inventoryPanel;
+	//! Copy a part of the interface into the texture of a panel drawn in the world
+	bool copyToWorldPanel(WorldPanel & panel, const Rect & area, float pixelSize);
+	//! The model wrist joint and the controller orientation it follows, in the tracking space (else the controller)
+	bool getWristFrame(VRHand hand, Vec3f & joint, glm::quat & grip) const;
 	bool m_magicStroke; // The trigger press draws a rune (moved or held long enough, not a tap)
 	bool m_magicPrecast; // The grip was held while drawing a rune in this magic mode: the spell is stored
 	float m_magicCancelTime; // s left for a second tap ending the latest lasting spell, negative if none

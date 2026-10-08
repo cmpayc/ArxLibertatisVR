@@ -433,6 +433,10 @@ namespace {
 //! \return true if a hand may touch and grab objects directly (instead of the game's cursor and drag)
 bool canGrabDirectly(VRHand handId) {
 
+	if(g_vr->isBookInHand()) {
+		return false; // One hand holds the book, the other points at it
+	}
+
 	// The hand holding a drawn weapon attacks with it (fists also grab, see VRCombat)
 	bool holdsWeapon = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE
 	                   && getVRWeaponHand() == handId;

@@ -46,6 +46,9 @@ public:
 	void apply(GLTextureStage * stage);
 	
 	void updateMaxAnisotropy();
+
+	//! The OpenGL texture name, e.g. to copy into it on the GPU
+	[[nodiscard]] GLuint getGLTexture() const noexcept { return tex; }
 	
 private:
 	

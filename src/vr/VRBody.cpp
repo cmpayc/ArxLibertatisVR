@@ -764,8 +764,13 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 						copyMirroredFingers(skeleton, bones.arms[VRHandRight], arm);
 					}
 				} else {
-					// The fist pose of the game's right hand, mirrored for the left hand
-					curlFingers(skeleton, arm, state, entity.anims[ANIM_1H_WAIT], &bones.arms[VRHandRight],
+					// The fist pose of the game's right hand, mirrored for the left hand: closed around the book held
+					// by its corner (see VRSystem::getBookPose)
+					VRHandState fingers = state;
+					if(g_vr && g_vr->isBookInHand() && g_vr->getBookHand() == VRHand(hand)) {
+						fingers.squeeze = fingers.trigger = 1.f;
+					}
+					curlFingers(skeleton, arm, fingers, entity.anims[ANIM_1H_WAIT], &bones.arms[VRHandRight],
 					            hand == VRHandLeft);
 				}
 			}

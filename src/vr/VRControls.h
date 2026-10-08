@@ -110,7 +110,11 @@ bool endVRLastSpell();
 //! \return true while the potion wheel is open (the off trigger alone, in the world)
 [[nodiscard]] bool isVRItemWheelOpen();
 
-//! Draw the menus at the hands in the world: the potion wheel and the stored spells (during the stereo render)
+//! Draw the menus at the hands in the world: the potion wheel, the stored spells and the cover of the book in a hand
+//! (during the stereo render)
 void drawVRHandMenus();
+
+//! Put the drawn weapon away and hang the lit torch on the belt, freeing both hands (when the book opens)
+void stowVRHeldItems();
 
 #endif // ARX_VR_VRCONTROLS_H

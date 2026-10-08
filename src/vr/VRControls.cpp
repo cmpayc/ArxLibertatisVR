@@ -44,6 +44,7 @@
 #include "graphics/Renderer.h"
 #include "graphics/data/Mesh.h"
 #include "graphics/data/TextureContainer.h"
+#include "graphics/texture/Texture.h"
 #include "graphics/texture/TextureStage.h"
 #include "gui/Cursor.h"
 #include "gui/book/Book.h"
@@ -72,6 +73,7 @@ bool g_snapTurnReady = true;
 std::vector<InputKeyId> g_pressedKeys;
 int g_weaponToggleFrames = 0; // Frames left of the ready weapon action from the sheath
 bool g_sneaking = false; // Toggled with the off stick click
+bool g_stowWeapon = false; // Put the drawn weapon away (see stowVRHeldItems)
 float g_bookHoldTime = -1.f; // s the B button is held, negative after a long press opened the spells
 int g_bookTapFrames = 0; // Frames left of the book action from a short press of B
 bool g_sheatheArmed = false; // The drawn weapon left the sheath: bringing it back sheathes it
@@ -291,7 +293,7 @@ void updateSpellWheel() {
 	const VRHandState & state = g_vr->getInput().getHand(hand);
 	bool fist = state.isPressed(VRButtonGrip) && state.isPressed(VRButtonTrigger) && state.grip.valid;
 	bool usable = !g_precast.empty() && !g_vr->isMagicMode() && ARXmenu.mode() == Mode_InGame
-	              && !BLOCK_PLAYER_CONTROLS && !isVRArcheryActive() && !isVRGrabbing();
+	              && !BLOCK_PLAYER_CONTROLS && !isVRArcheryActive() && !isVRGrabbing() && !g_vr->isBookInHand();
 
 	if(!g_spellWheelOpen) {
 		if(fist && usable && !g_vr->isPointingAtUI()
@@ -357,7 +359,7 @@ void updateItemWheel() {
 	bool weaponInHand = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE
 	                    && getVRWeaponHand() == hand;
 	bool usable = ARXmenu.mode() == Mode_InGame && !BLOCK_PLAYER_CONTROLS && !isVROffHandGrabbing()
-	              && !isVRArcheryActive() && !weaponInHand;
+	              && !isVRArcheryActive() && !weaponInHand && !g_vr->isBookInHand();
 
 	if(!g_wheelOpen) {
 		if(trigger && usable && state.wasPressed(VRButtonTrigger) && !g_vr->isPointingAtUI()) {
@@ -477,7 +479,9 @@ void updateVRControls() {
 	 * back over the shoulder, once it has left the sheath.
 	 */
 	bool toggleWeapon = false;
-	if(!(player.Interface & INTER_COMBATMODE)) {
+	if(g_vr->isBookInHand()) {
+		// Both hands are for the book (the weapon was put away when it opened, see stowVRHeldItems)
+	} else if(!(player.Interface & INTER_COMBATMODE)) {
 		g_sheatheArmed = false;
 		for(VRHand hand : { dominantHand(), offHand() }) {
 			if(input.getHand(hand).wasPressed(VRButtonGrip) && getSheathDistance(hand) < SheathRadius) {
@@ -491,6 +495,10 @@ void updateVRControls() {
 	} else if(g_sheatheArmed && getSheathDistance(g_weaponHand) < SheathRadius) {
 		g_sheatheArmed = false;
 		toggleWeapon = true;
+	}
+	if(g_stowWeapon && g_weaponToggleFrames == 0) {
+		g_stowWeapon = false;
+		toggleWeapon = (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE;
 	}
 	if(toggleWeapon && g_weaponToggleFrames == 0) {
 		g_weaponToggleFrames = 3;
@@ -509,7 +517,7 @@ void updateVRControls() {
 	// A fist (grip and trigger) punches instead (see VRCombat)
 	// In the world the off trigger opens the potion wheel instead (see updateItemWheel)
 	press(CONTROLS_CUST_USE, (off.isPressed(VRButtonTrigger) && !isVROffHandGrabbing() && !isVRFist(offHand())
-	                          && !g_wheelOpen && !isVRArcheryActive())
+	                          && !g_wheelOpen && !isVRArcheryActive() && !g_vr->isBookInHand())
 	                         || g_vr->isUseTapPressed());
 	// While holding an object the trigger stores it instead (see VRGrab)
 	/*
@@ -1116,6 +1124,129 @@ void drawStoredSpells(const HandMenuView & view) {
 	}
 }
 
+/*!
+ * Draw a part of the interface copied into a texture (upside down, OpenGL images start at the bottom) in the world, at
+ * a pose in the tracking space: with depth testing, so that the hands are in front of it (quad layers cover them)
+ */
+void drawWorldPanel(Texture * texture, const Vec3f & position, const glm::quat & orientation, const Vec2f & size) {
+	
+	if(!texture || texture->getStoredSize().x <= 0 || texture->getStoredSize().y <= 0) {
+		return;
+	}
+	
+	Vec3f across = orientation * Vec3f(0.5f * size.x, 0.f, 0.f);
+	Vec3f up = orientation * Vec3f(0.f, 0.5f * size.y, 0.f);
+	Vec3f corners[4];
+	const Vec2f sides[4] = { Vec2f(-1.f, 1.f), Vec2f(1.f, 1.f), Vec2f(-1.f, -1.f), Vec2f(1.f, -1.f) };
+	for(size_t i = 0; i < 4; i++) {
+		if(!trackingPointToWorld(position + across * sides[i].x + up * sides[i].y, corners[i])) {
+			return;
+		}
+	}
+	Vec2f uv = Vec2f(texture->getSize()) / Vec2f(texture->getStoredSize());
+	const Vec2f uvs[4] = { Vec2f(0.f, uv.y), Vec2f(uv.x, uv.y), Vec2f(0.f, 0.f), Vec2f(uv.x, 0.f) };
+	TexturedVertex quad[4];
+	for(size_t i = 0; i < 4; i++) {
+		worldToClipSpace(corners[i], quad[i]);
+		quad[i].uv = uvs[i];
+		quad[i].color = Color::white.toRGBA();
+	}
+	
+	// Premultiplied alpha like the interface
+	UseRenderState state(RenderState().depthTest().blend(BlendOne, BlendInvSrcAlpha));
+	UseTextureState textureState(TextureStage::FilterLinear, TextureStage::WrapClamp);
+	GRenderer->SetTexture(0, texture);
+	EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
+	GRenderer->ResetTexture(0);
+}
+
+/*!
+ * The open book held in a hand (see VRSystem::updateBookPanel) is the book interface, a picture of an open book: a
+ * leather block under it gives it thickness
+ */
+void drawBookCover() {
+	
+	const float Thickness = 0.025f; // m
+	
+	Vec3f position;
+	glm::quat orientation;
+	Vec2f size;
+	if(!g_vr->getBookPose(position, orientation, size)) {
+		return;
+	}
+	
+	// The corners of the block in the tracking space, then in the world
+	Vec3f across = orientation * Vec3f(0.5f * size.x, 0.f, 0.f);
+	Vec3f up = orientation * Vec3f(0.f, 0.5f * size.y, 0.f);
+	Vec3f normal = orientation * Vec3f(0.f, 0.f, 1.f);
+	Vec3f top = position - normal * 0.002f; // Just under the pages
+	Vec3f bottom = top - normal * Thickness;
+	Vec3f corners[8];
+	const Vec3f faces[2] = { top, bottom };
+	for(size_t i = 0; i < 8; i++) {
+		Vec3f corner = faces[i / 4] + across * ((i & 1) ? 1.f : -1.f) + up * ((i & 2) ? 1.f : -1.f);
+		if(!trackingPointToWorld(corner, corners[i])) {
+			return;
+		}
+	}
+	
+	static TextureContainer * leather = TextureContainer::Load("graph/obj3d/textures/item_book2");
+	// The sides and the face under the pages as two triangles each, from the corners: bit 0 right, bit 1 top, bit 2
+	// the back (drawn below)
+	const int quads[5][4] = {
+		{ 0, 1, 4, 5 }, { 2, 3, 6, 7 }, { 0, 2, 4, 6 }, { 1, 3, 5, 7 }, { 0, 1, 2, 3 },
+	};
+	UseRenderState state(render3D().cull(false)); // Seen from any side
+	GRenderer->SetTexture(0, leather);
+	auto drawQuad = [&](const Vec3f (&points)[4], const Vec2f (&uv)[4]) {
+		TexturedVertex v[4];
+		for(size_t i = 0; i < 4; i++) {
+			worldToClipSpace(points[i], v[i]);
+			v[i].uv = leather ? uv[i] * leather->uv : uv[i];
+			v[i].color = Color::gray(0.7f).toRGBA();
+		}
+		EERIEDRAWPRIM(Renderer::TriangleStrip, v, 4);
+	};
+	const Vec2f straight[4] = { Vec2f(0.f, 0.f), Vec2f(1.f, 0.f), Vec2f(0.f, 1.f), Vec2f(1.f, 1.f) };
+	for(const int (&quad)[4] : quads) {
+		const Vec3f points[4] = { corners[quad[0]], corners[quad[1]], corners[quad[2]], corners[quad[3]] };
+		drawQuad(points, straight);
+	}
+	/*
+	 * The back is the cover of a closed book twice (user request), one for each half of the open book, a little wider
+	 * so that they overlap in the middle: the texture turned 90° clockwise on the right half (its top along the right
+	 * side), the other way on the left half (user request)
+	 */
+	const float Overlap = 0.05f; // Of the width, past the middle
+	const Vec2f turnedRight[4] = { Vec2f(0.f, 1.f), Vec2f(0.f, 0.f), Vec2f(1.f, 1.f), Vec2f(1.f, 0.f) };
+	const Vec2f turnedLeft[4] = { Vec2f(1.f, 0.f), Vec2f(1.f, 1.f), Vec2f(0.f, 0.f), Vec2f(0.f, 1.f) };
+	auto along = [&](int from, int to, float t) { return corners[from] + (corners[to] - corners[from]) * t; };
+	const Vec3f leftHalf[4] = { corners[6], along(6, 7, 0.5f + Overlap), corners[4], along(4, 5, 0.5f + Overlap) };
+	Vec3f back = (corners[4] - corners[0]) * 0.02f; // The right half a little further back, not to flicker
+	const Vec3f rightHalf[4] = { along(6, 7, 0.5f - Overlap) + back, corners[7] + back,
+	                             along(4, 5, 0.5f - Overlap) + back, corners[5] + back };
+	drawQuad(leftHalf, turnedLeft);
+	drawQuad(rightHalf, turnedRight);
+	GRenderer->ResetTexture(0);
+	
+	// The pages: the book of the interface, as it was drawn in the last frame (see VRSystem::updateBookPanel)
+	Vec2f panelSize;
+	if(Texture * pages = g_vr->getBookTexture(panelSize)) {
+		drawWorldPanel(pages, position, orientation, panelSize);
+	}
+}
+
+//! The open inventory at the wrist, in the world so that the hands are in front of it (see VRSystem)
+void drawInventory() {
+	Texture * texture = nullptr;
+	Vec3f position;
+	glm::quat orientation;
+	Vec2f size;
+	if(g_vr->getInventoryPanel(texture, position, orientation, size)) {
+		drawWorldPanel(texture, position, orientation, size);
+	}
+}
+
 } // anonymous namespace
 
 void drawVRHandMenus() {
@@ -1124,6 +1255,9 @@ void drawVRHandMenus() {
 		return;
 	}
 	
+	drawBookCover();
+	drawInventory();
+	
 	HandMenuView view = getHandMenuView();
 	UseRenderState state(render3D().depthWrite(false).blend());
 	// The icons are transparent too: their texture alpha times the vertex alpha (the default ignores the latter)
@@ -1131,4 +1265,9 @@ void drawVRHandMenus() {
 	drawItemWheel(view);
 	drawStoredSpells(view);
 	GRenderer->GetTextureStage(0)->setAlphaOp(TextureStage::OpSelectArg1);
+}
+
+void stowVRHeldItems() {
+	g_stowWeapon = true; // Next update (see updateVRControls)
+	hangVRTorchOnBelt();
 }

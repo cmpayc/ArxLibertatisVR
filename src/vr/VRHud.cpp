@@ -93,7 +93,7 @@ VRHudAreas getVRHudAreas() {
 		Rectf book = g_playerBook.getArea();
 		float margin = 24.f * g_hudRoot.getScale();
 		book = Rectf(book.left - margin, book.top - margin, book.right + margin, book.bottom + margin);
-		areas.screen = merge(areas.screen, toPixels(book));
+		areas.book = toPixels(book); // Held in a hand (see VRSystem::updateBookPanel)
 	}
 	if(g_note.isOpen()) {
 		areas.screen = merge(areas.screen, toPixels(g_note.area()));

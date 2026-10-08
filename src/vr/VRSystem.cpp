@@ -43,6 +43,8 @@
 
 #include "graphics/Draw.h"
 #include "graphics/Renderer.h"
+#include "graphics/texture/Texture.h"
+#include "graphics/opengl/GLTexture.h"
 #include "graphics/opengl/OpenGLUtil.h"
 #include <epoxy/wgl.h>
 
@@ -349,6 +351,10 @@ VRSystem::VRSystem()
 	, m_triggerOnItem(false)
 	, m_magicDrawing(false)
 	, m_magicMode(false)
+	, m_bookOpen(false)
+	, m_bookHand(VRHandLeft)
+	, m_bookPixelSize(0.f)
+	, m_bookCoverSize(0.f)
 	, m_magicStroke(false)
 	, m_magicPrecast(false)
 	, m_magicCancelTime(-1.f)
@@ -939,6 +945,9 @@ void VRSystem::endFrame() {
 	if(m_shouldRender && m_uiSubmitted) {
 		quads.reserve(m_uiPanels.size());
 		for(const UIPanel & panel : m_uiPanels) {
+			if(panel.hidden) {
+				continue; // Drawn in the world instead (the book)
+			}
 			XrCompositionLayerQuad & quad = quads.emplace_back();
 			quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
 			// The virtual screen contains premultiplied alpha
@@ -1223,6 +1232,10 @@ void VRSystem::destroyUITarget() {
 		glDeleteTextures(1, &m_uiColor);
 	}
 	m_uiFramebuffer = m_uiDepth = m_uiColor = 0;
+	for(WorldPanel * panel : { &m_bookPanel, &m_inventoryPanel }) {
+		delete panel->texture;
+		*panel = WorldPanel();
+	}
 	m_uiSize = Vec2i(0);
 
 }
@@ -1305,6 +1318,7 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 		return;
 	}
 
+	m_inventoryPanel.active = false; // Until it is shown again (see updateWristPanels)
 	if(overScene && !config.vr.showHud) {
 		drawWristIconBackings();
 	}
@@ -1353,6 +1367,10 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 	 * switch to inventory drag and drop.
 	 */
 	VRHudAreas areas = getVRHudAreas();
+	updateBookPanel(areas);
+	if(m_bookOpen) {
+		return; // Only the book while it is open (user request)
+	}
 	if(!areas.screen.empty() && !isVRGrabbing()) {
 		updateUIPlacement(true);
 		addScreenPanel(areas.screen, isVRInterfaceOpen());
@@ -1427,6 +1445,10 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 	const float Tilt = glm::radians(45.f);
 	// The health and mana gauges are turned back counter-clockwise by this (user request)
 	const float GaugesTilt = glm::radians(-45.f);
+	// The inventory is turned counter-clockwise by this (user request: its left side lower)
+	const float InventoryTilt = glm::radians(-15.f);
+	// The inventory is further out from the wrist than the panels were (user request)
+	const float InventoryOut = 0.0075f;
 	// The map is turned clockwise by this (user request; the tilt is mirrored on the right hand, see Mount)
 	const float MapTilt = glm::radians(-45.f);
 	// Sideways shift of the panels: to the left on the left wrist, to the right on the right wrist
@@ -1465,18 +1487,10 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 		 * into the right palm, z backwards along the forearm). The top of the panels points to the fingers, turned by
 		 * the tilt.
 		 */
-		Vec3f wristJoint = state.grip.position + state.grip.orientation * config.vr.handOffset;
-		glm::quat grip = state.grip.orientation;
-		// Attached to the visible body: the model wrist lags behind the controller while walking
-		Vec3f modelWrist;
-		glm::quat modelGrip;
-		if(getVRWristPose(hand, modelWrist, modelGrip)) {
-			Vec3f position;
-			glm::quat orientation;
-			if(worldPoseToTracking(modelWrist, modelGrip, position, orientation)) {
-				wristJoint = position;
-				grip = orientation;
-			}
+		Vec3f wristJoint;
+		glm::quat grip;
+		if(!getWristFrame(hand, wristJoint, grip)) {
+			continue;
 		}
 		float side = (hand == VRHandLeft) ? 1.f : -1.f;
 		auto mountAt = [&](const Vec3f & joint, const Vec3f & fingers, const Vec3f & normal, const Vec3f & offset) {
@@ -1528,7 +1542,7 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 			if(!addUIPanel(area, pixelSize, position, mount.orientation(extraTilt), interactive)) {
 				return false;
 			}
-			m_uiPanels.back().onWrist = true;
+			m_uiPanels.back().noBeam = true;
 			return true;
 		};
 		auto size = [](const Rect & area, float pixelSize) {
@@ -1571,12 +1585,29 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 		}
 
 		// The inventory at the wrist, as before the icons moved to the forearm
-		if(!areas.inventory.empty() && visible(wrist)) {
+		Mount inventoryMount = wrist;
+		inventoryMount.position += wrist.normal * InventoryOut;
+		if(!areas.inventory.empty() && visible(inventoryMount)) {
 			float inventoryPixelSize = InventoryPixelSize / areas.hudScale;
 			Vec2f inventory = size(areas.inventory, inventoryPixelSize);
-			if(add(wrist, areas.inventory, inventoryPixelSize, Vec2f(0.f, InventoryBase + Gap + 0.5f * inventory.y),
-			       true)) {
-				m_uiPanels.back().useOnTap = true;
+			Rect visibleArea = areas.inventory & Rect(m_uiSize.x, m_uiSize.y);
+			if(add(inventoryMount, visibleArea, inventoryPixelSize, Vec2f(0.f, InventoryBase + Gap + 0.5f * inventory.y), true,
+			       InventoryTilt)
+			   && copyToWorldPanel(m_inventoryPanel, visibleArea, inventoryPixelSize)) {
+				/*
+				 * Drawn in the world (see drawVRHandMenus), so that the hands are in front of it (user request),
+				 * where it is relative to the wrist now: the panel here is only pointed at
+				 */
+				UIPanel & panel = m_uiPanels.back();
+				panel.useOnTap = true;
+				panel.hidden = true;
+				Vec3f position(panel.pose.position.x, panel.pose.position.y, panel.pose.position.z);
+				glm::quat orientation(panel.pose.orientation.w, panel.pose.orientation.x, panel.pose.orientation.y,
+				                      panel.pose.orientation.z);
+				glm::quat toWrist = glm::inverse(grip);
+				m_inventoryPanel.hand = hand;
+				m_inventoryPanel.localPosition = toWrist * (position - wristJoint);
+				m_inventoryPanel.localOrientation = toWrist * orientation;
 			}
 		}
 
@@ -1629,6 +1660,180 @@ void VRSystem::updateLootPanel(const VRHudAreas & areas) {
 
 	const float LootPixelSize = 0.0012f; // meters per interface pixel: a sheet of about 30 cm
 	addUIPanel(areas.loot, LootPixelSize / areas.hudScale, position, orientation, true);
+
+}
+
+bool VRSystem::copyToWorldPanel(WorldPanel & panel, const Rect & area, float pixelSize) {
+
+	panel.active = false;
+	Vec2i size(area.width(), area.height());
+	if(area.empty() || m_uiColor == 0) {
+		return false;
+	}
+	if(!panel.texture || panel.textureSize != size) {
+		delete panel.texture;
+		panel.texture = GRenderer->createTexture();
+		if(!panel.texture->create(size_t(size.x), size_t(size.y), Image::Format_R8G8B8A8)) {
+			delete panel.texture, panel.texture = nullptr;
+			return false;
+		}
+		panel.texture->upload(); // Allocates it
+		panel.textureSize = size;
+	}
+
+	// OpenGL images start at the bottom: the copy is upside down
+	GLuint texture = static_cast<GLTexture *>(panel.texture)->getGLTexture();
+	glCopyImageSubData(m_uiColor, GL_TEXTURE_2D, 0, area.left, m_uiSize.y - area.bottom, 0,
+	                   texture, GL_TEXTURE_2D, 0, 0, 0, 0, size.x, size.y, 1);
+	panel.size = Vec2f(size) * pixelSize;
+	panel.active = true;
+	return true;
+}
+
+bool VRSystem::getWristFrame(VRHand hand, Vec3f & joint, glm::quat & grip) const {
+
+	const VRHandState & state = m_input.getHand(hand);
+	if(!state.grip.valid) {
+		return false;
+	}
+	joint = state.grip.position + state.grip.orientation * config.vr.handOffset;
+	grip = state.grip.orientation;
+	// Attached to the visible body: the model wrist lags behind the controller while walking
+	Vec3f modelWrist;
+	glm::quat modelGrip;
+	if(getVRWristPose(hand, modelWrist, modelGrip)) {
+		Vec3f position;
+		glm::quat orientation;
+		if(worldPoseToTracking(modelWrist, modelGrip, position, orientation)) {
+			joint = position;
+			grip = orientation;
+		}
+	}
+	return true;
+}
+
+bool VRSystem::getInventoryPanel(Texture *& texture, Vec3f & position, glm::quat & orientation,
+                                 Vec2f & size) const {
+
+	Vec3f joint;
+	glm::quat grip;
+	if(!m_inventoryPanel.active || !m_inventoryPanel.texture || !getWristFrame(m_inventoryPanel.hand, joint, grip)) {
+		return false;
+	}
+
+	// Rigidly attached to the wrist, as it was placed at the last update (see updateWristPanels)
+	position = joint + grip * m_inventoryPanel.localPosition;
+	orientation = grip * m_inventoryPanel.localOrientation;
+
+	// Like the body, it can only be seen from the front
+	const XrPosef & left = m_views[0].pose;
+	const XrPosef & right = m_views[1].pose;
+	Vec3f head = (Vec3f(left.position.x, left.position.y, left.position.z)
+	              + Vec3f(right.position.x, right.position.y, right.position.z)) * 0.5f;
+	if(glm::dot(orientation * Vec3f(0.f, 0.f, 1.f), head - position) <= 0.f) {
+		return false;
+	}
+
+	texture = m_inventoryPanel.texture;
+	size = m_inventoryPanel.size;
+	return true;
+}
+
+VRHand VRSystem::getPointerHand() const {
+	VRHand main = config.vr.leftHanded ? VRHandLeft : VRHandRight;
+	if(m_bookOpen && m_bookHand == main) {
+		return (main == VRHandLeft) ? VRHandRight : VRHandLeft;
+	}
+	return main;
+}
+
+bool VRSystem::getBookPose(Vec3f & position, glm::quat & orientation, Vec2f & coverSize) const {
+
+	// m from the corner of the cover to the controller: the hand holds the very edge, a little up from the bottom
+	const float InsetAcross = -0.005f;
+	const float InsetUp = 0.035f;
+	// m along the facing direction (its z axis, partly towards the thumb, user request)
+	const float Depth = 0.025f;
+
+	const VRHandState & hand = m_input.getHand(m_bookHand);
+	if(!m_bookOpen || !hand.grip.valid || m_bookPixelSize <= 0.f) {
+		return false;
+	}
+
+	/*
+	 * Held by its bottom corner on the side of the hand (user request) and turning with the hand: the left hand at the
+	 * bottom left, the right hand at the bottom right. Upright against the controller's y axis (user request), the
+	 * pages facing along its forward axis (-z): turned half around its x axis. The top leans towards the user (user
+	 * request).
+	 */
+	const float Lean = glm::radians(40.f);
+
+	// Attached to the visible hand: the model wrist lags behind the controller while walking or reaching far
+	Vec3f gripPosition = hand.grip.position;
+	glm::quat gripOrientation = hand.grip.orientation;
+	Vec3f modelWrist;
+	glm::quat modelGrip;
+	if(getVRWristPose(m_bookHand, modelWrist, modelGrip)) {
+		Vec3f wrist;
+		glm::quat wristOrientation;
+		if(worldPoseToTracking(modelWrist, modelGrip, wrist, wristOrientation)) {
+			gripOrientation = wristOrientation;
+			gripPosition = wrist - wristOrientation * config.vr.handOffset; // The wrist is at this offset from the grip
+		}
+	}
+
+	orientation = gripOrientation * glm::angleAxis(glm::pi<float>(), Vec3f(1.f, 0.f, 0.f))
+	              * glm::angleAxis(Lean, Vec3f(1.f, 0.f, 0.f));
+	Vec3f across = orientation * Vec3f(1.f, 0.f, 0.f);
+	Vec3f up = orientation * Vec3f(0.f, 1.f, 0.f);
+	float side = (m_bookHand == VRHandLeft) ? 1.f : -1.f;
+	position = gripPosition + across * (side * (0.5f * m_bookCoverSize.x - InsetAcross))
+	           + up * (0.5f * m_bookCoverSize.y - InsetUp) + orientation * Vec3f(0.f, 0.f, Depth);
+	coverSize = m_bookCoverSize;
+	return true;
+}
+
+void VRSystem::updateBookPanel(const VRHudAreas & areas) {
+
+	/*
+	 * The open book is held in a hand like a real book (user request): the left hand when it opens, the other hand
+	 * points at it. A grip of the pointing hand close to the book takes it into that hand (see updatePointer).
+	 */
+	const float Width = 0.34f; // m, with the bookmarks
+
+	bool open = !areas.book.empty();
+	if(open && !m_bookOpen) {
+		m_bookHand = config.vr.leftHanded ? VRHandRight : VRHandLeft;
+		stowVRHeldItems(); // Both hands free: the weapon to the back, the torch to the belt
+	}
+	m_bookOpen = open;
+	if(!open) {
+		return;
+	}
+
+	m_bookPixelSize = Width / float(areas.book.width());
+	float margin = 2.f * 24.f * areas.hudScale; // The bookmarks around the cover, see getVRHudAreas
+	m_bookCoverSize = Vec2f(float(areas.book.width()) - margin, float(areas.book.height()) - margin) * m_bookPixelSize;
+
+	/*
+	 * The book is drawn in the world (see drawVRHandMenus), so that the hand holding it is in front of it: a quad
+	 * layer would cover the hand. Its part of the interface is copied into a texture for that, and its panel is only
+	 * pointed at.
+	 */
+	Rect visible = areas.book & Rect(m_uiSize.x, m_uiSize.y);
+	if(!copyToWorldPanel(m_bookPanel, visible, m_bookPixelSize)) {
+		return;
+	}
+
+	Vec3f position;
+	glm::quat orientation;
+	Vec2f coverSize;
+	if(getBookPose(position, orientation, coverSize)) {
+		if(addUIPanel(visible, m_bookPixelSize, position, orientation, true)) {
+			m_uiPanels.back().noBeam = true; // The cursor on it is enough (user request)
+			m_uiPanels.back().hidden = true;
+		}
+	}
 
 }
 
@@ -1870,11 +2075,12 @@ void VRSystem::updatePointer() {
 		return;
 	}
 
-	const VRHand dominant = config.vr.leftHanded ? VRHandLeft : VRHandRight;
+	// The main hand, or the other one while the main hand holds the book
+	const VRHand pointing = getPointerHand();
 	const float MagicTapTime = 0.25f; // s, a shorter trigger press without moving the hand is a tap
 	const float MagicStrokeDistance = 0.03f; // m the fingertips move before a rune is drawn
 	const float MagicDoubleTapTime = 0.6f; // s from the end of the tap entering the magic mode to the end of the next
-	const VRHandState & hand = m_input.getHand(dominant);
+	const VRHandState & hand = m_input.getHand(pointing);
 
 	/*
 	 * In-game the laser points into the world, unless it points at an interface panel (book, containers, the HUD
@@ -1885,11 +2091,11 @@ void VRSystem::updatePointer() {
 	// While holding an object, panels are ignored so that the object does not switch to inventory drag and drop
 	bool panelsActive = !inGame || !isVRGrabbing();
 
-	// Intersect the dominant hand's aim ray with the panels shown in the last frame, the nearest hit wins
+	// Intersect the pointing hand's aim ray with the panels shown in the last frame, the nearest hit wins
 	bool onUI = false;
 	Vec2s mouse(0);
 	bool useOnTap = false;
-	bool onWrist = false;
+	bool noBeam = false;
 	float nearest = std::numeric_limits<float>::max();
 	for(const UIPanel & panel : m_visiblePanels) {
 
@@ -1923,19 +2129,19 @@ void VRSystem::updatePointer() {
 		nearest = distance;
 		onUI = true;
 		useOnTap = panel.useOnTap;
-		onWrist = panel.onWrist;
+		noBeam = panel.noBeam;
 		mouse = Vec2s(s16(float(panel.area.left) + u * float(panel.area.width() - 1)),
 		              s16(float(panel.area.top) + v * float(panel.area.height() - 1)));
 
 	}
-	// No beam to the panels at the wrist, the cursor on them is enough
-	if(onUI && inGame && !onWrist) {
+	// No beam to the panels at the wrists and to the book, the cursor on them is enough
+	if(onUI && inGame && !noBeam) {
 		Vec3f aimDirection = hand.aim.orientation * Vec3f(0.f, 0.f, -1.f);
 		setVRPointerBeamToUI(hand.aim.position, hand.aim.position + aimDirection * nearest);
 	}
 
 	if(onUI && !m_pointerOnUI) {
-		m_input.vibrate(dominant, 0.25f, 0.04f);
+		m_input.vibrate(pointing, 0.25f, 0.04f);
 	}
 	m_pointerOnUI = onUI;
 
@@ -1967,7 +2173,7 @@ void VRSystem::updatePointer() {
 		}
 		// On an item in the world the trigger taps (a double tap selects it to combine) instead of starting magic
 		m_triggerOnItem = false;
-		if(!onUI && inGame && !COMBINE && !spellTarget && !isVRGrabbing()) {
+		if(!onUI && inGame && !COMBINE && !spellTarget && !isVRGrabbing() && !m_bookOpen) {
 			Entity * item = getVRPointedEntity(hand.aim, false);
 			if(item && (item->ioflags & IO_ITEM) && item->show == SHOW_FLAG_IN_SCENE) {
 				m_triggerOnItem = true;
@@ -1976,8 +2182,8 @@ void VRSystem::updatePointer() {
 			}
 		}
 		// Elsewhere in the world a tap toggles the magic mode, in it the trigger held draws runes with the hand
-		m_magicDrawing = inGame && !onUI && !spellTarget && !m_clickByTrigger && !m_triggerOnItem
-		                 && !isVRGrabbing() && !isVRFist(dominant) && !isVRArcheryActive();
+		m_magicDrawing = inGame && !onUI && !spellTarget && !m_clickByTrigger && !m_triggerOnItem && !m_bookOpen
+		                 && !isVRGrabbing() && !isVRFist(pointing) && !isVRArcheryActive();
 		m_magicStroke = false;
 		m_magicPressTime = 0.f;
 		m_magicPressPosition = hand.grip.position + hand.grip.orientation * Vec3f(0.f, 0.f, -0.08f);
@@ -1991,7 +2197,7 @@ void VRSystem::updatePointer() {
 				m_magicMode = false;
 				m_magicCancelTime = -1.f;
 				bool ended = endVRLastSpell();
-				m_input.vibrate(dominant, ended ? 0.6f : 0.2f, ended ? 0.1f : 0.04f);
+				m_input.vibrate(pointing, ended ? 0.6f : 0.2f, ended ? 0.1f : 0.04f);
 			} else {
 				// Leaving the magic mode casts the spell of the runes drawn (the game casts when its magic key is
 				// released)
@@ -2000,7 +2206,7 @@ void VRSystem::updatePointer() {
 					m_magicPrecast = false;
 				}
 				m_magicCancelTime = m_magicMode ? MagicDoubleTapTime : -1.f;
-				m_input.vibrate(dominant, m_magicMode ? 0.7f : 0.4f, m_magicMode ? 0.12f : 0.06f);
+				m_input.vibrate(pointing, m_magicMode ? 0.7f : 0.4f, m_magicMode ? 0.12f : 0.06f);
 			}
 		}
 		m_clickByTrigger = false;
@@ -2019,7 +2225,7 @@ void VRSystem::updatePointer() {
 		if(m_magicStroke && hand.isPressed(VRButtonGrip) && !m_magicPrecast) {
 			// The grip held while drawing stores the spell instead of casting it (see isMagicPrecast)
 			m_magicPrecast = true;
-			m_input.vibrate(dominant, 0.3f, 0.05f);
+			m_input.vibrate(pointing, 0.3f, 0.05f);
 		}
 	}
 	if(m_magicCancelTime >= 0.f) {
@@ -2028,12 +2234,29 @@ void VRSystem::updatePointer() {
 			m_magicCancelTime = -1.f;
 		}
 	}
-	if(!inGame || isVRArcheryActive()) {
+	if(!inGame || isVRArcheryActive() || m_bookOpen) {
 		m_magicMode = false; // Menus, the book, cutscenes, the bow
 	}
 	if(hand.wasPressed(VRButtonGrip)) {
 		// Touching an object grabs it even while pointing at a panel
-		m_gripIsClick = !isVRGripGrabbing() && !isVRHandAtSheath(dominant); // Not at the sheath (draws the weapon)
+		m_gripIsClick = !isVRGripGrabbing() && !isVRHandAtSheath(pointing); // Not at the sheath (draws the weapon)
+		Vec3f bookPosition;
+		glm::quat bookOrientation;
+		Vec2f bookSize;
+		const float TakeDistance = 0.1f; // m from the corner
+		bool atCorner = false;
+		if(hand.grip.valid && getBookPose(bookPosition, bookOrientation, bookSize)) {
+			// The bottom corner on the side of this hand, where it would hold the book
+			float side = (pointing == VRHandLeft) ? -1.f : 1.f;
+			Vec3f corner = bookPosition + bookOrientation * Vec3f(side * 0.5f * bookSize.x, -0.5f * bookSize.y, 0.f);
+			atCorner = glm::distance(hand.grip.position, corner) < TakeDistance;
+		}
+		if(atCorner) {
+			// A grip at the corner of the book takes it into this hand, the other hand points then
+			m_bookHand = pointing;
+			m_gripIsClick = false;
+			m_input.vibrate(pointing, 0.5f, 0.08f);
+		}
 		if(m_magicMode) {
 			m_gripIsClick = false; // In the magic mode the grip stores the spell (precast)
 		}
@@ -2044,7 +2267,7 @@ void VRSystem::updatePointer() {
 		if(inGame && !onUI && hand.isPressed(VRButtonTrigger)) {
 			m_gripIsClick = false; // A fist punches (see VRCombat)
 		}
-		if(m_gripIsClick && inGame && !onUI) {
+		if(m_gripIsClick && inGame && !onUI && !m_bookOpen) {
 			// The game's own pick at the pointer (like its double click finds objects), else the hand ray
 			Entity * target = onWorld ? InterClick(mouse) : nullptr;
 			const float UseDistance = 360.f; // Like the game's clicks on objects
@@ -2063,14 +2286,14 @@ void VRSystem::updatePointer() {
 					}
 					ARX_INTERFACE_ActivateEntity(*target);
 					m_gripIsClick = false;
-					m_input.vibrate(dominant, 0.4f, 0.05f);
+					m_input.vibrate(pointing, 0.4f, 0.05f);
 				}
 			}
 		}
 	} else if(isVRGrabbingDirectly()) {
 		m_gripIsClick = false; // Caught an object after pressing the grip
 	}
-	bool fist = inGame && !onUI && isVRFist(dominant); // Punches, it does not click (see VRCombat)
+	bool fist = inGame && !onUI && isVRFist(pointing); // Punches, it does not click (see VRCombat)
 	bool clickPressed = (hand.isPressed(VRButtonGrip) && m_gripIsClick && !fist) || m_clickByTrigger;
 	bool clickStarted = clickPressed && !m_clickWasPressed;
 	bool clickEnded = !clickPressed && m_clickWasPressed;
@@ -2115,7 +2338,7 @@ void VRSystem::updatePointer() {
 	if(tapPending && clickEnded) {
 		if(m_secondTap) {
 			if(FlyingOverIO && (FlyingOverIO->ioflags & IO_ITEM) && ARX_INTERFACE_StartCombine(*FlyingOverIO)) {
-				m_input.vibrate(dominant, 0.5f, 0.08f);
+				m_input.vibrate(pointing, 0.5f, 0.08f);
 			}
 		} else {
 			m_useTapDelay = DoubleTapTime;
@@ -2136,7 +2359,7 @@ void VRSystem::updatePointer() {
 				Entity * item = entities.get(m_triggerItem);
 				if(item && m_lastItemTap == m_triggerItem && m_lastItemTapAge < DoubleTapTime) {
 					if(ARX_INTERFACE_StartCombine(*item)) {
-						m_input.vibrate(dominant, 0.5f, 0.08f);
+						m_input.vibrate(pointing, 0.5f, 0.08f);
 					}
 					m_lastItemTap = EntityHandle();
 				} else {
@@ -2180,12 +2403,12 @@ void VRSystem::updatePointer() {
 	bool drawing = m_magicDrawing && m_magicStroke && hand.isPressed(VRButtonTrigger);
 	GInput->setVirtualMouseButton(Mouse::Button_0, (clickPressed && !tapPending) || drawing);
 	
-	// Off hand grip = right click on a panel, in the world it grabs (see VRGrab)
-	const VRHandState & off = m_input.getHand(config.vr.leftHanded ? VRHandRight : VRHandLeft);
-	GInput->setVirtualMouseButton(Mouse::Button_1, off.isPressed(VRButtonGrip) && onUI);
+	// Off hand grip = right click on a panel, in the world it grabs (see VRGrab). Not the hand holding the book.
+	const VRHandState & off = m_input.getHand((pointing == VRHandLeft) ? VRHandRight : VRHandLeft);
+	GInput->setVirtualMouseButton(Mouse::Button_1, off.isPressed(VRButtonGrip) && onUI && !m_bookOpen);
 	
-	if(onUI && (clickStarted || off.wasPressed(VRButtonGrip))) {
-		m_input.vibrate(dominant, 0.5f, 0.05f);
+	if(onUI && (clickStarted || (off.wasPressed(VRButtonGrip) && !m_bookOpen))) {
+		m_input.vibrate(pointing, 0.5f, 0.05f);
 	}
 	
 }
