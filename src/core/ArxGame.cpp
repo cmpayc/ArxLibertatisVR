@@ -1800,6 +1800,7 @@ void ArxGame::updateLevel() {
 			#if ARX_HAVE_OPENXR
 			g_playerModelScale = isVRActive() ? getVRBodyScale() : 1.f;
 			if(isVRActive()) {
+				syncVRTrackingToPlayer(); // The hands follow this frame's turns (snap turn) and moves
 				bodyPosition += getVRModelOffset();
 			}
 			#endif

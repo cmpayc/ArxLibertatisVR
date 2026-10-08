@@ -44,6 +44,10 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport);
 //! Use the current headset pose as the neutral position and orientation
 void requestVRRecenter();
 
+//! Update the tracking-to-world mapping of the last frame with the player turns and moves since then, before the
+//! player model is animated (its hands use it, the camera of the frame is prepared later)
+void syncVRTrackingToPlayer();
+
 //! \return the physical head movement since the last call, converted to world movement of the player
 Vec3f takeVRRoomScaleMovement();
 

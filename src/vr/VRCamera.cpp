@@ -81,6 +81,7 @@ struct TrackingToWorld {
 	Vec3f consumed = Vec3f(0.f);
 	float scale = 100.f;
 	glm::mat4x4 worldToScreen = glm::mat4x4(1.f); //!< Center camera, window-sized screen
+	Vec3f originFromPlayer = Vec3f(0.f); //!< origin - player.pos, to follow the player before the next frame
 };
 TrackingToWorld g_trackingToWorld;
 
@@ -107,6 +108,23 @@ void updateBodyYaw(float headYaw) {
 }
 
 } // anonymous namespace
+
+void syncVRTrackingToPlayer() {
+	
+	/*
+	 * The player model (and its hands, see VRBody) is animated before the camera of the frame is prepared: bring the
+	 * mapping of the last frame up to date with the turns (snap turn) and moves of the player since then, as
+	 * prepareVRCamera will, so that the hands are not one frame behind
+	 */
+	if(!g_trackingToWorld.valid || !g_playSpaceValid) {
+		return;
+	}
+	float bodyYaw = player.angle.getYaw();
+	g_playSpaceYaw = MAKEANGLE(g_playSpaceYaw + vr::wrapDegrees(bodyYaw - g_lastBodyYaw));
+	g_lastBodyYaw = bodyYaw;
+	g_trackingToWorld.body = glm::transpose(glm::mat3x3(toRotationMatrix(Anglef(0.f, g_playSpaceYaw, 0.f))));
+	g_trackingToWorld.origin = player.pos + g_trackingToWorld.originFromPlayer;
+}
 
 void requestVRRecenter() {
 	g_recenterRequested = true;
@@ -379,6 +397,7 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	// Pointing into the world only makes sense from the player's own point of view
 	g_trackingToWorld.valid = isPlayer;
 	g_trackingToWorld.origin = origin;
+	g_trackingToWorld.originFromPlayer = origin - player.pos;
 	g_trackingToWorld.body = body;
 	g_trackingToWorld.consumed = consumed;
 	g_trackingToWorld.scale = scale;
