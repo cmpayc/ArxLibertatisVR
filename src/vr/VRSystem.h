@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -220,6 +221,12 @@ private:
 	void updateBookPanel(const VRHudAreas & areas);
 	void updateLabelPanel(const VRHudAreas & areas);
 	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
+	//! The panels of this frame as the left eye sees them, over the desktop view (like the headset)
+	void drawPanelsToWindow(const Vec2i & windowSize);
+	//! Draw into the window with a texture and premultiplied alpha, saving and restoring the renderer's state
+	void drawToWindow(unsigned texture, const Vec2i & windowSize, bool clear, const std::function<void()> & draw);
+	//! The panels of the in-game interface: the book, the screen, subtitles, the wrists, labels...
+	void updateGamePanels();
 	void updatePointer();
 	unsigned acquireSwapchainImage(EyeSwapchain & swapchain);
 	void releaseSwapchainImage(EyeSwapchain & swapchain);

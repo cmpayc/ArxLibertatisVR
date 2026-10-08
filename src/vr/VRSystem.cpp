@@ -1349,18 +1349,31 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 		glEnable(GL_SCISSOR_TEST);
 	}
 
-	// Desktop view: the interface over the left eye image, or on its own for menus
-	drawTextureToWindow(m_uiColor, windowSize, !overScene);
-
-	if(!image) {
-		return;
-	}
-
 	if(!overScene) {
-		updateUIPlacement(false);
-		addScreenPanel(Rect(m_uiSize.x, m_uiSize.y), true);
+		// Desktop view: the interface on its own for menus
+		drawTextureToWindow(m_uiColor, windowSize, true);
+		if(image) {
+			updateUIPlacement(false);
+			addScreenPanel(Rect(m_uiSize.x, m_uiSize.y), true);
+		}
 		return;
 	}
+	if(!image) {
+		drawTextureToWindow(m_uiColor, windowSize, false);
+		return;
+	}
+
+	// In-game the desktop view shows the panels over the left eye image, like the headset
+	updateGamePanels();
+	if(config.vr.showHud) {
+		drawTextureToWindow(m_uiColor, windowSize, false);
+	} else {
+		drawPanelsToWindow(windowSize);
+	}
+
+}
+
+void VRSystem::updateGamePanels() {
 
 	/*
 	 * In-game the HUD is attached to the wrists and only the open interface (book, notes, containers) is shown
@@ -1995,6 +2008,84 @@ void VRSystem::updateUIPlacement(bool followHead) {
 }
 
 void VRSystem::drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear) {
+	drawToWindow(texture, windowSize, clear, []() {
+		// The whole texture over the whole window
+		glBegin(GL_TRIANGLE_STRIP);
+		glTexCoord2f(0.f, 0.f);
+		glVertex2f(-1.f, -1.f);
+		glTexCoord2f(1.f, 0.f);
+		glVertex2f(1.f, -1.f);
+		glTexCoord2f(0.f, 1.f);
+		glVertex2f(-1.f, 1.f);
+		glTexCoord2f(1.f, 1.f);
+		glVertex2f(1.f, 1.f);
+		glEnd();
+	});
+}
+
+void VRSystem::drawPanelsToWindow(const Vec2i & windowSize) {
+
+	/*
+	 * The desktop view shows what the headset shows (user request): the panels of this frame (wrist, book, screen,
+	 * labels...) seen from the left eye, cropped like its image (see endStereoRender), not the flat interface
+	 */
+	if(m_uiPanels.empty() || m_uiSize.x <= 0 || m_uiSize.y <= 0 || windowSize.x <= 0 || windowSize.y <= 0) {
+		return;
+	}
+	const XrView & eye = m_views[0];
+	Vec2f crop(m_eyeSize);
+	if(m_eyeSize.x * windowSize.y > windowSize.x * m_eyeSize.y) {
+		crop.x = float(m_eyeSize.y) * float(windowSize.x) / float(windowSize.y);
+	} else {
+		crop.y = float(m_eyeSize.x) * float(windowSize.y) / float(windowSize.x);
+	}
+	Vec2f zoom = Vec2f(m_eyeSize) / crop;
+
+	drawToWindow(m_uiColor, windowSize, false, [&]() {
+		const float Near = 0.05f;
+		glMatrixMode(GL_PROJECTION);
+		glLoadIdentity();
+		glScalef(zoom.x, zoom.y, 1.f);
+		glFrustum(std::tan(eye.fov.angleLeft) * Near, std::tan(eye.fov.angleRight) * Near,
+		          std::tan(eye.fov.angleDown) * Near, std::tan(eye.fov.angleUp) * Near, Near, 100.f);
+		glMatrixMode(GL_MODELVIEW);
+		glm::quat eyeOrientation(eye.pose.orientation.w, eye.pose.orientation.x, eye.pose.orientation.y,
+		                         eye.pose.orientation.z);
+		glm::mat4 eyeToTracking = glm::translate(glm::mat4(1.f), Vec3f(eye.pose.position.x, eye.pose.position.y,
+		                                                               eye.pose.position.z))
+		                          * glm::mat4_cast(eyeOrientation);
+		glm::mat4 view = glm::inverse(eyeToTracking);
+		glLoadMatrixf(&view[0][0]);
+		for(const UIPanel & panel : m_uiPanels) {
+			if(panel.hidden) {
+				continue; // Drawn in the world, so in the eye image already
+			}
+			glm::quat orientation(panel.pose.orientation.w, panel.pose.orientation.x, panel.pose.orientation.y,
+			                      panel.pose.orientation.z);
+			Vec3f center(panel.pose.position.x, panel.pose.position.y, panel.pose.position.z);
+			Vec3f across = orientation * Vec3f(0.5f * panel.extent.width, 0.f, 0.f);
+			Vec3f up = orientation * Vec3f(0.f, 0.5f * panel.extent.height, 0.f);
+			// OpenGL images start at the bottom
+			float left = float(panel.area.left) / float(m_uiSize.x);
+			float right = float(panel.area.right) / float(m_uiSize.x);
+			float top = 1.f - float(panel.area.top) / float(m_uiSize.y);
+			float bottom = 1.f - float(panel.area.bottom) / float(m_uiSize.y);
+			glBegin(GL_TRIANGLE_STRIP);
+			glTexCoord2f(left, bottom);
+			glVertex3fv(&(center - across - up)[0]);
+			glTexCoord2f(right, bottom);
+			glVertex3fv(&(center + across - up)[0]);
+			glTexCoord2f(left, top);
+			glVertex3fv(&(center - across + up)[0]);
+			glTexCoord2f(right, top);
+			glVertex3fv(&(center + across + up)[0]);
+			glEnd();
+		}
+	});
+}
+
+void VRSystem::drawToWindow(unsigned texture, const Vec2i & windowSize, bool clear,
+                            const std::function<void()> & draw) {
 
 	// Draw with the fixed-function pipeline, saving and restoring all state the renderer caches
 	GLint previousFramebuffer = 0;
@@ -2042,16 +2133,7 @@ void VRSystem::drawTextureToWindow(unsigned texture, const Vec2i & windowSize, b
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-	glBegin(GL_TRIANGLE_STRIP);
-	glTexCoord2f(0.f, 0.f);
-	glVertex2f(-1.f, -1.f);
-	glTexCoord2f(1.f, 0.f);
-	glVertex2f(1.f, -1.f);
-	glTexCoord2f(0.f, 1.f);
-	glVertex2f(-1.f, 1.f);
-	glTexCoord2f(1.f, 1.f);
-	glVertex2f(1.f, 1.f);
-	glEnd();
+	draw();
 
 	for(GLint unit = textureUnits - 1; unit >= 0; unit--) {
 		glActiveTexture(GLenum(GL_TEXTURE0 + unit));
