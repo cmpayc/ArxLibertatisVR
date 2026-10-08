@@ -45,6 +45,7 @@ enum MENUSTATE {
 	Page_OptionsInputCustomizeKeys2,
 	Page_QuitConfirm,
 	Page_Localization,
+	Page_OptionsVR,
 };
 
 enum WidgetType {

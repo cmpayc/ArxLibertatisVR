@@ -78,6 +78,12 @@
 #include "util/Number.h"
 #include "util/Unicode.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRSystem.h"
+#endif
+
 #include "window/RenderWindow.h"
 
 
@@ -496,7 +502,15 @@ public:
 			txt->setTargetPage(Page_OptionsInput);
 			addCenter(std::move(txt));
 		}
-		
+
+		#if ARX_HAVE_OPENXR
+		{
+			auto txt = std::make_unique<TextWidget>(hFontMenu, getLocalised("system_menus_options_vr", "VR settings"));
+			txt->setTargetPage(Page_OptionsVR);
+			addCenter(std::move(txt));
+		}
+		#endif
+
 		addBackButton(Page_None);
 		
 	}
@@ -1373,10 +1387,168 @@ public:
 		}
 		
 		addBackButton(Page_Options);
-		
+
 	}
-	
+
 };
+
+#if ARX_HAVE_OPENXR
+
+//! The [vr] settings that can be changed while playing
+class VROptionsMenuPage final : public MenuPage {
+
+	static constexpr int SnapTurnAngles[] = { 15, 30, 45, 60, 90 };
+
+public:
+
+	VROptionsMenuPage()
+		: MenuPage(Page_OptionsVR)
+	{ }
+
+	void init() override {
+
+		reserveBottom();
+
+		{
+			std::string_view label = getLocalised("system_menus_options_vr_turning", "Turning");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->addEntry(getLocalised("system_menus_options_vr_turning_snap", "Snap"));
+			cb->addEntry(getLocalised("system_menus_options_vr_turning_smooth", "Smooth"));
+			cb->setValue(config.vr.snapTurn ? 0 : 1);
+			cb->valueChanged = [this](int pos, std::string_view /* string */) {
+				config.vr.snapTurn = (pos == 0);
+				updateTurnWidgets();
+			};
+			addCenter(std::move(cb));
+		}
+
+		{
+			std::string_view label = getLocalised("system_menus_options_vr_snap_turn_angle", "Snap turn angle");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			size_t value = 0;
+			for(size_t i = 0; i < std::size(SnapTurnAngles); i++) {
+				cb->addEntry(std::to_string(SnapTurnAngles[i]));
+				if(std::abs(SnapTurnAngles[i] - config.vr.snapTurnAngle)
+				   < std::abs(SnapTurnAngles[value] - config.vr.snapTurnAngle)) {
+					value = i;
+				}
+			}
+			cb->setValue(int(value));
+			cb->valueChanged = [](int pos, std::string_view /* string */) noexcept {
+				config.vr.snapTurnAngle = SnapTurnAngles[pos];
+			};
+			m_snapTurnAngle = cb.get();
+			addCenter(std::move(cb));
+		}
+
+		{
+			// 30 to 300 degrees per second
+			std::string_view label = getLocalised("system_menus_options_vr_smooth_turn_speed", "Smooth turn speed");
+			auto sld = std::make_unique<SliderWidget>(sliderSize(), hFontMenu, label);
+			sld->setMinimum(1);
+			sld->setValue(std::clamp(int(std::round(config.vr.smoothTurnSpeed / 30.f)), 1, 10));
+			sld->valueChanged = [](int value) noexcept {
+				config.vr.smoothTurnSpeed = float(value) * 30.f;
+			};
+			m_smoothTurnSpeed = sld.get();
+			addCenter(std::move(sld));
+		}
+
+		updateTurnWidgets();
+
+		{
+			std::string_view label = getLocalised("system_menus_options_vr_movement", "Move towards");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->addEntry(getLocalised("system_menus_options_vr_movement_head", "Head"));
+			cb->addEntry(getLocalised("system_menus_options_vr_movement_hand", "Hand"));
+			cb->setValue(config.vr.handOrientedMovement ? 1 : 0);
+			cb->valueChanged = [](int pos, std::string_view /* string */) noexcept {
+				config.vr.handOrientedMovement = (pos == 1);
+			};
+			addCenter(std::move(cb));
+		}
+
+		{
+			std::string_view label = getLocalised("system_menus_options_vr_main_hand", "Main hand");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->addEntry(getLocalised("system_menus_options_vr_main_hand_right", "Right"));
+			cb->addEntry(getLocalised("system_menus_options_vr_main_hand_left", "Left"));
+			cb->setValue(config.vr.leftHanded ? 1 : 0);
+			cb->valueChanged = [](int pos, std::string_view /* string */) noexcept {
+				config.vr.leftHanded = (pos == 1);
+			};
+			addCenter(std::move(cb));
+		}
+
+		addCenter(std::make_unique<Spacer>(hFontMenu->getLineHeight() / 2));
+
+		{
+			// -25 to +25 cm
+			std::string_view label = getLocalised("system_menus_options_vr_height_offset", "Height");
+			auto sld = std::make_unique<SliderWidget>(sliderSize(), hFontMenu, label);
+			sld->setValue(std::clamp(int(std::round(config.vr.heightOffset / 0.05f)) + 5, 0, 10));
+			sld->valueChanged = [](int value) noexcept {
+				config.vr.heightOffset = float(value - 5) * 0.05f;
+			};
+			addCenter(std::move(sld));
+		}
+
+		{
+			// 0.2 to 2 times
+			std::string_view label = getLocalised("system_menus_options_vr_throw_strength", "Throw strength");
+			auto sld = std::make_unique<SliderWidget>(sliderSize(), hFontMenu, label);
+			sld->setMinimum(1);
+			sld->setValue(std::clamp(int(std::round(config.vr.throwStrength / 0.2f)), 1, 10));
+			sld->valueChanged = [](int value) noexcept {
+				config.vr.throwStrength = float(value) * 0.2f;
+			};
+			addCenter(std::move(sld));
+		}
+
+		addCenter(std::make_unique<Spacer>(hFontMenu->getLineHeight() / 2));
+
+		{
+			std::string_view label = getLocalised("system_menus_options_vr_desktop_view", "Desktop view");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->addEntry(getLocalised("system_menus_options_vr_desktop_view_fullscreen", "Full screen"));
+			cb->addEntry(getLocalised("system_menus_options_vr_desktop_view_window", "Window"));
+			cb->addEntry(getLocalised("system_menus_options_vr_desktop_view_off", "Off"));
+			cb->setValue(config.vr.desktopView == "off" ? 2 : config.vr.desktopView == "window" ? 1 : 0);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				bool wasFullscreen = (config.vr.desktopView == "fullscreen");
+				config.vr.desktopView = (pos == 2) ? "off" : (pos == 1) ? "window" : "fullscreen";
+				bool fullscreen = (pos == 0);
+				if(g_vr && fullscreen != wasFullscreen) {
+					// Same as when the window is created in VR (ArxGame::initWindow)
+					if(fullscreen) {
+						mainApp->setWindowSize(true);
+					} else {
+						mainApp->getWindow()->setWindowSize(Vec2i(1280, 720));
+					}
+				}
+			};
+			addCenter(std::move(cb));
+		}
+
+		addBackButton(Page_Options);
+
+	}
+
+private:
+
+	void updateTurnWidgets() {
+		if(m_snapTurnAngle && m_smoothTurnSpeed) {
+			m_snapTurnAngle->setEnabled(config.vr.snapTurn);
+			m_smoothTurnSpeed->setEnabled(!config.vr.snapTurn);
+		}
+	}
+
+	Widget * m_snapTurnAngle = nullptr;
+	Widget * m_smoothTurnSpeed = nullptr;
+
+};
+
+#endif // ARX_HAVE_OPENXR
 
 class InputOptionsMenuPage final : public MenuPage {
 	
@@ -1810,7 +1982,10 @@ void MainMenu::initWindowPages() {
 	
 	m_window->add(std::make_unique<QuitConfirmMenuPage>());
 	m_window->add(std::make_unique<LocalizationMenuPage>());
-	
+	#if ARX_HAVE_OPENXR
+	m_window->add(std::make_unique<VROptionsMenuPage>());
+	#endif
+
 }
 
 
