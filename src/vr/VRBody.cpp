@@ -146,6 +146,30 @@ bool isBoneDescendant(const Skeleton & skeleton, VertexGroupId bone, VertexGroup
 	return false;
 }
 
+/*
+ * Bones made longer (the arms, see solveArm): a factor of their scale in their own axes that their children do not
+ * inherit, so that only these bones and the positions of their children change, not the size of the hand
+ */
+std::vector<Vec3f> g_boneLengths;
+
+Vec3f getBoneLength(VertexGroupId group) {
+	return (size_t(group) < g_boneLengths.size()) ? g_boneLengths[size_t(group)] : Vec3f(1.f);
+}
+
+//! Make a bone longer along its own axis towards a child, by a factor
+void lengthenBone(Skeleton & skeleton, VertexGroupId group, VertexGroupId child, float factor) {
+	Vec3f towards = glm::abs(skeleton.bones[child].init.trans);
+	int axis = (towards.x >= towards.y && towards.x >= towards.z) ? 0 : (towards.y >= towards.z ? 1 : 2);
+	if(g_boneLengths.size() < skeleton.bones.size()) {
+		g_boneLengths.resize(skeleton.bones.size(), Vec3f(1.f));
+	}
+	Vec3f length(1.f);
+	length[axis] = factor;
+	Bone & bone = skeleton.bones[group];
+	bone.anim.scale = bone.anim.scale / getBoneLength(group) * length;
+	g_boneLengths[size_t(group)] = length;
+}
+
 //! Recompute the world transforms of all descendants of a bone after changing it (same as Cedric_ConcatenateTM)
 void updateBoneDescendants(Skeleton & skeleton, VertexGroupId root) {
 	for(VertexGroupId group : skeleton.bones.handles()) {
@@ -156,7 +180,9 @@ void updateBoneDescendants(Skeleton & skeleton, VertexGroupId root) {
 		const Bone & parent = skeleton.bones[bone.father];
 		bone.anim.quat = parent.anim.quat * bone.init.quat;
 		bone.anim.trans = parent.anim.trans + parent.anim.quat * (bone.init.trans * parent.anim.scale);
-		bone.anim.scale = (bone.init.scale + Vec3f(1.f)) * parent.anim.scale;
+		// A longer parent does not make its children longer (see lengthenBone)
+		Vec3f parentScale = parent.anim.scale / getBoneLength(bone.father);
+		bone.anim.scale = (bone.init.scale + Vec3f(1.f)) * parentScale * getBoneLength(group);
 	}
 }
 
@@ -497,11 +523,10 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	}
 	g_weaponInWall[hand] = weaponInWall;
 
-	const Vec3f shoulder = skeleton.bones[arm.shoulder].anim.trans;
-	const float upperLength = glm::distance(shoulder, skeleton.bones[arm.elbow].anim.trans);
-	const float lowerLength = glm::distance(skeleton.bones[arm.elbow].anim.trans, skeleton.bones[arm.wrist].anim.trans);
+	Vec3f shoulder = skeleton.bones[arm.shoulder].anim.trans;
+	float upperLength = glm::distance(shoulder, skeleton.bones[arm.elbow].anim.trans);
+	float lowerLength = glm::distance(skeleton.bones[arm.elbow].anim.trans, skeleton.bones[arm.wrist].anim.trans);
 
-	// Out of reach: stretch the arm towards the target
 	Vec3f toTarget = target - shoulder;
 	float distance = glm::length(toTarget);
 	if(distance < 0.001f) {
@@ -527,6 +552,35 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	}
 	g_handInWall[hand] = inWall;
 
+	/*
+	 * Out of reach (the user's arm may be longer than the model's): the shoulder moves towards the target, by up to
+	 * 15% of the arm length (user request), stretching the mesh between the chest and the arm
+	 */
+	const float MaxStretch = 0.15f;
+	float armLength = upperLength + lowerLength - 0.1f;
+	if(distance > armLength) {
+		float stretch = std::min(distance - armLength, MaxStretch * (upperLength + lowerLength));
+		skeleton.bones[arm.shoulder].anim.trans += direction * stretch;
+		updateBoneDescendants(skeleton, arm.shoulder);
+		shoulder += direction * stretch;
+		distance -= stretch;
+	}
+
+	/*
+	 * Still out of reach: the upper arm and the forearm get longer evenly, by up to 35% (user request: with the
+	 * shoulder, the model reaches as far as the user, measured 50% further than its arm), the hand keeps its size
+	 */
+	const float MaxLengthen = 0.35f;
+	if(distance > armLength) {
+		float factor = std::min(distance / armLength, 1.f + MaxLengthen);
+		lengthenBone(skeleton, arm.shoulder, arm.elbow, factor);
+		lengthenBone(skeleton, arm.elbow, arm.wrist, factor);
+		updateBoneDescendants(skeleton, arm.shoulder);
+		upperLength = glm::distance(shoulder, skeleton.bones[arm.elbow].anim.trans);
+		lowerLength = glm::distance(skeleton.bones[arm.elbow].anim.trans, skeleton.bones[arm.wrist].anim.trans);
+	}
+
+	// Still out of reach: the arm points at the target
 	distance = glm::clamp(distance, std::abs(upperLength - lowerLength) + 0.1f, upperLength + lowerLength - 0.1f);
 	target = shoulder + direction * distance;
 
@@ -726,6 +780,7 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 
 	const BodyBones & bones = getBodyBones(*entity.obj);
 	const VRInput & input = g_vr->getInput();
+	g_boneLengths.assign(skeleton.bones.size(), Vec3f(1.f)); // The animation set the scales again
 	for(WristPose & pose : g_wristPoses) {
 		pose.valid = false;
 	}

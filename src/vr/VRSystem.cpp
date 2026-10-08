@@ -1750,10 +1750,10 @@ VRHand VRSystem::getPointerHand() const {
 bool VRSystem::getBookPose(Vec3f & position, glm::quat & orientation, Vec2f & coverSize) const {
 
 	// m from the corner of the cover to the controller: the hand holds the very edge, a little up from the bottom
-	const float InsetAcross = -0.005f;
+	const float InsetAcross = -0.015f;
 	const float InsetUp = 0.035f;
 	// m along the facing direction (its z axis, partly towards the thumb, user request)
-	const float Depth = 0.025f;
+	const float Depth = 0.032f;
 
 	const VRHandState & hand = m_input.getHand(m_bookHand);
 	if(!m_bookOpen || !hand.grip.valid || m_bookPixelSize <= 0.f) {
