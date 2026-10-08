@@ -61,6 +61,7 @@
 #include "game/NPC.h"
 #include "game/Player.h"
 #include "game/Spells.h"
+#include "gui/Dragging.h"
 #include "gui/Interface.h"
 #include "input/Input.h"
 #include "input/Mouse.h"
@@ -2166,7 +2167,8 @@ void VRSystem::updatePointer() {
 		}
 		// While an item is selected to combine, the trigger clicks everywhere: on the target, or elsewhere to cancel
 		m_clickByTrigger = onUI || ((COMBINE || spellTargetValid) && onWorld && !isVRGrabbing());
-		m_clickUseOnTap = onUI && useOnTap && !COMBINE;
+		// A tap uses the item under it, unless an item is on the cursor: then it is a click that drops it there
+		m_clickUseOnTap = onUI && useOnTap && !COMBINE && !g_draggedEntity;
 		if(m_clickUseOnTap && m_useTapDelay >= 0.f) {
 			m_secondTap = true; // A double tap: select instead of using
 			m_useTapDelay = -1.f;
