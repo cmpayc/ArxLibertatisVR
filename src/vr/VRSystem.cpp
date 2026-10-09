@@ -2458,7 +2458,13 @@ void VRSystem::updatePointer() {
 		m_gripIsClick = false; // Caught an object after pressing the grip
 	}
 	bool fist = inGame && !onUI && isVRFist(pointing); // Punches, it does not click (see VRCombat)
-	bool clickPressed = (hand.isPressed(VRButtonGrip) && m_gripIsClick && !fist) || m_clickByTrigger;
+	/*
+	 * In the character creation and the book, the grip is the right click (user request): the trigger raises
+	 * attributes and skills, the grip lowers them, like the mouse buttons
+	 */
+	bool gripRightClick = onUI && (ARXmenu.mode() == Mode_CharacterCreation || m_bookOpen);
+	bool gripPressed = hand.isPressed(VRButtonGrip) && m_gripIsClick && !fist;
+	bool clickPressed = (gripPressed && !gripRightClick) || m_clickByTrigger;
 	bool clickStarted = clickPressed && !m_clickWasPressed;
 	bool clickEnded = !clickPressed && m_clickWasPressed;
 	m_clickWasPressed = clickPressed;
@@ -2569,9 +2575,12 @@ void VRSystem::updatePointer() {
 	
 	// Off hand grip = right click on a panel, in the world it grabs (see VRGrab). Not the hand holding the book.
 	const VRHandState & off = m_input.getHand((pointing == VRHandLeft) ? VRHandRight : VRHandLeft);
-	GInput->setVirtualMouseButton(Mouse::Button_1, off.isPressed(VRButtonGrip) && onUI && !m_bookOpen);
-	
-	if(onUI && (clickStarted || (off.wasPressed(VRButtonGrip) && !m_bookOpen))) {
+	bool rightClick = (off.isPressed(VRButtonGrip) && onUI && !m_bookOpen) || (gripPressed && gripRightClick);
+	GInput->setVirtualMouseButton(Mouse::Button_1, rightClick);
+	bool rightClickStarted = (off.wasPressed(VRButtonGrip) && !m_bookOpen)
+	                         || (gripRightClick && gripPressed && hand.wasPressed(VRButtonGrip));
+
+	if(onUI && (clickStarted || rightClickStarted)) {
 		m_input.vibrate(pointing, 0.5f, 0.05f);
 	}
 	
