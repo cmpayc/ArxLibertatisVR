@@ -710,6 +710,34 @@ void hangTorchOnBelt(Entity & torch, VRHand hand) {
 	g_beltSide = hand;
 }
 
+/*!
+ * The flame of the torch held in a hand: the game's fire particles (createFireParticles) are drawn larger the closer
+ * they are, and a hand is close to the eyes, so the flame took half of the view (user). Smaller and shorter particles.
+ */
+void createTorchFlame(const Vec3f & position) {
+
+	const float Scale = 0.4f; // Of the game's fire
+	for(int i = 0; i < 2; i++) {
+		if(Random::getf() >= 0.4f) {
+			continue;
+		}
+		PARTICLE_DEF * pd = createParticle();
+		if(!pd) {
+			break;
+		}
+		pd->ov = position;
+		pd->move = (Vec3f(2.f, 2.f, 2.f) - Vec3f(4.f, 22.f, 4.f) * arx::randomVec3f()) * Scale;
+		pd->size = 7.f * Scale;
+		pd->duration = Random::get(500ms, 1500ms);
+		pd->m_flags = FIRE_TO_SMOKE | ROTATING;
+		pd->tc = g_particleTextures.fire2;
+		pd->m_rotation = Random::getf(-0.1f, 0.1f);
+		pd->sizeDelta = -8.f * Scale;
+		pd->rgb = Color3f(0.71f, 0.43f, 0.29f);
+		pd->elapsed = 2ms * -i;
+	}
+}
+
 //! The hand holding the lit torch: the hand that took it from the belt or the off hand, the other hand while a weapon
 //! is drawn in it
 VRHand getTorchHand() {
@@ -792,7 +820,7 @@ void updateTorch(Entity & io) {
 
 	VertexId fire = torch->obj->fastaccess.fire;
 	if(fire && size_t(fire) < torch->obj->vertexWorldPositions.size()) {
-		createFireParticles(torch->obj->vertexWorldPositions[fire].v, 2, 2ms);
+		createTorchFlame(torch->obj->vertexWorldPositions[fire].v);
 		// Touching something that can burn (another torch, a candle, a fireplace) with the flame lights it, like fire arrows
 		Sphere flame(torch->obj->vertexWorldPositions[fire].v, TorchIgniteRadius);
 		igniteLights(flame);

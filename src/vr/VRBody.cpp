@@ -979,6 +979,20 @@ void adjustVRLinkedTransform(const Entity & entity, const EERIE_LINKED & link, T
 		return;
 	}
 	
+	if(player.torch && link.io == player.torch && link.obj) {
+		/*
+		 * The torch is attached at the end of its handle, so the hand held it by the very end (user): it is moved down
+		 * through the hand, away from its flame, so that the hand holds it a little further up (30% was too far)
+		 */
+		VertexId fire = link.obj->fastaccess.fire;
+		if(fire && size_t(fire) < link.obj->vertexlist.size() && size_t(link.lidx2) < link.obj->vertexlist.size()) {
+			const float Down = 0.15f; // Of the way from the attach point to the flame
+			Vec3f toFire = link.obj->vertexlist[fire].v - link.obj->vertexlist[link.lidx2].v;
+			transform.pos -= transform.rotation * (toFire * Down) * transform.scale;
+		}
+		return;
+	}
+
 	if(!isMirroredInLeftHand(*entity.obj, link)) {
 		return;
 	}
