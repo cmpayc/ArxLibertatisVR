@@ -63,7 +63,10 @@ public:
 	 * User has dragged & dropped some text
 	 */
 	virtual void droppedText(std::string_view text) = 0;
-	
+
+	//! The text entered so far, for on-screen keyboards (VR), empty if not known
+	virtual std::string_view enteredText() const { return { }; }
+
 };
 
 class BasicTextInput : protected TextInputHandler {
@@ -94,7 +97,8 @@ public:
 	void editingText(std::string_view composition, size_t cursorStart, size_t cursorLength) override;
 	bool keyPressed(Keyboard::Key key, KeyModifiers mod) override;
 	void droppedText(std::string_view text) override;
-	
+	std::string_view enteredText() const override { return m_text; }
+
 	void clear();
 	void setText(std::string_view text, size_t cursorPos = size_t(-1));
 	void setCursorPos(size_t cursorPos = size_t(-1));

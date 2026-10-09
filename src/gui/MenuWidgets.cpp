@@ -100,6 +100,12 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #include "window/RenderWindow.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRKeyboard.h"
+#endif
+
 
 void ARX_QuickSave() {
 	
@@ -182,14 +188,26 @@ void MainMenuDoFrame() {
 		pMenuCursor = new MenuCursor();
 	}
 	pMenuCursor->update();
-	
-	g_mainMenu->update();
+
+	#if ARX_HAVE_OPENXR
+	// The on-screen keyboard takes the clicks while it is pointed at
+	bool onKeyboard = updateVRKeyboard();
+	#else
+	bool onKeyboard = false;
+	#endif
+	if(!onKeyboard) {
+		g_mainMenu->update();
+	}
 	if(g_mainMenu->bReInitAll) {
 		return;
 	}
 	
 	g_mainMenu->render();
-	
+
+	#if ARX_HAVE_OPENXR
+	drawVRKeyboard();
+	#endif
+
 	pMenuCursor->DrawCursor();
 	
 	g_thumbnailCursor.render();

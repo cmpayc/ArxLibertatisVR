@@ -179,12 +179,16 @@ public:
 	 * End text input mode
 	 */
 	void stopTextInput();
-	
+
+	//! The handler of the text input mode, nullptr if it is not enabled (VR: an on-screen keyboard types into it)
+	TextInputHandler * getTextInputHandler() const { return m_textInputHandler; }
+
 private:
-	
+
 	void centerMouse();
-	
+
 	class InputBackend * backend;
+	TextInputHandler * m_textInputHandler = nullptr;
 	
 	// Mouse
 	

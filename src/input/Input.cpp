@@ -800,10 +800,12 @@ bool Input::isKeyPressedNowUnPressed(int keyId) const {
 
 void Input::startTextInput(const Rect & box, TextInputHandler * handler) {
 	backend->startTextInput(box, handler);
+	m_textInputHandler = handler;
 }
 
 void Input::stopTextInput() {
 	backend->stopTextInput();
+	m_textInputHandler = nullptr;
 }
 
 bool Input::getMouseButton(int buttonId) const {
