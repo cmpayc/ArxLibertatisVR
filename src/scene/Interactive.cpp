@@ -278,8 +278,34 @@ void ARX_INTERACTIVE_Show_Hide_1st(Entity * io, bool hide1st) {
 				}
 				return false;
 			};
+			/*
+			 * Armor collars (user: too big, seen when sitting down) belong to the chest bone, not the neck: also hide
+			 * faces whose middle is, in the rest pose, above the base of the neck (or a little below) and close around it.
+			 * With all corners required and 4 cm / 13 cm, parts of a collar were still seen.
+			 */
+			const Vec3f neckBase = io->obj->vertexlist[io->obj->grouplist[neck].origin].v;
+			const float CollarRadius = 15.f; // cm around the neck, less than the shoulders
+			const float CollarBelow = 10.f; // cm below the base of the neck (y points down; 7 left a collar edge)
+			const float CollarFront = 22.f; // cm in front of the neck
+			const float CollarFrontWidth = 16.f; // cm to each side there (a collar was lopsided: 12 left its left side)
+			const float CollarFrontBelow = 6.f; // cm below the base of the neck there (the chest plate is 10 cm below)
+			auto isCollar = [&](const EERIE_FACE & face) {
+				Vec3f middle(0.f);
+				for(VertexId vertex : face.vid) {
+					middle += io->obj->vertexlist[vertex].v;
+				}
+				middle /= float(std::size(face.vid));
+				Vec3f offset = middle - neckBase;
+				if(offset.y < CollarBelow && glm::length(Vec2f(offset.x, offset.z)) < CollarRadius) {
+					return true;
+				}
+				// The front of a collar sticks out further (logged: 15-20 cm in front, up to 5 cm above the base of the
+				// neck; the model faces -z): only above the base, the chest plate is below it
+				return offset.y < CollarFrontBelow && offset.z < 0.f && offset.z > -CollarFront
+				       && std::abs(offset.x) < CollarFrontWidth;
+			};
 			for(EERIE_FACE & face : io->obj->facelist) {
-				bool head = false;
+				bool head = isCollar(face);
 				bool firstPerson = false;
 				for(VertexId vertex : face.vid) {
 					head = head || isHeadOrNeck(vertexGroups[vertex]);
