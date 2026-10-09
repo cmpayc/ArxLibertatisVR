@@ -476,14 +476,21 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	// Views for the stereo renderer: re-project pre-transformed vertices from the center camera into each eye
 	glm::dmat4 screenToWorld = glm::inverse(glm::dmat4(g_preparedCamera.m_worldToScreen));
 	Vec2i eyeSize = g_vr->getEyeSize();
+	/*
+	 * Bow zoom (user request): the game zooms in while the bow is drawn (focal + 177.5 x the draw ratio, about 1.5x).
+	 * The eyes are rendered with a narrower field of view, which the headset shows over its full field of view: the
+	 * whole view is magnified. The game lowers the ratio smoothly after the shot.
+	 */
+	float zoom = isPlayer ? 1.f + 0.5f * glm::clamp(player.m_bowAimRatio, 0.f, 1.f) : 1.f;
+
 	std::vector<OpenGLRenderer::StereoView> stereoViews(VRSystem::EyeCount);
 	for(size_t eye = 0; eye < VRSystem::EyeCount; eye++) {
 		const XrFovf & fov = views[eye]->fov;
 		OpenGLRenderer::StereoView & view = stereoViews[eye];
 		view.viewport = Rect(s32(eye) * eyeSize.x, 0, s32(eye + 1) * eyeSize.x, eyeSize.y);
 		view.view = vr::worldToViewMatrix(eyeRotation[eye], eyePosition[eye]);
-		view.projection = vr::projectionFromTangents(glm::tan(fov.angleLeft), glm::tan(fov.angleRight),
-		                                             glm::tan(fov.angleUp), glm::tan(fov.angleDown),
+		view.projection = vr::projectionFromTangents(glm::tan(fov.angleLeft) / zoom, glm::tan(fov.angleRight) / zoom,
+		                                             glm::tan(fov.angleUp) / zoom, glm::tan(fov.angleDown) / zoom,
 		                                             nearDist, farDist);
 		view.screenToClip = glm::mat4x4(glm::dmat4(view.projection) * glm::dmat4(view.view) * screenToWorld);
 	}
