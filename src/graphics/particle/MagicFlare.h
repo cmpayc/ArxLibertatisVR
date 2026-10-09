@@ -36,4 +36,7 @@ void AddFlare(const Vec2f & pos, float sm, short typ, Entity * io = nullptr, boo
 void FlareLine(Vec2f pos0, Vec2f pos1, Entity * io = nullptr);
 void ARX_MAGICAL_FLARES_Update();
 
+//! Size of the flares drawn in the world (VR: smaller, the rune drawing filled the view and slowed it down)
+extern float g_magicFlareScale;
+
 #endif // ARX_GRAPHICS_PARTICLE_MAGICFLARE_H

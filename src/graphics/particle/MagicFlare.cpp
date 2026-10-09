@@ -153,6 +153,8 @@ void MagicFlareChangeColor() {
 		g_magicFlareCurrentColor = 0;
 }
 
+float g_magicFlareScale = 1.f;
+
 void AddFlare(const Vec2f & pos, float sm, short typ, Entity * io, bool bookDraw) {
 	
 	size_t oldest = 0;
@@ -273,6 +275,10 @@ void AddFlare(const Vec2f & pos, float sm, short typ, Entity * io, bool bookDraw
 		}
 		pd->rgb = flare.rgb * (2.f / 3);
 		pd->m_rotation = 1.2f;
+		if(!bookDraw) {
+			pd->size *= g_magicFlareScale;
+			pd->sizeDelta *= g_magicFlareScale;
+		}
 		
 	}
 	
@@ -416,7 +422,7 @@ void ARX_MAGICAL_FLARES_Update() {
 				Vec3f pos = Vec3f(flare.p.x - size / 2.0f, flare.p.y - size / 2.0f, flare.p.z);
 				EERIEAddBitmap(mat, pos, size, size, surf, Color(color));
 			} else {
-				EERIEAddSprite(mat, flare.p, size * 0.025f + 1.f, Color(color), 2.f);
+				EERIEAddSprite(mat, flare.p, (size * 0.025f + 1.f) * g_magicFlareScale, Color(color), 2.f);
 			}
 
 		}

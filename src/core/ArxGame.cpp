@@ -247,7 +247,9 @@ bool ArxGame::initialize() {
 			// Tutorial messages name the controllers
 			g_extraLocalisationHook = &getVRLocalisation;
 			// Screen effects (hit flash, fades) cover the whole view
-			g_fullScreenColorHook = &drawVRFullView;
+			g_fullScreenHook = &drawVRFullView;
+			// The rune drawing flares are close to the eyes: smaller, they filled the view and slowed it down
+			g_magicFlareScale = 0.4f;
 		}
 	}
 	#endif

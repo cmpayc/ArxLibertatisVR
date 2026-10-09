@@ -61,10 +61,10 @@ void EERIEDRAWPRIM(Renderer::Primitive primitive, const TexturedVertex * vertice
 void EERIEDrawBitmap(const Rectf & rect, float z, TextureContainer * tex, Color color);
 
 /*!
- * Draws an untextured quad over the whole screen in another way, with the current render state (VR: screen effects
- * like the hit flash or fades cover the whole view in both eyes). Returns false to draw it normally.
+ * Draws a quad over the whole screen in another way, with the current render state (VR: screen effects like the hit
+ * flash, fades or the Night Vision border cover the whole view in both eyes). Returns false to draw it normally.
  */
-extern bool (*g_fullScreenColorHook)(Color color);
+extern bool (*g_fullScreenHook)(TextureContainer * texture, Color color);
 void EERIEDrawBitmap2DecalY(Rectf rect, float z, TextureContainer * tex, Color col, float _fDeltaY);
 
 void EERIEDrawSprite(const Vec3f & in, float siz, TextureContainer * tex, Color col, float Zpos);

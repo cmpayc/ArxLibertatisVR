@@ -1341,35 +1341,67 @@ void stowVRHeldItems() {
 	hangVRTorchOnBelt();
 }
 
-bool drawVRFullView(Color color) {
-	
+bool drawVRFullView(TextureContainer * texture, Color color) {
+
 	/*
 	 * Screen-space drawing is re-projected into the eyes from a center camera a little behind them: a quad over the
 	 * whole screen right in front of that camera ends up behind the eyes. Screen effects (the hit flash, fades, the
-	 * paralysis tint) are drawn on a large quad in front of the camera instead, with the caller's render state.
+	 * paralysis tint, the Night Vision border) are drawn on a quad in front of the eyes instead, with the caller's
+	 * render state.
 	 */
 	if(!isVRActive() || !g_vr->isRenderingStereo()) {
 		return false;
 	}
-	
-	const float Distance = 25.f; // cm in front of the camera
-	const float HalfSize = 100.f; // cm: about 76° around the view direction, more than the field of view
-	const glm::mat4x4 & viewToWorld = g_preparedCamera.m_viewToWorld;
-	Vec3f position(viewToWorld[3]);
-	Vec3f right = glm::normalize(Vec3f(viewToWorld[0])) * HalfSize;
-	Vec3f down = glm::normalize(Vec3f(viewToWorld[1])) * HalfSize;
-	Vec3f center = position + glm::normalize(Vec3f(viewToWorld[2])) * Distance;
-	
+
+	const float Distance = 25.f; // cm in front of the eyes
+	Vec3f eyes;
+	glm::mat3x3 head;
+	Vec3f center, right, down;
+	if(texture && getVRHeadPose(eyes, head)) {
+		/*
+		 * A picture (e.g. a border) covers most of the field of view of the eyes: its edges at the very edge of the view
+		 * were barely seen in the headset (user), so it is drawn smaller
+		 */
+		const float PictureSize = 0.75f; // of the field of view
+		float left = 0.f, rightTangent = 0.f, up = 0.f, bottom = 0.f;
+		for(size_t eye = 0; eye < VRSystem::EyeCount; eye++) {
+			const XrFovf & fov = g_vr->getView(eye).fov;
+			left = std::min(left, std::tan(fov.angleLeft));
+			rightTangent = std::max(rightTangent, std::tan(fov.angleRight));
+			up = std::max(up, std::tan(fov.angleUp));
+			bottom = std::min(bottom, std::tan(fov.angleDown));
+		}
+		Vec3f headRight = head * Vec3f(1.f, 0.f, 0.f);
+		Vec3f headDown = head * Vec3f(0.f, 1.f, 0.f);
+		center = eyes + head * Vec3f(0.f, 0.f, Distance)
+		         + headRight * (Distance * (left + rightTangent) * 0.5f) - headDown * (Distance * (up + bottom) * 0.5f);
+		right = headRight * (Distance * (rightTangent - left) * 0.5f * PictureSize);
+		down = headDown * (Distance * (up - bottom) * 0.5f * PictureSize);
+	} else {
+		// A color: larger than the field of view
+		const float HalfSize = 100.f; // cm: about 76° around the view direction
+		const glm::mat4x4 & viewToWorld = g_preparedCamera.m_viewToWorld;
+		Vec3f position(viewToWorld[3]);
+		right = glm::normalize(Vec3f(viewToWorld[0])) * HalfSize;
+		down = glm::normalize(Vec3f(viewToWorld[1])) * HalfSize;
+		center = position + glm::normalize(Vec3f(viewToWorld[2])) * Distance;
+		texture = nullptr;
+	}
+
+	Vec2f uv = texture ? texture->uv : Vec2f(0.f);
 	TexturedVertex quad[4];
 	worldToClipSpace(center - right - down, quad[0]);
 	worldToClipSpace(center + right - down, quad[1]);
 	worldToClipSpace(center - right + down, quad[2]);
 	worldToClipSpace(center + right + down, quad[3]);
+	quad[0].uv = Vec2f(0.f, 0.f);
+	quad[1].uv = Vec2f(uv.x, 0.f);
+	quad[2].uv = Vec2f(0.f, uv.y);
+	quad[3].uv = uv;
 	for(TexturedVertex & vertex : quad) {
-		vertex.uv = Vec2f(0.f);
 		vertex.color = color.toRGBA();
 	}
-	GRenderer->ResetTexture(0);
+	GRenderer->SetTexture(0, texture);
 	EERIEDRAWPRIM(Renderer::TriangleStrip, quad, 4);
 	return true;
 }
