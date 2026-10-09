@@ -1398,6 +1398,9 @@ public:
 class VROptionsMenuPage final : public MenuPage {
 
 	static constexpr int SnapTurnAngles[] = { 15, 30, 45, 60, 90 };
+	static inline const Vec2i WindowResolutions[] = {
+		Vec2i(1280, 720), Vec2i(1600, 900), Vec2i(1920, 1080), Vec2i(2560, 1440)
+	};
 
 public:
 
@@ -1528,20 +1531,43 @@ public:
 			cb->addEntry(getLocalised("system_menus_options_vr_desktop_view_window", "Window"));
 			cb->addEntry(getLocalised("system_menus_options_vr_desktop_view_off", "Off"));
 			cb->setValue(config.vr.desktopView == "off" ? 2 : config.vr.desktopView == "window" ? 1 : 0);
-			cb->valueChanged = [](int pos, std::string_view /* string */) {
-				bool wasFullscreen = (config.vr.desktopView == "fullscreen");
+			// Like the window size, used when the game starts (see ArxGame::initWindow, VRSystem::isDesktopViewShown)
+			cb->valueChanged = [this](int pos, std::string_view /* string */) {
 				config.vr.desktopView = (pos == 2) ? "off" : (pos == 1) ? "window" : "fullscreen";
-				bool fullscreen = (pos == 0);
-				if(g_vr && fullscreen != wasFullscreen) {
-					// Same as when the window is created in VR (ArxGame::initWindow)
-					if(fullscreen) {
-						mainApp->setWindowSize(true);
-					} else {
-						mainApp->getWindow()->setWindowSize(Vec2i(1280, 720));
-					}
+				if(m_windowResolution) {
+					m_windowResolution->setEnabled(pos == 1);
 				}
 			};
 			addCenter(std::move(cb));
+		}
+
+		{
+			// Only for the window: its size is set when it is created
+			std::string_view label = getLocalised("system_menus_options_vr_window_resolution", "Window size");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			int value = 0;
+			for(size_t i = 0; i < std::size(WindowResolutions); i++) {
+				const Vec2i & size = WindowResolutions[i];
+				cb->addEntry(std::to_string(size.x) + " x " + std::to_string(size.y));
+				if(size == config.vr.windowResolution) {
+					value = int(i);
+				}
+			}
+			cb->setValue(value);
+			cb->valueChanged = [](int pos, std::string_view /* string */) noexcept {
+				config.vr.windowResolution = WindowResolutions[pos];
+			};
+			cb->setEnabled(config.vr.desktopView == "window");
+			m_windowResolution = cb.get();
+			addCenter(std::move(cb));
+		}
+
+		{
+			std::string_view text = getLocalised("system_menus_options_vr_desktop_view_restart",
+			                                     "Desktop view changes after restarting the game");
+			auto txt = std::make_unique<TextWidget>(hFontControls, text);
+			txt->setEnabled(false);
+			addCenter(std::move(txt));
 		}
 
 		addBackButton(Page_Options);
@@ -1559,6 +1585,7 @@ private:
 
 	Widget * m_snapTurnAngle = nullptr;
 	Widget * m_smoothTurnSpeed = nullptr;
+	Widget * m_windowResolution = nullptr;
 
 };
 

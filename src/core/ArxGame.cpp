@@ -476,7 +476,8 @@ bool ArxGame::initWindow(RenderWindow * window) {
 		if(config.vr.desktopView == "fullscreen") {
 			setWindowSize(true);
 		} else {
-			getWindow()->setWindowSize(Vec2i(1280, 720));
+			bool windowed = (config.vr.desktopView == "window");
+			getWindow()->setWindowSize(windowed ? config.vr.windowResolution : Vec2i(1280, 720));
 		}
 	} else
 	#endif

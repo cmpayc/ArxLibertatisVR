@@ -256,10 +256,14 @@ public:
 		bool debugRay;
 		/*!
 		 * The desktop window while playing in VR: "fullscreen" (at the video resolution, even if the video settings
-		 * say windowed), "window" (1280x720) or "off" (a 1280x720 window that is not drawn to). The interface is drawn
-		 * at the window's resolution for the headset too: a smaller window makes it cheaper and less sharp.
+		 * say windowed), "window" (at windowResolution) or "off" (a 1280x720 window that is not drawn to). The
+		 * interface is drawn at the window's resolution for the headset too: a smaller window makes it cheaper and less
+		 * sharp.
 		 */
 		std::string desktopView;
+
+		//! Size of the desktop window with desktopView "window" (set when the window is created)
+		Vec2i windowResolution;
 
 		//! Darken the edges of the view while moving with the stick or turning smoothly: 0 (off) to 3 (strongest)
 		int vignette;

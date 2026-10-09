@@ -73,7 +73,8 @@ constexpr const std::string_view
 	thumbnailSize = BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_WIDTH) "x"
 	                BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_HEIGHT),
 	vrRuntime = "auto",
-	vrDesktopView = "fullscreen";
+	vrDesktopView = "fullscreen",
+	vrWindowResolution = "1280x720";
 
 constexpr const int
 	refreshRate = 0,
@@ -316,6 +317,7 @@ constexpr const std::string_view
 	vrShowHud = "show_hud",
 	vrDebugRay = "debug_ray",
 	vrDesktopView = "desktop_view",
+	vrWindowResolution = "window_resolution",
 	vrVignette = "vignette";
 
 // Input key options
@@ -605,6 +607,11 @@ bool Config::save() {
 	writer.writeKey(Key::vrShowHud, vr.showHud);
 	writer.writeKey(Key::vrDebugRay, vr.debugRay);
 	writer.writeKey(Key::vrDesktopView, vr.desktopView);
+	{
+		std::ostringstream size;
+		size << vr.windowResolution.x << 'x' << vr.windowResolution.y;
+		writer.writeKey(Key::vrWindowResolution, size.str());
+	}
 	writer.writeKey(Key::vrVignette, vr.vignette);
 
 	// key
@@ -768,6 +775,8 @@ bool Config::init(const fs::path & file) {
 	vr.showHud = reader.getKey(Section::VR, Key::vrShowHud, Default::vrShowHud);
 	vr.debugRay = reader.getKey(Section::VR, Key::vrDebugRay, Default::vrDebugRay);
 	vr.desktopView = reader.getKey(Section::VR, Key::vrDesktopView, Default::vrDesktopView);
+	std::string_view vrWindowResolution = reader.getKey(Section::VR, Key::vrWindowResolution, Default::vrWindowResolution);
+	vr.windowResolution = parseResolution(vrWindowResolution, Vec2i(1280, 720));
 	vr.vignette = glm::clamp(reader.getKey(Section::VR, Key::vrVignette, Default::vrVignette), 0, 3);
 
 	// Get action key settings

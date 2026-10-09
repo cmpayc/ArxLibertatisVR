@@ -1824,7 +1824,9 @@ bool VRSystem::getInventoryPanel(Texture *& texture, Vec3f & position, glm::quat
 }
 
 bool VRSystem::isDesktopViewShown() {
-	return config.vr.desktopView != "off";
+	// As the game started: changing the setting takes effect after a restart (like the window it was created with)
+	static const bool shown = (config.vr.desktopView != "off");
+	return shown;
 }
 
 VRHand VRSystem::getPointerHand() const {
