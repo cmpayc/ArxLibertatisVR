@@ -70,6 +70,7 @@ float g_uprightHeight = 0.f; // head height when standing upright (stage space, 
 bool g_userEyeHeightValid = false;
 float g_userEyeHeight = 0.f; // highest the head has been: the user's standing eye height (stage space, meters)
 float g_bodyScale = 1.f; // scale of the player model to match the user's height
+bool g_snapBodyScale = true; // set the scale at once (the first frame, after loading), else it adapts slowly
 float g_crouchDrop = 0.f; // how far the view is lowered for crouching with a button (cm, y down)
 const float ModelEyeHeight = 169.f; // eye height of the standing player model (human_base) above its feet, cm
 const float ModelHeight = 180.f; // height of the standing player model (the top of its head), cm
@@ -95,6 +96,29 @@ Vec3f toVec(const XrVector3f & v) {
 
 glm::quat toQuat(const XrQuaternionf & q) {
 	return glm::quat(q.w, q.x, q.y, q.z);
+}
+
+/*!
+ * How far the body is crouched with the crouch button, 0 (standing) to 1: along the animations that crouch and stand
+ * up, or the crouch movement (or a lowered collision cylinder, kept under a low ceiling)
+ */
+float getCrouchProgress() {
+
+	bool crouching = (player.m_currentMovement & PLAYER_CROUCH) || player.physics.cyl.height > player.baseHeight();
+
+	const Entity * io = entities.player();
+	if(!io) {
+		return crouching ? 1.f : 0.f;
+	}
+	const AnimLayer & layer = io->animlayer[0];
+	bool starting = layer.cur_anim && layer.cur_anim == io->anims[ANIM_CROUCH_START];
+	bool ending = layer.cur_anim && layer.cur_anim == io->anims[ANIM_CROUCH_END];
+	if((starting || ending) && layer.currentAltAnim() && layer.currentAltAnim()->anim_time > 0ms) {
+		float progress = glm::clamp(float(layer.ctime / layer.currentAltAnim()->anim_time), 0.f, 1.f);
+		return starting ? progress : 1.f - progress;
+	}
+
+	return crouching ? 1.f : 0.f;
 }
 
 /*!
@@ -162,6 +186,29 @@ void syncVRTrackingToPlayer() {
 
 void requestVRRecenter() {
 	g_recenterRequested = true;
+	if(g_vr) {
+		g_vr->resetUIPlacement();
+	}
+}
+
+void resetVRTracking() {
+	/*
+	 * After loading a save or changing level, measure the user again from the current pose (user request: an old
+	 * standing height made a seated user crouch): height, size of the player model, the center and no lean
+	 */
+	g_recenterRequested = true;
+	g_playSpaceValid = false;
+	g_consumedOffset = Vec2f(0.f);
+	g_roomScaleMovement = Vec3f(0.f);
+	g_standingHeightValid = false;
+	g_uprightHeightValid = false;
+	g_userEyeHeightValid = false;
+	g_snapBodyScale = true;
+	g_physicallyCrouching = false;
+	g_crouchDrop = 0.f;
+	g_previousHeadValid = false;
+	g_headVelocity = g_handsVelocity = Vec2f(0.f);
+	g_settleTime = 0.f;
 	if(g_vr) {
 		g_vr->resetUIPlacement();
 	}
@@ -248,7 +295,12 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 		if(g_userEyeHeight > 0.5f) {
 			targetScale = glm::clamp(g_userEyeHeight * scale / modelEyeHeight, MinBodyScale, MaxBodyScale);
 		}
-		g_bodyScale += (targetScale - g_bodyScale) * (1.f - std::exp(-g_vr->getFrameDuration() * 2.f));
+		if(g_snapBodyScale) {
+			g_bodyScale = targetScale;
+			g_snapBodyScale = false;
+		} else {
+			g_bodyScale += (targetScale - g_bodyScale) * (1.f - std::exp(-g_vr->getFrameDuration() * 2.f));
+		}
 
 		origin = Vec3f(player.pos.x, player.pos.y - player.baseHeight() - g_bodyScale * modelEyeHeight, player.pos.z);
 		// Optionally raise the view further (y points down)
@@ -257,14 +309,19 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 		/*
 		 * Crouching with a button (or kept crouched under a low ceiling): lower the view like the crouching body,
 		 * minus how far the user already bends down. A real crouch moves the view by itself.
+		 * The game lowers the collision cylinder only when the crouch animation ends (the view followed about a
+		 * second after the body, user), and a fixed speed was faster than the body: the view follows the progress of
+		 * the crouch animations.
 		 */
 		float crouchDrop = 0.f;
-		if(player.physics.cyl.height > player.baseHeight() && !g_physicallyCrouching) {
+		float crouched = getCrouchProgress();
+		if(crouched > 0.f && !g_physicallyCrouching) {
 			float physicalDrop = std::max(g_standingHeight - headStage.y, 0.f) * scale;
 			float bodyDrop = (player.crouchHeight() - player.baseHeight()) * g_bodyScale;
-			crouchDrop = std::max(bodyDrop - physicalDrop, 0.f);
+			// Scaled as a whole: subtracting the user's drop along the way held the view still for the first 40%
+			crouchDrop = std::max(bodyDrop - physicalDrop, 0.f) * crouched;
 		}
-		g_crouchDrop += (crouchDrop - g_crouchDrop) * (1.f - std::exp(-g_vr->getFrameDuration() * 8.f));
+		g_crouchDrop += (crouchDrop - g_crouchDrop) * (1.f - std::exp(-g_vr->getFrameDuration() * 20.f));
 		origin.y += g_crouchDrop;
 	} else {
 		// Scripted cameras: the camera defines the origin and heading
