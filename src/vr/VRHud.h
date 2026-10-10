@@ -43,6 +43,7 @@ struct VRHudAreas {
 	Rect changeLevel; //!< Stairs icon, while the player can change level (by jumping)
 	Rect inventory; //!< Player inventory, while open
 	Rect map;       //!< Mini map
+	Rect runes;     //!< Runes of the spell being drawn (main hand wrist)
 	Rect loot;      //!< Inventory of a dead NPC, shown lying on the body
 	Rect otherInventory; //!< Inventory of a container or a dead NPC, wherever it is shown (pointed without a beam)
 	Rect subtitles; //!< Subtitles of in-game cutscenes, below the view

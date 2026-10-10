@@ -426,7 +426,7 @@ void copyMirroredFingers(Skeleton & skeleton, const ArmBones & from, const ArmBo
 
 void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & state,
                  const ANIM_HANDLE * fistPose = nullptr, const ArmBones * fistArm = nullptr,
-                 bool mirrorFist = false) {
+                 bool mirrorFist = false, bool pointing = false) {
 	
 	// In the rest pose of the model the palms face down (+y in model space, which points down)
 	const Vec3f palm(0.f, 1.f, 0.f);
@@ -455,13 +455,20 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 	if(state.hasThumbTouch) {
 		thumbAngle = state.thumbTouch ? 40.f + 15.f * state.squeeze : 0.f;
 	}
+
+	// Casting (the game's pose for magic): the index straight, the other fingers bent with the thumb over them
+	if(pointing) {
+		grip = 1.f;
+		index = 0.f;
+		thumbAngle = 55.f;
+	}
 	
 	/*
 	 * Grip and trigger together make a fist (it punches, see VRCombat): blend into the right hand grip of the game's
 	 * one-handed weapon stance (its first frame), mirrored for the left hand like copyMirroredFingers. Bending the fingers
 	 * further pointed the tips down, the bare hand stance hardly bends them.
 	 */
-	float fist = std::min(state.squeeze, state.trigger);
+	float fist = pointing ? 0.f : std::min(state.squeeze, state.trigger);
 	const EERIE_ANIM * fistAnim = (fistPose && !fistPose->anims.empty()) ? fistPose->anims[0] : nullptr;
 	
 	auto curl = [&](VertexGroupId bone, VertexGroupId fistBone, const Vec3f & axis, float degrees) {
@@ -827,6 +834,10 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 					}
 					curlFingers(skeleton, arm, fingers, entity.anims[ANIM_1H_WAIT], &bones.arms[VRHandRight],
 					            hand == VRHandLeft);
+				}
+				// In the magic mode the hand drawing the runes points like in the game, also holding a weapon (user)
+				if(g_vr && g_vr->isMagicMode() && g_vr->getPointerHand() == VRHand(hand)) {
+					curlFingers(skeleton, arm, state, nullptr, nullptr, false, true);
 				}
 			}
 		}

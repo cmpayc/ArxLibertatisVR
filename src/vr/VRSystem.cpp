@@ -1526,6 +1526,7 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 	const float GaugePixelSize = 0.0003f;
 	const float InventoryPixelSize = 0.0005f;
 	const float MapPixelSize = 0.001f;
+	const float RunePixelSize = 0.0006f; // A rune icon of 32 pixels is about 2 cm
 	const float Gap = 0.005f;
 	// Rotation of the panels on the left wrist, clockwise (mirrored on the right wrist)
 	const float Tilt = glm::radians(45.f);
@@ -1564,7 +1565,7 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 		const VRHandState & state = m_input.getHand(hand);
 		bool isHudHand = (hand == hudHand);
 		if(!state.grip.valid || (isHudHand ? (areas.gauges.empty() && areas.inventory.empty())
-		                                   : areas.map.empty())) {
+		                                   : (areas.map.empty() && areas.runes.empty()))) {
 			continue;
 		}
 
@@ -1638,6 +1639,10 @@ void VRSystem::updateWristPanels(const VRHudAreas & areas) {
 		if(!isHudHand) {
 			if(visible(forearm)) {
 				add(forearm, areas.map, MapPixelSize / areas.mapScale, Vec2f(0.f), false, MapTilt);
+			}
+			// The runes of the spell being drawn at the wrist, like a watch, while they are shown (user request)
+			if(visible(wrist)) {
+				add(wrist, areas.runes, RunePixelSize / areas.hudScale, Vec2f(0.f), false);
 			}
 			continue;
 		}
@@ -1942,6 +1947,69 @@ void VRSystem::updateBookPanel(const VRHudAreas & areas) {
 		}
 	}
 
+}
+
+bool VRSystem::getImprovedRunePoint(const Vec3f & tip, Vec2f & screen) {
+
+	/*
+	 * Improved rune drawing (experimental, [vr] improved_rune_drawing, user request): the stroke is seen through the
+	 * current view, so moving or tilting the head bent or turned a rune, the tracking jitter added zigzags and the
+	 * release of the trigger a tail. Instead the stroke is drawn on a canvas fixed when it starts (the view direction
+	 * then, without the head roll), smoothed, and passed to the game 50 ms late, so that the release does not reach it.
+	 * All in the tracking space: walking or turning while drawing does not matter either.
+	 */
+	const float SmoothingRate = 40.f; // 1/s: about 25 ms
+	const float Delay = 0.05f; // s
+	const float ScaleProbe = 0.1f; // m
+
+	RuneCanvas & canvas = m_runeCanvas;
+	float dt = getFrameDuration();
+
+	if(!canvas.valid) {
+		// The canvas: the view direction now, level (no roll), and the screen scale at the hand
+		const XrPosef & view = m_views[0].pose;
+		glm::quat head(view.orientation.w, view.orientation.x, view.orientation.y, view.orientation.z);
+		Vec3f forward = head * Vec3f(0.f, 0.f, -1.f);
+		Vec3f right = glm::cross(forward, Vec3f(0.f, 1.f, 0.f));
+		if(glm::length(right) < 0.1f) {
+			return false; // Looking straight up or down
+		}
+		right = glm::normalize(right);
+		Vec3f up = glm::normalize(glm::cross(right, forward));
+		Vec3f world, worldProbe;
+		Vec2f start, probe;
+		if(!trackingPointToWorld(tip, world) || !worldToVRScreen(world, start)
+		   || !trackingPointToWorld(tip + right * ScaleProbe, worldProbe) || !worldToVRScreen(worldProbe, probe)) {
+			return false;
+		}
+		float pixelsPerMeter = glm::length(probe - start) / ScaleProbe;
+		if(pixelsPerMeter <= 0.f) {
+			return false;
+		}
+		canvas.valid = true;
+		canvas.right = right;
+		canvas.up = up;
+		canvas.origin = tip;
+		canvas.screenOrigin = start;
+		canvas.pixelsPerMeter = pixelsPerMeter;
+		canvas.smoothed = tip;
+		canvas.time = 0.f;
+		canvas.history.clear();
+	}
+
+	canvas.smoothed += (tip - canvas.smoothed) * (1.f - std::exp(-dt * SmoothingRate));
+	canvas.time += dt;
+	Vec3f offset = canvas.smoothed - canvas.origin;
+	Vec2f point = canvas.screenOrigin
+	              + Vec2f(glm::dot(offset, canvas.right), -glm::dot(offset, canvas.up)) * canvas.pixelsPerMeter;
+	canvas.history.emplace_back(canvas.time, point);
+
+	// The newest point at least the delay old (the first one until then)
+	while(canvas.history.size() > 1 && canvas.history[1].first <= canvas.time - Delay) {
+		canvas.history.pop_front();
+	}
+	screen = canvas.history.front().second;
+	return true;
 }
 
 void VRSystem::captureHeldPanel(bool book) {
@@ -2606,15 +2674,26 @@ void VRSystem::updatePointer() {
 	 * held. The game draws the flares in the world along the line through the cursor, so they appear at the hand, and
 	 * recognizes the runes from these screen positions.
 	 */
+	bool improvedStroke = false;
 	if(m_magicDrawing && m_magicMode && hand.isPressed(VRButtonTrigger) && hand.grip.valid) {
-		Vec3f fingertips;
+		Vec3f tip = hand.grip.position + hand.grip.orientation * Vec3f(0.f, 0.f, -0.08f);
 		Vec2f screen;
-		if(trackingPointToWorld(hand.grip.position + hand.grip.orientation * Vec3f(0.f, 0.f, -0.08f), fingertips)
-		   && worldToVRScreen(fingertips, screen)) {
+		if(config.vr.improvedRuneDrawing && m_magicStroke && getImprovedRunePoint(tip, screen)) {
+			improvedStroke = true;
 			mouse = Vec2s(s16(screen.x), s16(screen.y));
 			onWorld = true;
 			onUI = false;
+		} else {
+			Vec3f fingertips;
+			if(trackingPointToWorld(tip, fingertips) && worldToVRScreen(fingertips, screen)) {
+				mouse = Vec2s(s16(screen.x), s16(screen.y));
+				onWorld = true;
+				onUI = false;
+			}
 		}
+	}
+	if(!improvedStroke) {
+		m_runeCanvas.valid = false;
 	}
 	
 	GInput->setVirtualMousePosition(onUI || onWorld, mouse);

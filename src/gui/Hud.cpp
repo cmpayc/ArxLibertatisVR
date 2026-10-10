@@ -654,8 +654,12 @@ void MemorizedRunesHud::update(const Rectf & parent) {
 	m_rect = createChild(parent, Anchor_TopLeft, m_size * m_scale, Anchor_TopRight);
 }
 
+bool MemorizedRunesHud::isVisible() const {
+	return (CurrSpellSymbol || player.SpellToMemorize.bSpell) && m_count > 0;
+}
+
 void MemorizedRunesHud::draw() {
-	
+
 	if(!(CurrSpellSymbol || player.SpellToMemorize.bSpell)) {
 		return;
 	}

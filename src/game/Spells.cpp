@@ -129,6 +129,12 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #include "util/Cast.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 
 bool WILLRETURNTOFREELOOK = false;
 bool GLOBAL_MAGIC_MODE = true;
@@ -468,6 +474,9 @@ void ARX_SPELLS_ManageMagic() {
 		if(player.Interface & INTER_COMBATMODE) {
 			WILLRETURNTOCOMBATMODE = true;
 
+			#if ARX_HAVE_OPENXR
+			if(!leaveVRCombatModeForMagic()) // VR: the weapon stays in the hand
+			#endif
 			ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
 
 			ResetAnim(io->animlayer[1]);

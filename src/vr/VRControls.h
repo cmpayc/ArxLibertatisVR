@@ -136,6 +136,16 @@ void requestVRWeaponDraw();
  */
 bool suspendVRCombatMode();
 
+/*!
+ * Leave the combat mode to cast a spell with the weapon kept in the hand, as the game shows it
+ *
+ * \return false if not in VR or not in the combat mode: leave it normally
+ */
+bool leaveVRCombatModeForMagic();
+
+//! \return true while casting with a weapon kept in the other hand: it still strikes (see VRCombat)
+[[nodiscard]] bool isVRWeaponKeptForMagic();
+
 //! The weapon kept in the hand for an inventory, or to draw again after loading - once per game frame
 void updateVRWeaponState();
 

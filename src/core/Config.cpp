@@ -125,7 +125,8 @@ constexpr const bool
 	vrLeftHanded = false,
 	vrShowHud = false,
 	vrDebugRay = false,
-	vrShieldBlock = true;
+	vrShieldBlock = true,
+	vrImprovedRuneDrawing = false;
 
 #ifdef ARX_DEBUG
 const bool allowConsole = true;
@@ -318,6 +319,7 @@ constexpr const std::string_view
 	vrShowHud = "show_hud",
 	vrDebugRay = "debug_ray",
 	vrShieldBlock = "shield_block",
+	vrImprovedRuneDrawing = "improved_rune_drawing",
 	vrDesktopView = "desktop_view",
 	vrWindowResolution = "window_resolution",
 	vrVignette = "vignette";
@@ -609,6 +611,7 @@ bool Config::save() {
 	writer.writeKey(Key::vrShowHud, vr.showHud);
 	writer.writeKey(Key::vrDebugRay, vr.debugRay);
 	writer.writeKey(Key::vrShieldBlock, vr.shieldBlock);
+	writer.writeKey(Key::vrImprovedRuneDrawing, vr.improvedRuneDrawing);
 	writer.writeKey(Key::vrDesktopView, vr.desktopView);
 	{
 		std::ostringstream size;
@@ -778,6 +781,7 @@ bool Config::init(const fs::path & file) {
 	vr.showHud = reader.getKey(Section::VR, Key::vrShowHud, Default::vrShowHud);
 	vr.debugRay = reader.getKey(Section::VR, Key::vrDebugRay, Default::vrDebugRay);
 	vr.shieldBlock = reader.getKey(Section::VR, Key::vrShieldBlock, Default::vrShieldBlock);
+	vr.improvedRuneDrawing = reader.getKey(Section::VR, Key::vrImprovedRuneDrawing, Default::vrImprovedRuneDrawing);
 	vr.desktopView = reader.getKey(Section::VR, Key::vrDesktopView, Default::vrDesktopView);
 	std::string_view vrWindowResolution = reader.getKey(Section::VR, Key::vrWindowResolution, Default::vrWindowResolution);
 	vr.windowResolution = parseResolution(vrWindowResolution, Vec2i(1280, 720));

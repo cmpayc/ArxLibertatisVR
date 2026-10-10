@@ -1015,8 +1015,9 @@ void updateVRCombat() {
 	float dt = g_vr->getFrameDuration();
 	WeaponType type = ARX_EQUIPMENT_GetPlayerWeaponType();
 
-	// The fists punch whenever no weapon is drawn: without a weapon, or with it (or a bow) in its sheath
-	bool drawn = (player.Interface & INTER_COMBATMODE) && type != WEAPON_BARE;
+	// The fists punch whenever no weapon is drawn: without a weapon, or with it (or a bow) in its sheath. A weapon kept
+	// in the hand that does not cast strikes while casting (user request, see leaveVRCombatModeForMagic).
+	bool drawn = ((player.Interface & INTER_COMBATMODE) || isVRWeaponKeptForMagic()) && type != WEAPON_BARE;
 	if(!drawn || type != WEAPON_BOW) {
 		if(g_archery.nocked) {
 			dropArrow(*io); // The bow was put away (the game also unlinks the arrow)

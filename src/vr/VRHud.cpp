@@ -139,6 +139,8 @@ VRHudAreas getVRHudAreas() {
 	}
 	areas.stealth = toIconArea(g_hudRoot.stealthArea());
 	areas.changeLevel = toIconArea(g_hudRoot.changeLevelArea());
+	// The runes being drawn were seen in the mini map panel while it was at the top right (next to them)
+	areas.runes = toPixels(g_hudRoot.memorizedRunesArea());
 	if(!(player.Interface & INTER_COMBATMODE) && (player.Interface & INTER_MINIBACK)) {
 		areas.levelUp = toIconArea(g_hudRoot.levelUpArea()); // Only drawn then
 	}

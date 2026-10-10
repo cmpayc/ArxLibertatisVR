@@ -193,9 +193,11 @@ class MemorizedRunesHud : public HudIconBase {
 	
 public:
 	MemorizedRunesHud();
-	
+
 	void update(const Rectf & parent);
 	void draw();
+	//! The runes of the spell being drawn (or to memorize) are shown
+	[[nodiscard]] bool isVisible() const;
 };
 
 class HealthGauge : public HudItem {
@@ -445,6 +447,8 @@ public:
 	Rectf levelUpArea() { return levelUpIconGui.isVisible() ? levelUpIconGui.rect() : Rectf(); }
 	//! The stairs icon while the player can change level (by jumping or clicking it), else empty
 	Rectf changeLevelArea() { return changeLevelIconGui.isVisible() ? changeLevelIconGui.rect() : Rectf(); }
+	//! The runes of the spell being drawn while they are shown, else empty
+	Rectf memorizedRunesArea() { return memorizedRunesHud.isVisible() ? memorizedRunesHud.rect() : Rectf(); }
 };
 
 extern HudRoot g_hudRoot;

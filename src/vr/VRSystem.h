@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <deque>
 #include <functional>
 #include <string>
 #include <utility>
@@ -329,6 +330,22 @@ private:
 	VRInput m_input;
 	bool m_pointerOnUI;
 	Rect m_otherInventoryArea; //!< Container or loot inventory in the last frame: pointed at without a beam
+
+	//! The canvas of a rune stroke with the improved rune drawing (tracking space), see getImprovedRunePoint
+	struct RuneCanvas {
+		bool valid = false;
+		Vec3f right = Vec3f(1.f, 0.f, 0.f);
+		Vec3f up = Vec3f(0.f, 1.f, 0.f);
+		Vec3f origin = Vec3f(0.f);
+		Vec2f screenOrigin = Vec2f(0.f);
+		float pixelsPerMeter = 1.f;
+		Vec3f smoothed = Vec3f(0.f);
+		float time = 0.f;
+		std::deque<std::pair<float, Vec2f>> history; //!< Time and screen position of the points
+	};
+	RuneCanvas m_runeCanvas;
+	//! The screen position of a rune stroke point at the fingertips (tracking space), false to use the view instead
+	bool getImprovedRunePoint(const Vec3f & tip, Vec2f & screen);
 	bool m_lastFrameStereo; // The last frame showed the game world
 	float m_triggerHoldTime;
 	Vec2s m_clickPosition;

@@ -1484,6 +1484,17 @@ public:
 		}
 
 		{
+			std::string_view label = getLocalised("system_menus_options_vr_improved_rune_drawing",
+			                                      "Improved rune drawing (experimental)");
+			auto cb = std::make_unique<CheckboxWidget>(checkboxSize(), hFontMenu, label);
+			cb->setChecked(config.vr.improvedRuneDrawing);
+			cb->stateChanged = [](bool checked) noexcept {
+				config.vr.improvedRuneDrawing = checked;
+			};
+			addCenter(std::move(cb));
+		}
+
+		{
 			std::string_view label = getLocalised("system_menus_options_vr_movement", "Move towards");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
 			cb->addEntry(getLocalised("system_menus_options_vr_movement_head", "Head"));

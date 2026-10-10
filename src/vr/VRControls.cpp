@@ -77,6 +77,7 @@ bool g_sneaking = false; // Toggled with the off stick click
 bool g_stowWeapon = false; // Put the drawn weapon away (see stowVRHeldItems)
 bool g_drawWeaponRequested = false; // Draw the weapon into the hand again, see requestVRWeaponDraw
 bool g_combatSuspended = false; // Out of the combat mode for an inventory with the weapon in the hand
+bool g_weaponKeptForMagic = false; // Out of the combat mode to cast, the weapon in the other hand still strikes
 
 //! \return true if the equipped weapon is attached to a hand of the player model (not on the back)
 bool isWeaponInHand() {
@@ -469,6 +470,31 @@ void updateVignette(const VRHandState & main) {
 
 } // anonymous namespace
 
+bool leaveVRCombatModeForMagic() {
+
+	if(!isVRActive() || !(player.Interface & INTER_COMBATMODE)) {
+		return false;
+	}
+
+	/*
+	 * A weapon in the hand drawing the runes (or a bow, held with both hands) is put away as usual and drawn again
+	 * after the spell (user request). A weapon in the other hand stays there and still strikes (user request): only
+	 * the combat mode is left, the game returns to it after the spell (WILLRETURNTOCOMBATMODE).
+	 */
+	WeaponType type = ARX_EQUIPMENT_GetPlayerWeaponType();
+	if(type == WEAPON_BARE || type == WEAPON_BOW || getVRWeaponHand() == g_vr->getPointerHand()) {
+		return false;
+	}
+	player.Interface &= ~(INTER_COMBATMODE | INTER_NO_STRIKE);
+	player.doingmagic = 0;
+	g_weaponKeptForMagic = true;
+	return true;
+}
+
+bool isVRWeaponKeptForMagic() {
+	return g_weaponKeptForMagic;
+}
+
 bool suspendVRCombatMode() {
 
 	if(!isVRActive() || !(player.Interface & INTER_COMBATMODE) || ARX_EQUIPMENT_GetPlayerWeaponType() == WEAPON_BARE) {
@@ -487,6 +513,11 @@ void updateVRWeaponState() {
 		return;
 	}
 	bool hasWeapon = ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE;
+
+	// Back in the combat mode after the spell, or it will not return (see leaveVRCombatModeForMagic)
+	if(g_weaponKeptForMagic && ((player.Interface & INTER_COMBATMODE) || !WILLRETURNTOCOMBATMODE || !hasWeapon)) {
+		g_weaponKeptForMagic = false;
+	}
 
 	// The inventories are closed again: back to the combat mode with the weapon still in the hand
 	if(g_combatSuspended) {
@@ -622,8 +653,9 @@ void updateVRControls() {
 	 * back over the shoulder, once it has left the sheath.
 	 */
 	bool toggleWeapon = false;
-	// Kept in the hand while an inventory is open (see suspendVRCombatMode): sheathed like a drawn weapon
-	bool weaponDrawn = (player.Interface & INTER_COMBATMODE) || g_combatSuspended;
+	// Kept in the hand while an inventory is open or casting (see suspendVRCombatMode, leaveVRCombatModeForMagic):
+	// sheathed like a drawn weapon
+	bool weaponDrawn = (player.Interface & INTER_COMBATMODE) || g_combatSuspended || g_weaponKeptForMagic;
 	if(g_vr->isBookInHand()) {
 		// Both hands are for the book (the weapon was put away when it opened, see stowVRHeldItems)
 	} else if(!weaponDrawn) {
@@ -639,9 +671,13 @@ void updateVRControls() {
 		g_sheatheArmed = true;
 	} else if(g_sheatheArmed && getSheathDistance(g_weaponHand) < SheathRadius) {
 		g_sheatheArmed = false;
-		if(g_combatSuspended) {
-			// Out of the combat mode already: only put the weapon on the back
+		if(g_combatSuspended || g_weaponKeptForMagic) {
+			// Out of the combat mode already: only put the weapon on the back, and stay out of it after the spell
+			if(g_weaponKeptForMagic) {
+				WILLRETURNTOCOMBATMODE = false;
+			}
 			g_combatSuspended = false;
+			g_weaponKeptForMagic = false;
 			ARX_EQUIPMENT_AttachPlayerWeaponToBack();
 			g_vr->getInput().vibrate(g_weaponHand, 0.6f, 0.08f);
 		} else {

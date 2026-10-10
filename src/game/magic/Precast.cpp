@@ -31,6 +31,12 @@
 #include "gui/Speech.h"
 #include "scene/GameSound.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 const size_t MAX_PRECAST = 3;
 
 GameInstant LAST_PRECAST_TIME = 0;
@@ -108,6 +114,9 @@ void ARX_SPELLS_Precast_Check() {
 		AnimLayer & layer1 = entities.player()->animlayer[1];
 		if(player.Interface & INTER_COMBATMODE) {
 			WILLRETURNTOCOMBATMODE = true;
+			#if ARX_HAVE_OPENXR
+			if(!leaveVRCombatModeForMagic()) // VR: the weapon stays in the hand
+			#endif
 			ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
 			ResetAnim(layer1);
 			layer1.flags &= ~EA_LOOP;

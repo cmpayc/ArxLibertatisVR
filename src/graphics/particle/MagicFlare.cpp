@@ -275,7 +275,8 @@ void AddFlare(const Vec2f & pos, float sm, short typ, Entity * io, bool bookDraw
 		}
 		pd->rgb = flare.rgb * (2.f / 3);
 		pd->m_rotation = 1.2f;
-		if(!bookDraw) {
+		if(!bookDraw && !io) {
+			// Only the drawing (the symbols of recognized runes, with their caster, keep their size)
 			pd->size *= g_magicFlareScale;
 			pd->sizeDelta *= g_magicFlareScale;
 		}
@@ -422,7 +423,8 @@ void ARX_MAGICAL_FLARES_Update() {
 				Vec3f pos = Vec3f(flare.p.x - size / 2.0f, flare.p.y - size / 2.0f, flare.p.z);
 				EERIEAddBitmap(mat, pos, size, size, surf, Color(color));
 			} else {
-				EERIEAddSprite(mat, flare.p, (size * 0.025f + 1.f) * g_magicFlareScale, Color(color), 2.f);
+				float scale = flare.io ? 1.f : g_magicFlareScale; // Rune symbols of a caster keep their size
+				EERIEAddSprite(mat, flare.p, (size * 0.025f + 1.f) * scale, Color(color), 2.f);
 			}
 
 		}

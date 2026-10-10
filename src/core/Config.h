@@ -271,6 +271,9 @@ public:
 		//! A shield raised towards a melee attacker blocks part of the hit, more with the Defense skill (VRCombat)
 		bool shieldBlock;
 
+		//! Experimental: runes are drawn on a canvas fixed when the stroke starts, smoothed (VRSystem)
+		bool improvedRuneDrawing;
+
 	} vr;
 	
 	// section 'key'
