@@ -432,7 +432,12 @@ DamageType getDamageTypeFromWeaponMaterial(std::string_view material) noexcept {
 	}
 }
 
+// VR: the last hit computed was taken by the player's shield
+static bool g_hitBlockedByShield = false;
+
 float ARX_EQUIPMENT_ComputeDamages(Entity * io_source, Entity * io_target, float ratioaim, Vec3f * position) {
+	
+	g_hitBlockedByShield = false;
 	
 	SendIOScriptEvent(io_source, io_target, SM_AGGRESSION);
 	
@@ -555,6 +560,7 @@ float ARX_EQUIPMENT_ComputeDamages(Entity * io_source, Entity * io_target, float
 	#if ARX_HAVE_OPENXR
 	// VR: a shield held up towards the attacker blocks part of the hit (optional)
 	blocked = io_target == entities.player() && blockVRShieldHit(*io_source, dmgs);
+	g_hitBlockedByShield = blocked;
 	if(!blocked)
 	#endif
 	ARX_SOUND_PlayCollision("flesh", wmat, power, 1.f, pos, io_source);
@@ -678,9 +684,12 @@ bool ARX_EQUIPMENT_Strike_Check(Entity * io_source, Entity * io_weapon, float ra
 					Vec3f pos = target->obj->vertexWorldPositions[hitpoint].v;
 					
 					float dmgs = 0.f;
+					bool shieldHit = false;
 					if(!(flags & 1)) {
 						
 						dmgs = ARX_EQUIPMENT_ComputeDamages(io_source, target, ratioaim, &pos);
+						// VR: a hit taken by the shield sparks instead of bleeding
+						shieldHit = g_hitBlockedByShield;
 						
 						if(target->ioflags & IO_NPC) {
 							ret = true;
@@ -712,7 +721,7 @@ bool ARX_EQUIPMENT_Strike_Check(Entity * io_source, Entity * io_weapon, float ra
 						}
 					}
 					
-					if((target->ioflags & IO_NPC) && (dmgs > 0.f || target->spark_n_blood == SP_BLOODY)) {
+					if((target->ioflags & IO_NPC) && !shieldHit && (dmgs > 0.f || target->spark_n_blood == SP_BLOODY)) {
 						target->spark_n_blood = SP_BLOODY;
 						
 						if(!(flags & 1)) {
