@@ -124,13 +124,19 @@ bool shouldLogRepeatedError(u64 & count) {
 	return count <= 5 || count % 1000 == 0;
 }
 
-bool g_vrForced = false;
+//! VR turned on (1) or off (-1) on the command line, 0 to use the config
+int g_vrOverride = 0;
 
 void enableVR() {
-	g_vrForced = true;
+	g_vrOverride = 1;
+}
+
+void disableVR() {
+	g_vrOverride = -1;
 }
 
 ARX_PROGRAM_OPTION("vr", "", "Enable VR mode (OpenXR)", &enableVR)
+ARX_PROGRAM_OPTION("no-vr", "", "Disable VR mode", &disableVR)
 
 const char * resultString(XrInstance instance, XrResult result) {
 	static char buffer[XR_MAX_RESULT_STRING_SIZE];
@@ -196,23 +202,50 @@ std::string findSteamVRRuntime() {
 	return path + "\\steamxr_win64.json";
 }
 
-//! \return the runtime manifest selected in the config, or an empty string to use the system default
-std::string getSelectedRuntimeManifest() {
+//! Find the Meta (Oculus) OpenXR runtime manifest of the Meta Quest PC app
+std::string findMetaRuntime() {
+
+	std::string base = getEnv("OculusBase");
+	if(base.empty()) {
+		base = "C:\\Program Files\\Oculus\\";
+	}
+	if(base.back() != '\\' && base.back() != '/') {
+		base += '\\';
+	}
+
+	std::string manifest = base + "Support\\oculus-runtime\\oculus_openxr_64.json";
+	return readFile(manifest).empty() ? std::string() : manifest;
+}
+
+/*!
+ * \return the runtime manifests to try in order, an empty string stands for the system default runtime
+ *
+ * With runtime=auto the system default is tried first, then the installed OpenGL capable runtimes: the default
+ * may not support OpenGL (e.g. Virtual Desktop).
+ */
+std::vector<std::string> getRuntimeCandidates() {
 
 	const std::string & runtime = config.vr.runtime;
-	if(runtime.empty() || runtime == "auto") {
-		return std::string();
-	}
 
-	if(runtime == "steamvr") {
-		std::string manifest = findSteamVRRuntime();
+	if(runtime == "steamvr" || runtime == "meta") {
+		std::string manifest = (runtime == "steamvr") ? findSteamVRRuntime() : findMetaRuntime();
 		if(manifest.empty()) {
-			LogWarning << "Could not locate the SteamVR OpenXR runtime, using the system default";
+			LogWarning << "Could not locate the " << runtime << " OpenXR runtime, using the system default";
 		}
-		return manifest;
+		return { manifest };
 	}
 
-	return runtime;
+	if(!runtime.empty() && runtime != "auto") {
+		return { runtime };
+	}
+
+	std::vector<std::string> candidates = { std::string() };
+	for(const std::string & manifest : { findSteamVRRuntime(), findMetaRuntime() }) {
+		if(!manifest.empty() && !readFile(manifest).empty()) {
+			candidates.push_back(manifest);
+		}
+	}
+	return candidates;
 }
 
 //! Load a runtime directly from its manifest and negotiate the loader interface with it
@@ -271,14 +304,9 @@ PFN_xrGetInstanceProcAddr loadRuntime(const std::string & manifest) {
 	return runtimeRequest.getInstanceProcAddr;
 }
 
-//! Load the runtime selected in the config, or the system OpenXR loader if none was selected
-bool loadOpenXR() {
+//! Load a runtime from its manifest, or the system OpenXR loader (system default runtime) for an empty manifest
+bool loadOpenXR(const std::string & manifest) {
 
-	if(xrGetInstanceProcAddr) {
-		return true;
-	}
-
-	std::string manifest = getSelectedRuntimeManifest();
 	if(!manifest.empty()) {
 		xrGetInstanceProcAddr = loadRuntime(manifest);
 	} else {
@@ -297,6 +325,26 @@ bool loadOpenXR() {
 	}
 
 	return true;
+}
+
+std::vector<XrExtensionProperties> getInstanceExtensions() {
+
+	uint32_t count = 0;
+	if(XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr))) {
+		return { };
+	}
+	std::vector<XrExtensionProperties> extensions(count, { XR_TYPE_EXTENSION_PROPERTIES });
+	if(XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, extensions.data()))) {
+		return { };
+	}
+	extensions.resize(count);
+	return extensions;
+}
+
+bool hasExtension(const std::vector<XrExtensionProperties> & extensions, const char * name) {
+	return std::any_of(extensions.begin(), extensions.end(), [name](const XrExtensionProperties & e) {
+		return std::strcmp(e.extensionName, name) == 0;
+	});
 }
 
 } // anonymous namespace
@@ -337,6 +385,7 @@ VRSystem::VRSystem()
 	, m_uiExtent{ 1.f, 1.f }
 	, m_pointerOnUI(false)
 	, m_lastFrameStereo(false)
+	, m_imageRectFromTop(false)
 	, m_triggerHoldTime(0.f)
 	, m_clickPosition(0)
 	, m_clickOnTarget(false)
@@ -381,7 +430,7 @@ VRSystem::~VRSystem() {
 }
 
 bool VRSystem::isRequested() {
-	return g_vrForced || config.vr.enabled;
+	return g_vrOverride != 0 ? g_vrOverride > 0 : config.vr.enabled;
 }
 
 bool VRSystem::check(XrResult result, const char * call) const {
@@ -396,32 +445,27 @@ bool VRSystem::initInstance() {
 
 	arx_assert(m_instance == XR_NULL_HANDLE);
 
-	if(!loadOpenXR()) {
-		LogError << "OpenXR: no runtime available";
+	// Use the first runtime that supports OpenGL
+	std::vector<XrExtensionProperties> extensions;
+	for(const std::string & manifest : getRuntimeCandidates()) {
+		if(!loadOpenXR(manifest)) {
+			continue;
+		}
+		extensions = getInstanceExtensions();
+		if(hasExtension(extensions, XR_KHR_OPENGL_ENABLE_EXTENSION_NAME)) {
+			break;
+		}
+		LogWarning << "OpenXR: " << (manifest.empty() ? "the system default runtime" : manifest)
+		           << (extensions.empty() ? " is not available" : " does not support OpenGL");
+		xrGetInstanceProcAddr = nullptr;
+	}
+	if(!xrGetInstanceProcAddr) {
+		LogError << "OpenXR: no runtime with OpenGL support available - install SteamVR or the Meta Quest PC app,"
+		         << " or select a runtime with runtime= in the [vr] config section";
 		return false;
 	}
 
-	uint32_t extensionCount = 0;
-	if(!check(xrEnumerateInstanceExtensionProperties(nullptr, 0, &extensionCount, nullptr),
-	          "xrEnumerateInstanceExtensionProperties")) {
-		LogError << "OpenXR: no runtime available";
-		return false;
-	}
-	std::vector<XrExtensionProperties> extensions(extensionCount, { XR_TYPE_EXTENSION_PROPERTIES });
-	xrEnumerateInstanceExtensionProperties(nullptr, extensionCount, &extensionCount, extensions.data());
-
-	bool hasOpenGL = std::any_of(extensions.begin(), extensions.end(), [](const XrExtensionProperties & e) {
-		return std::strcmp(e.extensionName, XR_KHR_OPENGL_ENABLE_EXTENSION_NAME) == 0;
-	});
-	if(!hasOpenGL) {
-		LogError << "OpenXR: the active runtime does not support " << XR_KHR_OPENGL_ENABLE_EXTENSION_NAME
-		         << " - select an OpenGL capable runtime such as SteamVR (set runtime=steamvr in the [vr] config section)";
-		return false;
-	}
-
-	bool hasTimeConversion = std::any_of(extensions.begin(), extensions.end(), [](const XrExtensionProperties & e) {
-		return std::strcmp(e.extensionName, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0;
-	});
+	bool hasTimeConversion = hasExtension(extensions, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
 	
 	std::vector<const char *> enabledExtensions = { XR_KHR_OPENGL_ENABLE_EXTENSION_NAME };
 	if(hasTimeConversion) {
@@ -465,6 +509,8 @@ bool VRSystem::initInstance() {
 		    << XR_VERSION_MINOR(instanceProperties.runtimeVersion) << '.'
 		    << XR_VERSION_PATCH(instanceProperties.runtimeVersion);
 		m_runtimeName = oss.str();
+		// The Meta runtime counts image rectangles of OpenGL swapchains from the top, SteamVR from the bottom
+		m_imageRectFromTop = std::string_view(instanceProperties.runtimeName).substr(0, 6) == "Oculus";
 	}
 
 	XrSystemGetInfo systemInfo = { XR_TYPE_SYSTEM_GET_INFO };
@@ -1025,8 +1071,9 @@ void VRSystem::endFrame() {
 			quad.space = m_stageSpace;
 			quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
 			quad.subImage.swapchain = m_uiSwapchain.handle;
-			// OpenGL images start at the bottom
-			quad.subImage.imageRect.offset = { panel.area.left, m_uiSize.y - panel.area.bottom };
+			// OpenGL images start at the bottom (except for the Meta runtime, see m_imageRectFromTop)
+			int top = m_imageRectFromTop ? panel.area.top : m_uiSize.y - panel.area.bottom;
+			quad.subImage.imageRect.offset = { panel.area.left, top };
 			quad.subImage.imageRect.extent = { panel.area.width(), panel.area.height() };
 			quad.subImage.imageArrayIndex = 0;
 			quad.pose = panel.pose;

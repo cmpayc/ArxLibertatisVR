@@ -119,7 +119,7 @@ constexpr const bool
 	borderTurning = true,
 	useAltRuneRecognition = true,
 	improvedBowAim = true,
-	vrEnabled = false,
+	vrEnabled = true,
 	vrSnapTurn = true,
 	vrHandOrientedMovement = false,
 	vrLeftHanded = false,

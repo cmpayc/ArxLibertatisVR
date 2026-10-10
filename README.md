@@ -11,6 +11,18 @@ Cross-platform port of Arx Fatalis, a first-person role-playing game
 Arx Libertatis is based on the publicly released [Arx Fatalis source code](https://web.archive.org/web/20180105233341/https://www.arkane-studios.com/uk/arx_downloads.php).
 The source code is available under the GPLv3+ license with some additional terms - see the COPYING and LICENSE files for details.
 
+## Arx Libertatis VR
+
+This fork adds virtual reality support, built on OpenXR: your body follows the headset and controllers, you swing your
+weapon to fight, hold up your shield to block, draw the runes in the air with your hand, and read the book and notes in
+your hands.
+
+* Download: [Releases](https://github.com/cmpayc/ArxLibertatisVR/releases) (Windows, 64-bit)
+* Needs a PC VR headset with SteamVR or the Meta Quest PC app (Quest Link), and the Arx Fatalis game data
+* Installation, controls, settings and known issues: [README-VR.md](README-VR.md)
+
+The VR code is in `src/vr/` and is built with the `USE_OPENXR` CMake option (on by default, Windows only).
+
 ## Contact
 
 Website: [arx-libertatis.org](https://arx-libertatis.org/)

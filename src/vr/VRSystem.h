@@ -365,6 +365,7 @@ public:
 
 private:
 	bool m_lastFrameStereo; // The last frame showed the game world
+	bool m_imageRectFromTop; // Quad layer image rectangles count from the top of the image (Meta runtime)
 	float m_triggerHoldTime;
 	Vec2s m_clickPosition;
 	bool m_clickOnTarget;
