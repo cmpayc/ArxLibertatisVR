@@ -1949,6 +1949,47 @@ void VRSystem::updateBookPanel(const VRHudAreas & areas) {
 
 }
 
+Entity * VRSystem::getGripTarget(VRHand handId, Entity * target) const {
+
+	/*
+	 * The grip activates what it points at like the game's double click: levers, doors, containers, the loot of dead
+	 * bodies, talking to NPCs (not with a drawn weapon). Items are taken and grabbed instead (see VRGrab).
+	 */
+	const float UseDistance = 360.f; // Like the game's clicks on objects
+	if(!target) {
+		target = getVRPointedEntity(m_input.getHand(handId).aim, false);
+		if(target && glm::distance(player.pos, target->pos) >= UseDistance) {
+			target = nullptr;
+		}
+	}
+	if(!target || (target->ioflags & IO_ITEM)) {
+		return nullptr;
+	}
+	bool alive = (target->ioflags & IO_NPC) && target->_npcdata->lifePool.current > 0.f;
+	bool drawn = (player.Interface & INTER_COMBATMODE) != 0;
+	return (alive && drawn) ? nullptr : target;
+}
+
+bool VRSystem::isUseTarget(const Entity & entity) const {
+	return m_offHandUseTarget != EntityHandle() && m_offHandUseTarget == entity.index();
+}
+
+bool VRSystem::activateWithGrip(VRHand handId, Entity * target) {
+
+	target = getGripTarget(handId, target);
+	if(!target) {
+		return false;
+	}
+	bool drawn = (player.Interface & INTER_COMBATMODE) != 0;
+	// The game closes containers in combat mode: out of it, with the weapon kept in the hand
+	if(drawn && !suspendVRCombatMode()) {
+		ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
+	}
+	ARX_INTERFACE_ActivateEntity(*target);
+	m_input.vibrate(handId, 0.4f, 0.05f);
+	return true;
+}
+
 bool VRSystem::getImprovedRunePoint(const Vec3f & tip, Vec2f & screen) {
 
 	/*
@@ -2550,25 +2591,8 @@ void VRSystem::updatePointer() {
 		if(m_gripIsClick && inGame && !onUI && !m_bookOpen) {
 			// The game's own pick at the pointer (like its double click finds objects), else the hand ray
 			Entity * target = onWorld ? InterClick(mouse) : nullptr;
-			const float UseDistance = 360.f; // Like the game's clicks on objects
-			if(!target) {
-				target = getVRPointedEntity(hand.aim, false);
-				if(target && glm::distance(player.pos, target->pos) >= UseDistance) {
-					target = nullptr;
-				}
-			}
-			if(target && !(target->ioflags & IO_ITEM)) {
-				bool alive = (target->ioflags & IO_NPC) && target->_npcdata->lifePool.current > 0.f;
-				bool drawn = (player.Interface & INTER_COMBATMODE) != 0;
-				if(!alive || !drawn) {
-					// The game closes containers in combat mode: out of it, with the weapon kept in the hand
-					if(drawn && !suspendVRCombatMode()) {
-						ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
-					}
-					ARX_INTERFACE_ActivateEntity(*target);
-					m_gripIsClick = false;
-					m_input.vibrate(pointing, 0.4f, 0.05f);
-				}
+			if(activateWithGrip(pointing, target)) {
+				m_gripIsClick = false;
 			}
 		}
 	} else if(isVRGrabbingDirectly()) {
@@ -2702,7 +2726,25 @@ void VRSystem::updatePointer() {
 	GInput->setVirtualMouseButton(Mouse::Button_0, (clickPressed && !tapPending) || drawing);
 	
 	// Off hand grip = right click on a panel, in the world it grabs (see VRGrab). Not the hand holding the book.
-	const VRHandState & off = m_input.getHand((pointing == VRHandLeft) ? VRHandRight : VRHandLeft);
+	const VRHand offHand = (pointing == VRHandLeft) ? VRHandRight : VRHandLeft;
+	const VRHandState & off = m_input.getHand(offHand);
+
+	/*
+	 * The off hand grip also activates what that hand points at, like the pointing hand (user request): not on a
+	 * panel (right click), not grabbing items (VRGrab only takes items), drawing a weapon or taking the torch, not as
+	 * a fist (punches) or holding the book
+	 */
+	m_offHandUseTarget = EntityHandle();
+	if(inGame && !onUI && !m_bookOpen && !off.isPressed(VRButtonTrigger) && off.aim.valid
+	   && !isVROffHandGrabbing() && !isVRHandAtSheath(offHand) && !isVRHandAtBeltTorch(offHand)) {
+		// Highlighted like the objects the hands would grab (see isVRUseTarget)
+		if(Entity * target = getGripTarget(offHand, nullptr)) {
+			m_offHandUseTarget = target->index();
+			if(off.wasPressed(VRButtonGrip)) {
+				activateWithGrip(offHand, target);
+			}
+		}
+	}
 	bool rightClick = (off.isPressed(VRButtonGrip) && onUI && !m_bookOpen) || (gripPressed && gripRightClick);
 	GInput->setVirtualMouseButton(Mouse::Button_1, rightClick);
 	bool rightClickStarted = (off.wasPressed(VRButtonGrip) && !m_bookOpen)

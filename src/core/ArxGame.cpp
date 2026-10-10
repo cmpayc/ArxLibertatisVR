@@ -1764,7 +1764,7 @@ void ArxGame::updateLevel() {
 			// Highlight entity
 			#if ARX_HAVE_OPENXR
 			// The game only pulses the highlight for the cursor: VR hand targets use full intensity
-			if(isVRGrabTarget(entity)) {
+			if(isVRGrabTarget(entity) || (isVRActive() && g_vr->isUseTarget(entity))) {
 				entity.highlightColor = Color3f::gray(100.f);
 			} else
 			#endif

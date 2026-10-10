@@ -162,6 +162,7 @@ public:
 		m_magicMode = false;
 		m_triggerItem = EntityHandle();
 		m_lastItemTap = EntityHandle();
+		m_offHandUseTarget = EntityHandle();
 	}
 	
 	[[nodiscard]] const VRInput & getInput() const { return m_input; }
@@ -346,6 +347,23 @@ private:
 	RuneCanvas m_runeCanvas;
 	//! The screen position of a rune stroke point at the fingertips (tracking space), false to use the view instead
 	bool getImprovedRunePoint(const Vec3f & tip, Vec2f & screen);
+	/*!
+	 * Activate what a hand points at with its grip (doors, levers, containers, bodies, NPCs; not items)
+	 *
+	 * \param target The object found at the cursor, or nullptr to find it along the hand ray
+	 * \return true if something was activated
+	 */
+	bool activateWithGrip(VRHand handId, class Entity * target);
+	//! What the grip of a hand would activate: the given object or the one along the hand ray, nullptr if none
+	class Entity * getGripTarget(VRHand handId, class Entity * target) const;
+	EntityHandle m_offHandUseTarget; //!< What the off hand grip would activate (highlighted)
+
+public:
+
+	//! \return true if the off hand points at this object to activate it with its grip (highlighted)
+	[[nodiscard]] bool isUseTarget(const Entity & entity) const;
+
+private:
 	bool m_lastFrameStereo; // The last frame showed the game world
 	float m_triggerHoldTime;
 	Vec2s m_clickPosition;
