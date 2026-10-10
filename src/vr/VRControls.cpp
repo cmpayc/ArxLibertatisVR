@@ -129,23 +129,62 @@ const float SheathRadius = 30.f; // cm, at the model's size
  * The sheath is on the back over the shoulder of the hand, where the game attaches the sheathed weapon, see
  * \ref getVRSheathHilt.
  */
-float getSheathDistance(VRHand hand) {
+//! From the sheath to the real wrist, in the world (cm at the model's size), false if there is no sheath to reach
+bool getSheathOffset(VRHand hand, Vec3f & offset) {
 
-	const float Far = 1e6f;
 	bool holding = (hand == dominantHand()) ? isVRGrabbing() : isVROffHandGrabbing();
 	if(!g_vr || ARXmenu.mode() != Mode_InGame || BLOCK_PLAYER_CONTROLS || holding
 	   || !entities.get(player.equiped[EQUIP_SLOT_WEAPON])) {
-		return Far;
+		return false;
 	}
 
+	/*
+	 * The real hand (the wrist joint of the controller), not the model's: walls push the model's hand and weapon back,
+	 * which brought it to the sheath and put the weapon away when backing into a wall (logged, user)
+	 */
+	const VRHandState & state = g_vr->getInput().getHand(hand);
 	Vec3f wrist;
-	glm::quat grip;
 	Vec3f hilt;
-	if(!getVRWristPose(hand, wrist, grip) || !getVRSheathHilt(hand, hilt)) {
-		return Far;
+	Vec3f wristJoint = state.grip.position + state.grip.orientation * config.vr.handOffset;
+	if(!state.grip.valid || !trackingPointToWorld(wristJoint, wrist) || !getVRSheathHilt(hand, hilt)) {
+		return false;
 	}
 
-	return glm::distance(wrist, hilt) / getVRBodyScale();
+	offset = (wrist - hilt) / getVRBodyScale();
+	return true;
+}
+
+float getSheathDistance(VRHand hand) {
+	Vec3f offset;
+	return getSheathOffset(hand, offset) ? glm::length(offset) : 1e6f;
+}
+
+/*!
+ * Sheathing needs the hand over the shoulder, not only near it: a hand held up in front (backing into a wall, logged
+ * 25-30 cm from the sheath) put the weapon away. Not much lower than the sheath and not in front of the chest.
+ */
+bool isAtSheathToSheathe(VRHand hand) {
+	/*
+	 * The hand is at the same place when sheathing and when holding the weapon up near the shoulder (logged: above the
+	 * sheath and 17-25 cm in front of it, the sheath being on the back): what differs is the weapon. Put over the
+	 * shoulder, its blade points backwards; held up on guard, up or forwards.
+	 */
+	const float MaxBelow = 2.f; // cm (y points down): sheathing was always above the sheath
+	const float MaxBladeForward = 0.f; // Cosine with the body's forward direction: pointing backwards
+	const float MaxBladeUp = 0.7f; // Cosine with up: not mostly upwards
+	Vec3f offset;
+	if(!getSheathOffset(hand, offset) || glm::length(offset) >= SheathRadius) {
+		return false;
+	}
+	// The weapon points through the fist along the controller (see alignHeldItem)
+	const VRPose & grip = g_vr->getInput().getHand(hand).grip;
+	Vec3f origin, blade;
+	if(!trackingRayToWorld(grip.position, grip.orientation, origin, blade)) {
+		return false;
+	}
+	float bladeForward = glm::dot(blade, angleToVectorXZ(player.angle.getYaw()));
+	float bladeUp = -blade.y;
+	return offset.y <= MaxBelow && bladeForward <= MaxBladeForward && bladeUp <= MaxBladeUp;
 }
 
 //! Yaw of an OpenXR orientation in degrees, positive turns left like the Arx convention
@@ -669,7 +708,7 @@ void updateVRControls() {
 		}
 	} else if(float sheathDistance = getSheathDistance(g_weaponHand); sheathDistance > SheathRadius + 10.f) {
 		g_sheatheArmed = true;
-	} else if(g_sheatheArmed && getSheathDistance(g_weaponHand) < SheathRadius) {
+	} else if(g_sheatheArmed && isAtSheathToSheathe(g_weaponHand)) {
 		g_sheatheArmed = false;
 		if(g_combatSuspended || g_weaponKeptForMagic) {
 			// Out of the combat mode already: only put the weapon on the back, and stay out of it after the spell
