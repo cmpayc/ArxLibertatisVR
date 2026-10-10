@@ -918,6 +918,84 @@ bool isVRMeleeActive() {
 	return isVRActive() && g_vr;
 }
 
+bool blockVRShieldHit(const Entity & attacker, float & damage) {
+
+	/*
+	 * Physical shield block (user request, [vr] shield_block): the game's shield only adds to the armor class. A
+	 * shield held up towards the attacker blocks a share of a melee hit that lands, 40% + 0.5% per point of Defense,
+	 * at most 90%: more than the passive shield, as the shield has to be raised in time and hits from the side or
+	 * behind are not blocked.
+	 */
+	const float MaxAngle = glm::radians(60.f); // Between the shield and the attacker, seen from the eyes
+	const float AboveEyes = 25.f; // cm: the top of the head
+	const float BelowEyes = 70.f; // cm: the stomach
+	const float MinFacing = 0.5f; // Cosine between the face of the shield and the direction to the attacker
+
+	if(!config.vr.shieldBlock || !isVRActive() || !isVRPlayerView() || damage <= 0.f) {
+		return false;
+	}
+	Entity * shield = entities.get(player.equiped[EQUIP_SLOT_SHIELD]);
+	if(!shield || !shield->obj || shield->obj->vertexWorldPositions.empty()
+	   || shield->obj->vertexWorldPositions.size() != shield->obj->vertexlist.size()) {
+		return false;
+	}
+	// The shield is attached to the left forearm of the model, which the left controller moves
+	Vec3f elbow, wrist, eyes;
+	glm::mat3x3 head;
+	if(!getVRForearm(VRHandLeft, elbow, wrist) || !getVRHeadPose(eyes, head)) {
+		return false;
+	}
+
+	// Its middle as drawn, and its face: away from the forearm it is strapped to
+	Vec3f center(0.f);
+	for(const EERIE_VERTEX & vertex : shield->obj->vertexWorldPositions) {
+		center += vertex.v;
+	}
+	center /= float(shield->obj->vertexWorldPositions.size());
+	Vec3f arm = wrist - elbow;
+	float armLength2 = glm::dot(arm, arm);
+	float along = (armLength2 > 1.f) ? glm::clamp(glm::dot(center - elbow, arm) / armLength2, 0.f, 1.f) : 0.f;
+	Vec3f face = center - (elbow + arm * along);
+	if(glm::length(face) < 1.f) {
+		return false;
+	}
+	face = glm::normalize(face);
+
+	// In front of the user towards the attacker (its chest, y points down), raised, and facing it
+	Vec3f target = attacker.pos + Vec3f(0.f, -120.f, 0.f);
+	Vec2f toAttacker(target.x - eyes.x, target.z - eyes.z);
+	Vec2f toShield(center.x - eyes.x, center.z - eyes.z);
+	if(glm::length(toAttacker) < 1.f || glm::length(toShield) < 10.f) {
+		return false;
+	}
+	if(glm::dot(glm::normalize(toShield), glm::normalize(toAttacker)) < std::cos(MaxAngle)) {
+		return false;
+	}
+	if(center.y < eyes.y - AboveEyes || center.y > eyes.y + BelowEyes) {
+		return false;
+	}
+	if(glm::length(target - center) < 1.f || glm::dot(face, glm::normalize(target - center)) < MinFacing) {
+		return false;
+	}
+
+	float share = glm::clamp(0.4f + 0.005f * player.m_skillFull.defense, 0.f, 0.9f);
+	float blocked = damage * share;
+	damage -= blocked;
+
+	// The blow on the shield: its sound instead of flesh, a strong pulse, and wear
+	Material weapon = MATERIAL_FLESH; // Claws and fists
+	if(attacker.ioflags & IO_NPC) {
+		if(const Entity * weaponEntity = attacker._npcdata->weapon) {
+			weapon = weaponEntity->material;
+		}
+	}
+	ARX_SOUND_PlayCollision(shield->material, weapon, 1.f, 1.f, center, nullptr);
+	g_vr->getInput().vibrate(VRHandLeft, 0.9f, 0.15f);
+	ARX_DAMAGES_DurabilityLoss(shield, blocked * 0.1f);
+
+	return true;
+}
+
 bool isVRArcheryActive() {
 	return isVRActive() && (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() == WEAPON_BOW;
 }

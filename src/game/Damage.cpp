@@ -106,6 +106,12 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "util/Cast.h"
 #include "util/HandleContainer.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 
 class TextureContainer;
 
@@ -201,12 +207,17 @@ class ScreenFxBloodSplash {
 	GameDuration duration;
 	float Blood_Pos;
 	float Last_Blood_Pos;
-	
+	float m_strength; //!< Share of the maximum life lost by the hits of this flash (VR: its strength)
+
+	//! The flash color (multiplied with the view), weakened in VR to the share of life lost (user request)
+	Color flashColor(float r, float g, float b) const;
+
 public:
-	
+
 	ScreenFxBloodSplash()
 		: Blood_Pos(0.f)
 		, Last_Blood_Pos(0.f)
+		, m_strength(0.f)
 	{ }
 	
 	void reset();
@@ -220,15 +231,32 @@ static ScreenFxBloodSplash g_screenFxBloodSplash;
 void ScreenFxBloodSplash::reset() {
 	Blood_Pos = 0.f;
 	Blood_Duration = 0;
+	m_strength = 0.f;
 }
 
 void ScreenFxBloodSplash::hit(float strength) {
 	if(Blood_Pos == 0.f) {
 		Blood_Pos = 0.000001f;
 		Blood_Duration = 100ms + 200ms * strength;
+		m_strength = 0.f;
 	} else {
 		Blood_Duration += 800ms * strength;
 	}
+	// strength is the share of the maximum life lost: the hits of one flash add up
+	m_strength = glm::clamp(m_strength + strength, 0.f, 1.f);
+}
+
+Color ScreenFxBloodSplash::flashColor(float r, float g, float b) const {
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		// At least 15% of the flash (85% transparent), the other 85% with the share of the life lost (user request)
+		float strength = 0.15f + 0.85f * m_strength;
+		r = 1.f - (1.f - r) * strength; // White multiplies to nothing
+		g = 1.f - (1.f - g) * strength;
+		b = 1.f - (1.f - b) * strength;
+	}
+	#endif
+	return Color::rgb(r, g, b);
 }
 
 void ScreenFxBloodSplash::render() {
@@ -240,18 +268,18 @@ void ScreenFxBloodSplash::render() {
 	} else if(Blood_Pos > 1.f) {
 		
 		if(player.poison > 1.f)
-			color = Color::rgb(Blood_Pos - 1.f, 1.f, Blood_Pos - 1.f);
+			color = flashColor(Blood_Pos - 1.f, 1.f, Blood_Pos - 1.f);
 		else
-			color = Color::rgb(1.f, Blood_Pos - 1.f, Blood_Pos - 1.f);
+			color = flashColor(1.f, Blood_Pos - 1.f, Blood_Pos - 1.f);
 		
 		UseRenderState state(render2D().blend(BlendZero, BlendSrcColor));
 		EERIEDrawBitmap(Rectf(g_size), 0.00009f, nullptr, color);
 	} else if(Blood_Pos > 0.f) {
 		
 		if(player.poison > 1.f)
-			color = Color::rgb(1.f - Blood_Pos, 1.f, 1.f - Blood_Pos);
+			color = flashColor(1.f - Blood_Pos, 1.f, 1.f - Blood_Pos);
 		else
-			color = Color::rgb(1.f, 1.f - Blood_Pos, 1.f - Blood_Pos);
+			color = flashColor(1.f, 1.f - Blood_Pos, 1.f - Blood_Pos);
 		
 		UseRenderState state(render2D().blend(BlendZero, BlendSrcColor));
 		EERIEDrawBitmap(Rectf(g_size), 0.00009f, nullptr, color);

@@ -43,6 +43,15 @@ struct TransformInfo;
 //! \return true while the bow is drawn: both triggers are used for archery (not for magic or use)
 [[nodiscard]] bool isVRArcheryActive();
 
+/*!
+ * Physical shield block ([vr] shield_block): a melee hit of an attacker that lands on the player is partly blocked if
+ * the shield is held up towards the attacker, see VRCombat
+ *
+ * \param damage The damage of the hit, lowered by the blocked share
+ * \return true if the shield blocked (it made the sound of the hit)
+ */
+bool blockVRShieldHit(const Entity & attacker, float & damage);
+
 //! Where the light of the torch held in a hand is (its flame), false if there is none (VR: the torch is held, see
 //! updateVRCombat; the game lights the player position)
 bool getVRTorchLight(Vec3f & position);

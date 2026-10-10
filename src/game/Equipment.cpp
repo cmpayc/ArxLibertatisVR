@@ -99,6 +99,14 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "util/Number.h"
 #include "util/String.h"
 
+#include "Configure.h"
+#include "core/Config.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRCombat.h"
+#include "vr/VRControls.h"
+#endif
+
 
 struct EQUIP_INFO {
 	const char * name;
@@ -542,7 +550,13 @@ float ARX_EQUIPMENT_ComputeDamages(Entity * io_source, Entity * io_target, float
 	if(Random::getf(0.f, 100.f) > chance) {
 		return 0.f;
 	}
-	
+
+	bool blocked = false;
+	#if ARX_HAVE_OPENXR
+	// VR: a shield held up towards the attacker blocks part of the hit (optional)
+	blocked = io_target == entities.player() && blockVRShieldHit(*io_source, dmgs);
+	if(!blocked)
+	#endif
 	ARX_SOUND_PlayCollision("flesh", wmat, power, 1.f, pos, io_source);
 	
 	if(dmgs > 0.f) {
@@ -557,8 +571,10 @@ float ARX_EQUIPMENT_ComputeDamages(Entity * io_source, Entity * io_target, float
 			Vec3f ppos = io_source->pos - (player.pos + player.baseOffset());
 			ppos = glm::normalize(ppos);
 			
-			// Push the player
-			PUSH_PLAYER_FORCE += ppos * -dmgs * Vec3f(1.0f / 11, 1.0f / 30, 1.0f / 11);
+			// Push the player, not when the shield took the hit (VR)
+			if(!blocked) {
+				PUSH_PLAYER_FORCE += ppos * -dmgs * Vec3f(1.0f / 11, 1.0f / 30, 1.0f / 11);
+			}
 			
 			damagePlayer(dmgs, 0, io_source);
 			ARX_DAMAGES_DamagePlayerEquipment(dmgs);
@@ -1030,14 +1046,26 @@ void ARX_EQUIPMENT_Remove_All_Special(Entity * io)
 float getEquipmentBaseModifier(EquipmentModifierType modifier, bool getRelative) {
 	
 	float sum = 0;
-	
-	for(EntityHandle equipment : player.equiped) {
-		if(Entity * toequip = entities.get(equipment)) {
+
+	/*
+	 * VR with the physical shield block (see blockVRShieldHit): the passive armor class of the shield is halved, a
+	 * shield held up towards the attacker blocks instead (user request)
+	 */
+	float shieldArmor = 1.f;
+	#if ARX_HAVE_OPENXR
+	if(config.vr.shieldBlock && isVRActive()) {
+		shieldArmor = 0.5f;
+	}
+	#endif
+
+	for(size_t slot = 0; slot < std::size(player.equiped); slot++) {
+		if(Entity * toequip = entities.get(player.equiped[slot])) {
 			if((toequip->ioflags & IO_ITEM) && toequip->_itemdata->equipitem) {
 				IO_EQUIPITEM_ELEMENT * elem = &toequip->_itemdata->equipitem->elements[modifier];
 				bool isRelative = elem->flags.has(IO_ELEMENT_FLAG_PERCENT);
 				if(isRelative == getRelative) {
-					sum += elem->value;
+					bool shield = (slot == EQUIP_SLOT_SHIELD && modifier == IO_EQUIPITEM_ELEMENT_Armor_Class);
+					sum += elem->value * (shield ? shieldArmor : 1.f);
 				}
 			}
 		}

@@ -268,6 +268,9 @@ public:
 		//! Darken the edges of the view while moving with the stick or turning smoothly: 0 (off) to 3 (strongest)
 		int vignette;
 
+		//! A shield raised towards a melee attacker blocks part of the hit, more with the Defense skill (VRCombat)
+		bool shieldBlock;
+
 	} vr;
 	
 	// section 'key'

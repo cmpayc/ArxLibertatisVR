@@ -1474,6 +1474,16 @@ public:
 		}
 
 		{
+			std::string_view label = getLocalised("system_menus_options_vr_shield_block", "Physical shield block");
+			auto cb = std::make_unique<CheckboxWidget>(checkboxSize(), hFontMenu, label);
+			cb->setChecked(config.vr.shieldBlock);
+			cb->stateChanged = [](bool checked) noexcept {
+				config.vr.shieldBlock = checked;
+			};
+			addCenter(std::move(cb));
+		}
+
+		{
 			std::string_view label = getLocalised("system_menus_options_vr_movement", "Move towards");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
 			cb->addEntry(getLocalised("system_menus_options_vr_movement_head", "Head"));
