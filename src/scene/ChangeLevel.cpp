@@ -116,6 +116,12 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "util/Number.h"
 #include "util/String.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 
 extern bool GLOBAL_MAGIC_MODE;
 
@@ -2502,6 +2508,11 @@ static bool ARX_CHANGELEVEL_PopLevel(AreaId area, bool reloadflag, std::string_v
 
 	// default to mouselook true, inventory/book closed
 	TRUE_PLAYER_MOUSELOOK_ON = true;
+	#if ARX_HAVE_OPENXR
+	if(player.Interface & INTER_COMBATMODE) {
+		requestVRWeaponDraw(); // VR: the weapon stays in the hand
+	}
+	#endif
 	// disable combat mode
 	player.Interface &= ~INTER_COMBATMODE;
 	ARX_EQUIPMENT_AttachPlayerWeaponToBack();

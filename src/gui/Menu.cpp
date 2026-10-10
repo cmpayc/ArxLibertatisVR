@@ -57,6 +57,10 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 
 #include "cinematic/CinematicController.h"
 
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 #include "core/Application.h"
 #include "core/Config.h"
 #include "core/Core.h"
@@ -172,7 +176,22 @@ void ARX_MENU_Pause() {
 	MenuFader_start(Fade_Out, -1); // TODO: does this fader even work ?
 	TRUE_PLAYER_MOUSELOOK_ON = false;
 
+	/*
+	 * VR: the drawn weapon stays in the hand (user request), and a save made now has it drawn (see
+	 * requestVRWeaponDraw). Putting it away here played the animation that ended after resuming.
+	 */
+	#if ARX_HAVE_OPENXR
+	bool keepWeapon = isVRActive() && (player.Interface & INTER_COMBATMODE);
+	if(keepWeapon) {
+		player.Interface &= ~INTER_COMBATMODE;
+	}
+	#endif
 	ARX_PLAYER_PutPlayerInNormalStance();
+	#if ARX_HAVE_OPENXR
+	if(keepWeapon) {
+		player.Interface |= INTER_COMBATMODE;
+	}
+	#endif
 }
 
 void ARX_Menu_Manage() {

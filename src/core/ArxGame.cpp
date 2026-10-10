@@ -1801,6 +1801,7 @@ void ArxGame::updateLevel() {
 	if(isVRActive()) {
 		applyVRRoomScale();
 		updateVRHandGrabs();
+		updateVRWeaponState();
 	}
 	#endif
 

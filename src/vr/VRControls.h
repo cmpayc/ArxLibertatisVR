@@ -122,6 +122,23 @@ void stowVRHeldItems();
 //! changing level)
 void resetVRLevelState();
 
+/*!
+ * The weapon was drawn when the game was saved or the level changed: the game puts it on the back when loading, in VR
+ * it is drawn into the hand again (user request)
+ */
+void requestVRWeaponDraw();
+
+/*!
+ * Opening an inventory leaves the combat mode, which puts the weapon on the back: in VR it stays in the hand instead
+ * (user request) and the combat mode comes back when the inventories are closed
+ *
+ * \return false if not in VR or there is no drawn weapon: leave the combat mode normally
+ */
+bool suspendVRCombatMode();
+
+//! The weapon kept in the hand for an inventory, or to draw again after loading - once per game frame
+void updateVRWeaponState();
+
 //! Draw a screen effect (hit flash, fade, Night Vision border...) over the whole view in both eyes:
 //! \ref g_fullScreenHook
 bool drawVRFullView(class TextureContainer * texture, Color color);

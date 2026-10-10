@@ -1222,8 +1222,11 @@ void ArxGame::managePlayerControls() {
 	
 	// Checks INVENTORY Key Status.
 	if(GInput->actionNowPressed(CONTROLS_CUST_INVENTORY)) {
-		
+
 		if(player.Interface & INTER_COMBATMODE) {
+			#if ARX_HAVE_OPENXR
+			if(!suspendVRCombatMode()) // VR: the weapon stays in the hand
+			#endif
 			ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
 		}
 		

@@ -40,6 +40,12 @@
 #include "scene/Interactive.h"
 #include "util/Cast.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 
 SecondaryInventoryHud g_secondaryInventoryHud;
 
@@ -442,9 +448,12 @@ void SecondaryInventoryHud::open(Entity * container) {
 		}
 		
 		if(player.Interface & INTER_COMBATMODE) {
+			#if ARX_HAVE_OPENXR
+			if(!suspendVRCombatMode()) // VR: the weapon stays in the hand
+			#endif
 			ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
 		}
-		
+
 		if(config.input.autoReadyWeapon != AlwaysAutoReadyWeapon) {
 			TRUE_PLAYER_MOUSELOOK_ON = false;
 		}

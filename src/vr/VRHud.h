@@ -42,6 +42,7 @@ struct VRHudAreas {
 	Rect inventory; //!< Player inventory, while open
 	Rect map;       //!< Mini map
 	Rect loot;      //!< Inventory of a dead NPC, shown lying on the body
+	Rect otherInventory; //!< Inventory of a container or a dead NPC, wherever it is shown (pointed without a beam)
 	Rect subtitles; //!< Subtitles of in-game cutscenes, below the view
 	Rect info;      //!< Names of pointed objects and notifications (top of the screen), above the view
 	Rect label;     //!< Name of the pointed object in the world, shown above it

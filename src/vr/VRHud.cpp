@@ -103,6 +103,7 @@ VRHudAreas getVRHudAreas() {
 		Rectf container = g_secondaryInventoryHud.rect();
 		container.move(-container.left, 0.f);
 		const Entity * owner = g_secondaryInventoryHud.container();
+		areas.otherInventory = toPixels(container);
 		if(owner && (owner->ioflags & IO_NPC)) {
 			areas.loot = toPixels(container);
 			areas.lootEntity = owner;

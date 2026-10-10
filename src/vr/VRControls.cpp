@@ -75,6 +75,23 @@ std::vector<InputKeyId> g_pressedKeys;
 int g_weaponToggleFrames = 0; // Frames left of the ready weapon action from the sheath
 bool g_sneaking = false; // Toggled with the off stick click
 bool g_stowWeapon = false; // Put the drawn weapon away (see stowVRHeldItems)
+bool g_drawWeaponRequested = false; // Draw the weapon into the hand again, see requestVRWeaponDraw
+bool g_combatSuspended = false; // Out of the combat mode for an inventory with the weapon in the hand
+
+//! \return true if the equipped weapon is attached to a hand of the player model (not on the back)
+bool isWeaponInHand() {
+	Entity * io = entities.player();
+	Entity * weapon = entities.get(player.equiped[EQUIP_SLOT_WEAPON]);
+	if(!io || !io->obj || !weapon) {
+		return false;
+	}
+	for(const EERIE_LINKED & link : io->obj->linked) {
+		if(link.io == weapon) {
+			return link.lidx == io->obj->fastaccess.primary_attach || link.lidx == io->obj->fastaccess.left_attach;
+		}
+	}
+	return false;
+}
 float g_bookHoldTime = -1.f; // s the B button is held, negative after a long press opened the spells
 int g_bookTapFrames = 0; // Frames left of the book action from a short press of B
 bool g_sheatheArmed = false; // The drawn weapon left the sheath: bringing it back sheathes it
@@ -452,6 +469,63 @@ void updateVignette(const VRHandState & main) {
 
 } // anonymous namespace
 
+bool suspendVRCombatMode() {
+
+	if(!isVRActive() || !(player.Interface & INTER_COMBATMODE) || ARX_EQUIPMENT_GetPlayerWeaponType() == WEAPON_BARE) {
+		return false;
+	}
+
+	// Out of the combat mode without putting the weapon on the back, see updateVRWeaponState
+	player.Interface &= ~(INTER_COMBATMODE | INTER_NO_STRIKE);
+	g_combatSuspended = true;
+	return true;
+}
+
+void updateVRWeaponState() {
+
+	if(!isVRActive() || ARXmenu.mode() != Mode_InGame || BLOCK_PLAYER_CONTROLS || !entities.player()) {
+		return;
+	}
+	bool hasWeapon = ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE;
+
+	// The inventories are closed again: back to the combat mode with the weapon still in the hand
+	if(g_combatSuspended) {
+		bool inventoryOpen = (player.Interface & (INTER_INVENTORY | INTER_INVENTORYALL)) || g_secondaryInventoryHud.isOpen();
+		if(player.Interface & INTER_COMBATMODE) {
+			g_combatSuspended = false; // Drawn again some other way
+		} else if(!inventoryOpen) {
+			g_combatSuspended = false;
+			if(hasWeapon && isWeaponInHand()) {
+				player.Interface |= INTER_COMBATMODE;
+			} else if(hasWeapon) {
+				g_drawWeaponRequested = true; // Another weapon was equipped
+			}
+		}
+	}
+
+	/*
+	 * Draw the weapon (after loading or a level change, see requestVRWeaponDraw) like the game's weapon key does, once
+	 * the game runs again: pressing the key was lost during level changes
+	 */
+	if(g_drawWeaponRequested) {
+		if((player.Interface & INTER_COMBATMODE) || !hasWeapon) {
+			g_drawWeaponRequested = false;
+		} else {
+			ARX_INTERFACE_setCombatMode(COMBAT_MODE_DRAW_WEAPON);
+			if(player.Interface & INTER_COMBATMODE) {
+				g_drawWeaponRequested = false;
+			}
+		}
+	}
+
+}
+
+void requestVRWeaponDraw() {
+	if(isVRActive()) {
+		g_drawWeaponRequested = true;
+	}
+}
+
 void resetVRLevelState() {
 
 	if(!g_vr) {
@@ -464,6 +538,7 @@ void resetVRLevelState() {
 	 * script variable (see VRCombat).
 	 */
 	g_vr->resetLevelState();
+	resetVRTracking();
 	resetVRGrabs();
 	resetVRCombatLevelState();
 
@@ -475,6 +550,7 @@ void resetVRLevelState() {
 	g_stowWeapon = false;
 	g_sheatheArmed = false;
 	g_sneaking = false;
+	g_combatSuspended = false; // The combat mode is restored by the load instead (see requestVRWeaponDraw)
 
 }
 
@@ -546,9 +622,11 @@ void updateVRControls() {
 	 * back over the shoulder, once it has left the sheath.
 	 */
 	bool toggleWeapon = false;
+	// Kept in the hand while an inventory is open (see suspendVRCombatMode): sheathed like a drawn weapon
+	bool weaponDrawn = (player.Interface & INTER_COMBATMODE) || g_combatSuspended;
 	if(g_vr->isBookInHand()) {
 		// Both hands are for the book (the weapon was put away when it opened, see stowVRHeldItems)
-	} else if(!(player.Interface & INTER_COMBATMODE)) {
+	} else if(!weaponDrawn) {
 		g_sheatheArmed = false;
 		for(VRHand hand : { dominantHand(), offHand() }) {
 			if(input.getHand(hand).wasPressed(VRButtonGrip) && getSheathDistance(hand) < SheathRadius) {
@@ -561,7 +639,14 @@ void updateVRControls() {
 		g_sheatheArmed = true;
 	} else if(g_sheatheArmed && getSheathDistance(g_weaponHand) < SheathRadius) {
 		g_sheatheArmed = false;
-		toggleWeapon = true;
+		if(g_combatSuspended) {
+			// Out of the combat mode already: only put the weapon on the back
+			g_combatSuspended = false;
+			ARX_EQUIPMENT_AttachPlayerWeaponToBack();
+			g_vr->getInput().vibrate(g_weaponHand, 0.6f, 0.08f);
+		} else {
+			toggleWeapon = true;
+		}
 	}
 	if(g_stowWeapon && g_weaponToggleFrames == 0) {
 		g_stowWeapon = false;

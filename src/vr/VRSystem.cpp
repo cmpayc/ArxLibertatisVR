@@ -1450,6 +1450,7 @@ void VRSystem::updateGamePanels() {
 	 * switch to inventory drag and drop.
 	 */
 	VRHudAreas areas = getVRHudAreas();
+	m_otherInventoryArea = areas.otherInventory;
 	updateBookPanel(areas);
 	if(m_bookOpen) {
 		return; // Only the book while it is open (user request)
@@ -1743,7 +1744,9 @@ void VRSystem::updateLootPanel(const VRHudAreas & areas) {
 	glm::quat orientation = glm::quat_cast(glm::mat3x3(across, up, normal));
 
 	const float LootPixelSize = 0.0012f; // meters per interface pixel: a sheet of about 30 cm
-	addUIPanel(areas.loot, LootPixelSize / areas.hudScale, position, orientation, true);
+	if(addUIPanel(areas.loot, LootPixelSize / areas.hudScale, position, orientation, true)) {
+		m_uiPanels.back().noBeam = true; // The cursor on it is enough (user request)
+	}
 
 }
 
@@ -2297,7 +2300,10 @@ void VRSystem::updatePointer() {
 		              s16(float(panel.area.top) + v * float(panel.area.height() - 1)));
 
 	}
-	// No beam to the panels at the wrists and to the book, the cursor on them is enough
+	// No beam to the panels at the wrists, the book and other inventories (user request), the cursor is enough
+	if(onUI && m_otherInventoryArea.contains(Vec2i(mouse))) {
+		noBeam = true;
+	}
 	if(onUI && inGame && !noBeam) {
 		Vec3f aimDirection = hand.aim.orientation * Vec3f(0.f, 0.f, -1.f);
 		setVRPointerBeamToUI(hand.aim.position, hand.aim.position + aimDirection * nearest);
@@ -2445,8 +2451,9 @@ void VRSystem::updatePointer() {
 				bool alive = (target->ioflags & IO_NPC) && target->_npcdata->lifePool.current > 0.f;
 				bool drawn = (player.Interface & INTER_COMBATMODE) != 0;
 				if(!alive || !drawn) {
-					if(drawn) {
-						ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF); // The game closes containers in combat mode
+					// The game closes containers in combat mode: out of it, with the weapon kept in the hand
+					if(drawn && !suspendVRCombatMode()) {
+						ARX_INTERFACE_setCombatMode(COMBAT_MODE_OFF);
 					}
 					ARX_INTERFACE_ActivateEntity(*target);
 					m_gripIsClick = false;

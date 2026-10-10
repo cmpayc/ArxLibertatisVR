@@ -319,6 +319,7 @@ private:
 	// Controllers and the laser pointer (dominant hand) emulating the mouse on the virtual screen
 	VRInput m_input;
 	bool m_pointerOnUI;
+	Rect m_otherInventoryArea; //!< Container or loot inventory in the last frame: pointed at without a beam
 	bool m_lastFrameStereo; // The last frame showed the game world
 	float m_triggerHoldTime;
 	Vec2s m_clickPosition;
