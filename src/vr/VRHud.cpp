@@ -88,15 +88,16 @@ VRHudAreas getVRHudAreas() {
 		return areas;
 	}
 	
+	// The bookmarks stick out of the book
+	Rectf book = g_playerBook.getArea();
+	float margin = 24.f * g_hudRoot.getScale();
+	book = Rectf(book.left - margin, book.top - margin, book.right + margin, book.bottom + margin);
+	areas.bookWidth = toPixels(book).width();
 	if(player.Interface & INTER_PLAYERBOOK) {
-		// The bookmarks stick out of the book
-		Rectf book = g_playerBook.getArea();
-		float margin = 24.f * g_hudRoot.getScale();
-		book = Rectf(book.left - margin, book.top - margin, book.right + margin, book.bottom + margin);
 		areas.book = toPixels(book); // Held in a hand (see VRSystem::updateBookPanel)
 	}
 	if(g_note.isOpen()) {
-		areas.screen = merge(areas.screen, toPixels(g_note.area()));
+		areas.note = toPixels(g_note.area()); // Held in a hand like the book (user request)
 	}
 	if(g_secondaryInventoryHud.isVisible()) {
 		// Without the slide-in animation, which moves the contents instead

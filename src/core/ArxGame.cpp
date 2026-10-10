@@ -119,6 +119,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "gui/MenuPublic.h"
 #include "gui/MenuWidgets.h"
 #include "gui/MiniMap.h"
+#include "gui/Note.h"
 #include "gui/Notification.h"
 #include "gui/Speech.h"
 #include "gui/Text.h"
@@ -2037,13 +2038,33 @@ void ArxGame::renderLevel() {
 		UseTextureState textureState(TextureStage::FilterLinear, TextureStage::WrapClamp);
 		
 		ARX_INTERFACE_NoteManage();
+		#if ARX_HAVE_OPENXR
+		/*
+		 * VR: the book or a note held in a hand is copied right after it is drawn, with the cursor on it, and its area
+		 * cleared: the texts and the mini map drawn later are shown on their own (see VRSystem::captureHeldPanel)
+		 */
+		auto captureHeld = [](bool book) {
+			if(isVRActive() && ((book && (player.Interface & INTER_PLAYERBOOK)) || (!book && g_note.isOpen()))) {
+				ARX_INTERFACE_RenderCursor(false);
+				g_vr->captureHeldPanel(book);
+			}
+		};
+		if(!(player.Interface & INTER_PLAYERBOOK)) {
+			captureHeld(false);
+		}
+		#endif
 		g_hudRoot.draw();
-		
+
 		if((player.Interface & INTER_PLAYERBOOK) && !(player.Interface & INTER_COMBATMODE)) {
 			ARX_MAGICAL_FLARES_Update();
 			g_renderBatcher.render();
 		}
-		
+		#if ARX_HAVE_OPENXR
+		if(!(player.Interface & INTER_COMBATMODE)) {
+			captureHeld(true);
+		}
+		#endif
+
 	}
 
 	GRenderer->Clear(Renderer::DepthBuffer);
@@ -2056,14 +2077,22 @@ void ArxGame::renderLevel() {
 		pTextManage->Render();
 	}
 	
+	bool showMiniMap = !(player.Interface & INTER_PLAYERBOOK);
+	#if ARX_HAVE_OPENXR
+	// VR: not while a note is held either: hidden then, it was only seen on the panel of the texts (user)
+	showMiniMap = showMiniMap && !(isVRActive() && g_vr->isBookInHand());
+	#endif
 	if(SHOW_INGAME_MINIMAP &&
 	   cinematicIsStopped() &&
 	   !cinematicBorder.isActive() &&
 	   !BLOCK_PLAYER_CONTROLS &&
-	   !(player.Interface & INTER_PLAYERBOOK)) {
+	   showMiniMap) {
 		g_miniMap.showPlayerMiniMap(getMapLevelForArea(g_currentArea));
 	}
-	
+
+	#if ARX_HAVE_OPENXR
+	if(!(isVRActive() && g_vr->hasCapturedHeldPanel())) // Drawn before the held book or note was copied
+	#endif
 	ARX_INTERFACE_RenderCursor(false);
 	
 	CheatDrawText();

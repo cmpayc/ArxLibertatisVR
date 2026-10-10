@@ -1326,6 +1326,7 @@ bool VRSystem::beginUIRender(const Vec2i & windowSize) {
 	renderer->Clear(Renderer::ColorBuffer | Renderer::DepthBuffer, Color(0, 0, 0, 0));
 
 	m_uiActive = true;
+	m_heldCaptured = HeldNone;
 
 	return true;
 }
@@ -1452,13 +1453,7 @@ void VRSystem::updateGamePanels() {
 	VRHudAreas areas = getVRHudAreas();
 	m_otherInventoryArea = areas.otherInventory;
 	updateBookPanel(areas);
-	if(m_bookOpen) {
-		return; // Only the book while it is open (user request)
-	}
-	if(!areas.screen.empty() && !isVRGrabbing()) {
-		updateUIPlacement(true);
-		addScreenPanel(areas.screen, isVRInterfaceOpen());
-	}
+	// The texts above and below the view do not depend on the book or a note being held (user request)
 	if(!areas.subtitles.empty()) {
 		// Subtitles of in-game cutscenes: below the view, where they are on the screen
 		updateUIPlacement(true);
@@ -1468,6 +1463,13 @@ void VRSystem::updateGamePanels() {
 		// Names of pointed objects and notifications: above the view, where they are on the screen
 		updateUIPlacement(true);
 		addScreenPanel(areas.info, false, true);
+	}
+	if(m_bookOpen) {
+		return; // Otherwise only the book while it is open (user request)
+	}
+	if(!areas.screen.empty() && !isVRGrabbing()) {
+		updateUIPlacement(true);
+		addScreenPanel(areas.screen, isVRInterfaceOpen());
 	}
 	updateWristPanels(areas);
 	updateLootPanel(areas);
@@ -1894,27 +1896,39 @@ void VRSystem::updateBookPanel(const VRHudAreas & areas) {
 	 */
 	const float Width = 0.34f; // m, with the bookmarks
 
-	bool open = !areas.book.empty();
-	if(open && !m_bookOpen) {
+	/*
+	 * An open note (or a book of the game world) is held the same way (user request), as a sheet without a cover, at
+	 * the scale of the book: the sizes relative to the book are kept
+	 */
+	bool note = areas.book.empty() && !areas.note.empty();
+	const Rect & area = note ? areas.note : areas.book;
+	bool open = !area.empty() && (!note || areas.bookWidth > 0);
+	if(open && (!m_bookOpen || note != m_heldNote)) {
 		m_bookHand = config.vr.leftHanded ? VRHandRight : VRHandLeft;
 		stowVRHeldItems(); // Both hands free: the weapon to the back, the torch to the belt
 	}
 	m_bookOpen = open;
+	m_heldNote = note;
 	if(!open) {
 		return;
 	}
 
-	m_bookPixelSize = Width / float(areas.book.width());
-	float margin = 2.f * 24.f * areas.hudScale; // The bookmarks around the cover, see getVRHudAreas
-	m_bookCoverSize = Vec2f(float(areas.book.width()) - margin, float(areas.book.height()) - margin) * m_bookPixelSize;
+	if(note) {
+		m_bookPixelSize = Width / float(areas.bookWidth);
+		m_bookCoverSize = Vec2f(float(area.width()), float(area.height())) * m_bookPixelSize;
+	} else {
+		m_bookPixelSize = Width / float(area.width());
+		float margin = 2.f * 24.f * areas.hudScale; // The bookmarks around the cover, see getVRHudAreas
+		m_bookCoverSize = Vec2f(float(area.width()) - margin, float(area.height()) - margin) * m_bookPixelSize;
+	}
 
 	/*
 	 * The book is drawn in the world (see drawVRHandMenus), so that the hand holding it is in front of it: a quad
 	 * layer would cover the hand. Its part of the interface is copied into a texture for that, and its panel is only
 	 * pointed at.
 	 */
-	Rect visible = areas.book & Rect(m_uiSize.x, m_uiSize.y);
-	if(!copyToWorldPanel(m_bookPanel, visible, m_bookPixelSize)) {
+	Rect visible = area & Rect(m_uiSize.x, m_uiSize.y);
+	if(m_heldCaptured != (note ? HeldNote : HeldBook) && !copyToWorldPanel(m_bookPanel, visible, m_bookPixelSize)) {
 		return;
 	}
 
@@ -1928,6 +1942,34 @@ void VRSystem::updateBookPanel(const VRHudAreas & areas) {
 		}
 	}
 
+}
+
+void VRSystem::captureHeldPanel(bool book) {
+
+	/*
+	 * The interface is one picture cut into panels: what the game draws after the book or a note over its area (texts,
+	 * the mini map, the cursor) appeared in the held sheet, and the panels for those showed parts of the sheet (user).
+	 * Right after the book (with its rune flares) or a note is drawn, its area is copied into the texture of the held
+	 * sheet and cleared, for the rest to be drawn alone.
+	 */
+	if(!m_uiActive || m_uiColor == 0) {
+		return;
+	}
+	VRHudAreas areas = getVRHudAreas();
+	const Rect & area = book ? areas.book : areas.note;
+	if(area.empty() || (!book && (!areas.book.empty() || areas.bookWidth <= 0))) {
+		return;
+	}
+
+	const float Width = 0.34f; // m, as in updateBookPanel
+	float pixelSize = Width / float(book ? area.width() : areas.bookWidth);
+	Rect visible = area & Rect(m_uiSize.x, m_uiSize.y);
+	if(visible.empty() || !copyToWorldPanel(m_bookPanel, visible, pixelSize)) {
+		return;
+	}
+	m_heldCaptured = book ? HeldBook : HeldNote;
+
+	GRenderer->Clear(Renderer::ColorBuffer, Color(0, 0, 0, 0), 1.f, 1, &visible);
 }
 
 void VRSystem::updateViewIconPanels(const VRHudAreas & areas) {

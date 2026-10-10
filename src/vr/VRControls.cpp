@@ -1328,7 +1328,16 @@ void drawBookCover() {
 	if(!g_vr->getBookPose(position, orientation, size)) {
 		return;
 	}
-	
+
+	// A note is a sheet: only its picture (seen from both sides, see drawWorldPanel)
+	if(g_vr->isNoteInHand()) {
+		Vec2f panelSize;
+		if(Texture * sheet = g_vr->getBookTexture(panelSize)) {
+			drawWorldPanel(sheet, position, orientation, panelSize);
+		}
+		return;
+	}
+
 	// The corners of the block in the tracking space, then in the world
 	Vec3f across = orientation * Vec3f(0.5f * size.x, 0.f, 0.f);
 	Vec3f up = orientation * Vec3f(0.f, 0.5f * size.y, 0.f);

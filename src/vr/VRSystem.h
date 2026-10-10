@@ -180,8 +180,17 @@ public:
 	//! \return true if the spell drawn in the last magic mode is stored instead of cast (the grip held while drawing)
 	[[nodiscard]] bool isMagicPrecast() const { return m_magicPrecast; }
 	
-	//! \return true while the book is open, held in a hand (see updateBookPanel)
+	//! \return true while the book or a note is open, held in a hand (see updateBookPanel)
 	[[nodiscard]] bool isBookInHand() const { return m_bookOpen; }
+	//! \return true if what is held is a note (a sheet without the book's cover)
+	[[nodiscard]] bool isNoteInHand() const { return m_bookOpen && m_heldNote; }
+	/*!
+	 * Copy the book (or a note) for the hand right after the game drew it, and clear its area of the interface, so
+	 * that what is drawn later over it (texts, mini map) is not part of it - during the interface render
+	 */
+	void captureHeldPanel(bool book);
+	//! \return true if the book or a note was copied this frame (the cursor was drawn before, for it to be on it)
+	[[nodiscard]] bool hasCapturedHeldPanel() const { return m_heldCaptured != HeldNone; }
 	//! The hand holding the open book
 	[[nodiscard]] VRHand getBookHand() const { return m_bookHand; }
 	//! The hand pointing at panels and the world: the main hand, the other one while the main hand holds the book
@@ -336,7 +345,10 @@ private:
 	bool m_triggerOnItem; // The trigger was pressed on an item in the world (a tap, not magic)
 	bool m_magicDrawing; // The trigger press may draw a rune or tap to toggle the magic mode (see updatePointer)
 	bool m_magicMode; // Toggled by a tap of the trigger in the world: the game's magic mode is held
-	bool m_bookOpen; // The book is open, held in a hand
+	bool m_bookOpen; // The book (or a note) is open, held in a hand
+	bool m_heldNote = false; // A note is held instead of the book
+	enum HeldCapture { HeldNone, HeldBook, HeldNote };
+	HeldCapture m_heldCaptured = HeldNone; // Copied this frame by captureHeldPanel
 	VRHand m_bookHand;
 	float m_bookPixelSize; // m per interface pixel of the book panel
 	Vec2f m_bookCoverSize; // m

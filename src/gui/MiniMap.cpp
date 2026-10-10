@@ -80,6 +80,12 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "util/Cast.h"
 #include "util/Range.h"
 
+#include "Configure.h"
+
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 
 MiniMap g_miniMap; // TODO: remove this
 
@@ -218,7 +224,17 @@ Rect MiniMap::playerMiniMapArea() {
 	float scale = minSizeRatio();
 	const Vec2f minimapSizeOrig = Vec2f(200.0f, 160.0f);
 	const Vec2f minimapSizeScaled = minimapSizeOrig * scale;
-	return Rect(Vec2i(g_size.right - s32(minimapSizeScaled.x), s32(-10 * scale)),
+	s32 top = s32(-10 * scale);
+	#if ARX_HAVE_OPENXR
+	/*
+	 * VR: the mini map is shown at the wrist, cut out of the interface: away from the texts at the top of the screen,
+	 * whose panel showed part of it (user), at the middle of the right side where nothing else is drawn
+	 */
+	if(isVRActive()) {
+		top = g_size.center().y - s32(minimapSizeScaled.y / 2.f);
+	}
+	#endif
+	return Rect(Vec2i(g_size.right - s32(minimapSizeScaled.x), top),
 	            s32(minimapSizeScaled.x),
 	            s32(minimapSizeScaled.y));
 }

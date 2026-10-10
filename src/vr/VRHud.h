@@ -32,8 +32,10 @@ class Entity;
  */
 struct VRHudAreas {
 
-	Rect screen;    //!< Notes and containers, in front
+	Rect screen;    //!< Containers and other open interfaces, in front
 	Rect book;      //!< The book (with its bookmarks), held in a hand
+	Rect note;      //!< An open note (or in-game book), held in a hand like the book
+	int bookWidth = 0; //!< Width the book (with its bookmarks) has or would have: the scale of a held note
 	Rect gauges;    //!< Health and mana gauges, next to each other
 	Rect equipment; //!< Damaged equipment icons (weapon and armor status)
 	Rect stealth;   //!< Stealth icon, while hidden (shown in the lower left of the view)
