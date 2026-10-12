@@ -71,6 +71,13 @@ std::unique_ptr<D3D11Upscaler> createDLSSUpscaler(ID3D11Device * device, const s
                                                   const std::string & searchPath);
 
 /*!
+ * Create an upscaler that only copies the scene through the Direct3D 12 bridge, for testing the bridge.
+ *
+ * \return nullptr if Direct3D 12 is not available
+ */
+std::unique_ptr<D3D11Upscaler> createBridgeTestUpscaler(ID3D11Device * device, ID3D11DeviceContext * context);
+
+/*!
  * Check if nvngx_dlss.dll, which is not distributed with Arx Libertatis, can be found.
  *
  * \return true if the library exists in the executable directory or in searchPath

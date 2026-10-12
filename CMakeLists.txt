@@ -1054,6 +1054,7 @@ set(GRAPHICS_D3D11_SOURCES
 	src/graphics/d3d11/D3D11Renderer.cpp
 	src/graphics/d3d11/D3D11Texture.cpp
 	src/graphics/d3d11/D3D11TextureStage.cpp
+	src/graphics/d3d11/D3D12Bridge.cpp
 )
 
 set(GUI_SOURCES
@@ -1308,7 +1309,7 @@ if(USE_D3D11 AND WIN32 AND ARX_HAVE_SDL2)
 	list(APPEND GRAPHICS_SOURCES ${GRAPHICS_D3D11_SOURCES})
 	# The Direct3D headers define macros such as 'interface' that break other code in the unity build
 	set_source_files_properties(${GRAPHICS_D3D11_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
-	list(APPEND ARX_LIBRARIES d3d11 dxgi d3dcompiler)
+	list(APPEND ARX_LIBRARIES d3d11 d3d12 dxgi d3dcompiler)
 	if(USE_DLSS AND CMAKE_SIZEOF_VOID_P EQUAL 8)
 		# NVIDIA DLSS SDK (https://github.com/NVIDIA/DLSS), nvngx_dlss.dll is loaded at runtime
 		find_path(DLSS_INCLUDE_DIR nvsdk_ngx.h PATH_SUFFIXES include)

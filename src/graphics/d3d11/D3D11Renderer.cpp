@@ -1078,7 +1078,11 @@ bool D3D11Renderer::supportsUpscaler(std::string_view name) const {
 	}
 	#endif
 	
-	ARX_UNUSED(name);
+	// Copies the scene through the Direct3D 12 bridge, only selectable in the config file
+	if(name == "bridge-test") {
+		return true;
+	}
+	
 	return false;
 }
 
@@ -1130,6 +1134,10 @@ void D3D11Renderer::updateUpscaler() {
 	
 	if(m_upscalerName.empty() || m_upscalerName == "off") {
 		return;
+	}
+	
+	if(m_upscalerName == "bridge-test") {
+		m_upscaler = d3d11::createBridgeTestUpscaler(m_device.Get(), m_context.Get());
 	}
 	
 	#if ARX_HAVE_DLSS
