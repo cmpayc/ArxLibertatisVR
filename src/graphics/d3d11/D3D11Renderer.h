@@ -124,6 +124,7 @@ public:
 	bool supportsUpscaler(std::string_view name) const override;
 	std::string getUpscalerError(std::string_view name) const override;
 	void setUpscaler(std::string_view name, std::string_view preset) override;
+	void setUpscalerSharpness(float sharpness) override { m_upscalerSharpness = sharpness; }
 	
 	D3D11TextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
@@ -279,8 +280,10 @@ private:
 	// Temporal upscaler
 	std::string m_upscalerName;
 	std::string m_upscalerPreset;
+	float m_upscalerSharpness;
 	bool m_upscalerCreated;
 	bool m_dlssFailed; //!< nvngx_dlss.dll was found but DLSS could not be initialized
+	bool m_fsrFailed; //!< The FidelityFX library was found but FSR could not be initialized
 	std::unique_ptr<D3D11Upscaler> m_upscaler;
 	ComPtr<ID3D11Texture2D> m_upscaledTarget;
 	ComPtr<ID3D11ShaderResourceView> m_upscaledView;

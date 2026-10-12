@@ -912,14 +912,21 @@ public:
 		, m_renderScaleCycleText(nullptr)
 		, m_upscalerCycleText(nullptr)
 		, m_dlssPresetCycleText(nullptr)
+		, m_fsrSharpnessCycleText(nullptr)
 		, m_dlssAvailable(false)
+		, m_fsrAvailable(false)
+		, m_anyUpscalerAvailable(false)
 	{ }
 	
 	CycleTextWidget * m_alphaCutoutAntialiasingCycleText;
 	CycleTextWidget * m_renderScaleCycleText;
 	CycleTextWidget * m_upscalerCycleText;
 	CycleTextWidget * m_dlssPresetCycleText;
+	CycleTextWidget * m_fsrSharpnessCycleText;
 	bool m_dlssAvailable;
+	bool m_fsrAvailable;
+	bool m_anyUpscalerAvailable;
+	std::vector<std::string_view> m_upscalerValues; //!< Config value for each upscaler entry
 	
 	void init() override {
 		
@@ -1039,32 +1046,52 @@ public:
 			addCenter(std::move(cb));
 		}
 		
-		if(GRenderer->supportsUpscaler("dlss")) {
+		if(GRenderer->supportsUpscaler("dlss") || GRenderer->supportsUpscaler("fsr")) {
+			// Upscalers built into the renderer, unavailable ones show why they can't be used
+			struct Upscaler {
+				std::string_view value;
+				std::string_view name;
+			};
+			static constexpr Upscaler upscalers[] = {
+				{ "dlss", "DLSS" },
+				{ "fsr", "FSR" },
+			};
 			std::string_view label = getLocalised("system_menus_options_video_upscaler");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
 			cb->valueChanged = [this](int pos, std::string_view /* string */) {
-				switch(pos) {
-					case 0: config.video.upscaler = "off"; break;
-					case 1: config.video.upscaler = "dlss"; break;
-					default: arx_unreachable();
-				}
+				arx_assert(pos >= 0 && size_t(pos) < m_upscalerValues.size());
+				config.video.upscaler = m_upscalerValues[pos];
 				GRenderer->setUpscaler(config.video.upscaler, config.video.dlssPreset);
 				setUpscalerState();
 			};
+			m_upscalerValues.clear();
+			m_upscalerValues.push_back("off");
+			m_anyUpscalerAvailable = false;
+			m_dlssAvailable = false;
+			m_fsrAvailable = false;
 			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
 			cb->selectLast();
-			std::string error = GRenderer->getUpscalerError("dlss");
-			m_dlssAvailable = error.empty();
-			if(m_dlssAvailable) {
-				cb->addEntry("DLSS");
-				if(config.video.upscaler == "dlss") {
+			for(const Upscaler & upscaler : upscalers) {
+				if(!GRenderer->supportsUpscaler(upscaler.value)) {
+					continue;
+				}
+				m_upscalerValues.push_back(upscaler.value);
+				std::string error = GRenderer->getUpscalerError(upscaler.value);
+				if(error.empty()) {
+					cb->addEntry(upscaler.name);
+					m_anyUpscalerAvailable = true;
+					if(upscaler.value == "dlss") {
+						m_dlssAvailable = true;
+					} else if(upscaler.value == "fsr") {
+						m_fsrAvailable = true;
+					}
+				} else {
+					std::string reason = "system_menus_options_video_upscaler_" + error;
+					cb->addEntry(std::string(upscaler.name) + ": " + std::string(getLocalised(reason)));
+				}
+				if(config.video.upscaler == upscaler.value) {
 					cb->selectLast();
 				}
-			} else {
-				// Show why DLSS can't be used, the row is disabled in setUpscalerState()
-				std::string reason = "system_menus_options_video_upscaler_" + error;
-				cb->addEntry("DLSS: " + std::string(getLocalised(reason)));
-				cb->selectLast();
 			}
 			m_upscalerCycleText = cb.get();
 			addCenter(std::move(cb));
@@ -1102,6 +1129,25 @@ public:
 				}
 			}
 			m_dlssPresetCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		if(GRenderer->supportsUpscaler("fsr")) {
+			std::string_view label = getLocalised("system_menus_options_video_fsr_sharpness");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				config.video.fsrSharpness = float(pos) * 0.25f;
+				GRenderer->setUpscalerSharpness(config.video.fsrSharpness);
+			};
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+			cb->selectLast();
+			for(int percent : { 25, 50, 75, 100 }) {
+				cb->addEntry(std::to_string(percent) + "%");
+				if(int(config.video.fsrSharpness * 100.f + 0.5f) >= percent) {
+					cb->selectLast();
+				}
+			}
+			m_fsrSharpnessCycleText = cb.get();
 			addCenter(std::move(cb));
 		}
 		
@@ -1176,10 +1222,13 @@ private:
 			m_renderScaleCycleText->setEnabled(direct3D);
 		}
 		if(m_upscalerCycleText) {
-			m_upscalerCycleText->setEnabled(direct3D && m_dlssAvailable);
+			m_upscalerCycleText->setEnabled(direct3D && m_anyUpscalerAvailable);
 		}
 		if(m_dlssPresetCycleText) {
 			m_dlssPresetCycleText->setEnabled(direct3D && m_dlssAvailable && config.video.upscaler == "dlss");
+		}
+		if(m_fsrSharpnessCycleText) {
+			m_fsrSharpnessCycleText->setEnabled(direct3D && m_fsrAvailable && config.video.upscaler == "fsr");
 		}
 		
 	}

@@ -144,6 +144,7 @@ public:
 		std::string upscaler;
 		std::string dlssPreset;
 		std::string upscalerPath;
+		float fsrSharpness;
 		bool colorkeyAntialiasing;
 		int alphaCutoutAntialiasing;
 		

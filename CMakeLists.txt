@@ -74,6 +74,7 @@ option(USE_OPENAL "Build the OpenAL audio backend" ON)
 option(USE_OPENGL "Build the OpenGL renderer backend" ON)
 option(USE_D3D11 "Build the Direct3D 11 renderer backend (Windows only)" ON)
 option(USE_DLSS "Build NVIDIA DLSS support for the Direct3D 11 renderer (needs the DLSS SDK)" ON)
+option(USE_FSR "Build AMD FidelityFX Super Resolution support for the Direct3D 11 renderer (needs the FidelityFX API headers)" ON)
 option(USE_WINHTTP "Use the native WinHTTP API instead of CURL on Windows" ON)
 option(USE_NATIVE_FS "Use the native filesystem backend directly instead of boost" ON)
 set(default_USE_X11 OFF)
@@ -1323,6 +1324,18 @@ if(USE_D3D11 AND WIN32 AND ARX_HAVE_SDL2)
 			list(APPEND ARX_LIBRARIES ${DLSS_LIBRARY})
 		endif()
 	endif()
+	if(USE_FSR)
+		# AMD FidelityFX API headers (https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK),
+		# the FidelityFX libraries are loaded at runtime
+		find_path(FIDELITYFX_INCLUDE_DIR upscalers/include/ffx_upscale.h)
+		if(FIDELITYFX_INCLUDE_DIR)
+			set(ARX_HAVE_FSR 1)
+			set(GRAPHICS_FSR_SOURCES src/graphics/d3d11/D3D11FSR.cpp)
+			list(APPEND GRAPHICS_SOURCES ${GRAPHICS_FSR_SOURCES})
+			set_source_files_properties(${GRAPHICS_FSR_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
+			include_directories(SYSTEM ${FIDELITYFX_INCLUDE_DIR})
+		endif()
+	endif()
 endif()
 
 # Windowing / input
@@ -2003,6 +2016,7 @@ print_configuration("Renderer"
 	ARX_HAVE_GLEW  "OpenGL (GLEW)"
 	ARX_HAVE_D3D11 "Direct3D 11"
 	ARX_HAVE_DLSS  "DLSS"
+	ARX_HAVE_FSR   "FSR"
 )
 print_configuration("Audio features"
 	ARX_HAVE_OPENAL_EFX  "EFX"

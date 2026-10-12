@@ -260,34 +260,7 @@ public:
 namespace d3d11 {
 
 bool findDLSSLibrary(const std::string & searchPath) {
-	
-	const std::wstring library = L"nvngx_dlss.dll";
-	
-	// NGX looks in the executable directory by default
-	WCHAR module[MAX_PATH];
-	DWORD length = GetModuleFileNameW(nullptr, module, MAX_PATH);
-	if(length > 0 && length < MAX_PATH) {
-		std::wstring path(module, length);
-		size_t separator = path.find_last_of(L"\\/");
-		if(separator != std::wstring::npos) {
-			path.resize(separator + 1);
-			if(GetFileAttributesW((path + library).c_str()) != INVALID_FILE_ATTRIBUTES) {
-				return true;
-			}
-		}
-	}
-	
-	if(!searchPath.empty()) {
-		std::wstring path = platform::WideString(searchPath).c_str();
-		if(path.back() != L'\\' && path.back() != L'/') {
-			path += L'\\';
-		}
-		if(GetFileAttributesW((path + library).c_str()) != INVALID_FILE_ATTRIBUTES) {
-			return true;
-		}
-	}
-	
-	return false;
+	return !findUpscalerLibrary(L"nvngx_dlss.dll", searchPath).empty();
 }
 
 std::unique_ptr<D3D11Upscaler> createDLSSUpscaler(ID3D11Device * device, const std::string & preset,

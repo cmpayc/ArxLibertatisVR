@@ -425,6 +425,9 @@ public:
 		ARX_UNUSED(name), ARX_UNUSED(preset);
 	}
 	
+	//! Set the strength of the upscaler's sharpening pass in [0, 1], 0 disables it (only used by FSR)
+	virtual void setUpscalerSharpness(float sharpness) { ARX_UNUSED(sharpness); }
+	
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }
 	

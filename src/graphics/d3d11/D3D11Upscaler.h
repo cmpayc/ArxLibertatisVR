@@ -45,6 +45,10 @@ public:
 		Vec2f jitter = Vec2f(0.f);          //!< Jitter applied to the projection, in render pixels
 		bool reset = false;                 //!< Discard the history, e.g. after a camera cut
 		float frameTime = 0.f;              //!< Time since the last frame in milliseconds
+		float cameraNear = 1.f;             //!< Near plane distance
+		float cameraFar = 1.f;              //!< Far plane distance
+		float cameraFovVertical = 1.f;      //!< Vertical field of view in radians
+		float sharpness = 0.f;              //!< Strength of an additional sharpening pass in [0, 1], 0 = off
 	};
 	
 	virtual ~D3D11Upscaler() = default;
@@ -69,6 +73,28 @@ namespace d3d11 {
  */
 std::unique_ptr<D3D11Upscaler> createDLSSUpscaler(ID3D11Device * device, const std::string & preset,
                                                   const std::string & searchPath);
+
+/*!
+ * Create the AMD FidelityFX Super Resolution upscaler (FSR 3.1 or 4, chosen by the FidelityFX library).
+ *
+ * \param searchPath additional directory to search for the FidelityFX libraries
+ *
+ * \return nullptr if FSR is not available
+ */
+std::unique_ptr<D3D11Upscaler> createFSRUpscaler(ID3D11Device * device, ID3D11DeviceContext * context,
+                                                 const std::string & searchPath);
+
+/*!
+ * Check if the AMD FidelityFX library, which is not distributed with Arx Libertatis, can be found.
+ */
+bool findFSRLibrary(const std::string & searchPath);
+
+/*!
+ * Find an upscaler library in the executable directory or in searchPath.
+ *
+ * \return the full path or an empty string if the library was not found
+ */
+std::wstring findUpscalerLibrary(const wchar_t * name, const std::string & searchPath);
 
 /*!
  * Create an upscaler that only copies the scene through the Direct3D 12 bridge, for testing the bridge.

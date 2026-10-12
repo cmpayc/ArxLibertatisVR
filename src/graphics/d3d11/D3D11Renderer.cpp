@@ -152,8 +152,10 @@ D3D11Renderer::D3D11Renderer()
 	, m_jitterIndex(0)
 	, m_jitter(0.f)
 	, m_sceneDebugView(0)
+	, m_upscalerSharpness(0.f)
 	, m_upscalerCreated(false)
 	, m_dlssFailed(false)
+	, m_fsrFailed(false)
 	, m_lastUpscaleTime(0)
 	, m_maximumAnisotropy(1.f)
 	, m_maximumSupportedAnisotropy(1.f)
@@ -1078,6 +1080,12 @@ bool D3D11Renderer::supportsUpscaler(std::string_view name) const {
 	}
 	#endif
 	
+	#if ARX_HAVE_FSR
+	if(name == "fsr") {
+		return true;
+	}
+	#endif
+	
 	// Copies the scene through the Direct3D 12 bridge, only selectable in the config file
 	if(name == "bridge-test") {
 		return true;
@@ -1098,6 +1106,17 @@ std::string D3D11Renderer::getUpscalerError(std::string_view name) const {
 			return "dll_missing";
 		}
 		if(m_dlssFailed) {
+			return "unsupported";
+		}
+	}
+	#endif
+	
+	#if ARX_HAVE_FSR
+	if(name == "fsr") {
+		if(!d3d11::findFSRLibrary(config.video.upscalerPath)) {
+			return "dll_missing";
+		}
+		if(m_fsrFailed) {
 			return "unsupported";
 		}
 	}
@@ -1150,6 +1169,14 @@ void D3D11Renderer::updateUpscaler() {
 			m_upscaler = d3d11::createDLSSUpscaler(m_device.Get(), m_upscalerPreset, config.video.upscalerPath);
 			m_dlssFailed = !m_upscaler;
 		}
+	}
+	#endif
+	
+	#if ARX_HAVE_FSR
+	if(m_upscalerName == "fsr") {
+		// The AMD FidelityFX libraries are not distributed with Arx Libertatis, the upscaler logs why it failed
+		m_upscaler = d3d11::createFSRUpscaler(m_device.Get(), m_context.Get(), config.video.upscalerPath);
+		m_fsrFailed = !m_upscaler && d3d11::findFSRLibrary(config.video.upscalerPath);
 	}
 	#endif
 	
@@ -1214,6 +1241,17 @@ ID3D11ShaderResourceView * D3D11Renderer::runUpscaler() {
 	inputs.jitter = m_jitter;
 	inputs.reset = m_resetHistory;
 	inputs.frameTime = frameTime;
+	inputs.sharpness = m_upscalerSharpness;
+	
+	// Camera parameters from the projection matrix (see createProjectionMatrix() in Camera.cpp):
+	// [2][2] = far / (far - near), [3][2] = -near * far / (far - near), [1][1] = -cot(fov / 2) for the height
+	{
+		float q = m_sceneProjection[2][2];
+		float nearPlane = (q != 0.f) ? -m_sceneProjection[3][2] / q : 1.f;
+		inputs.cameraNear = nearPlane;
+		inputs.cameraFar = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
+		inputs.cameraFovVertical = 2.f * std::atan(1.f / std::max(std::abs(m_sceneProjection[1][1]), 0.0001f));
+	}
 	
 	bool success = m_upscaler->evaluate(m_context.Get(), inputs);
 	

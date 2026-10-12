@@ -25,6 +25,7 @@
 
 #include "graphics/d3d11/D3D11Upscaler.h"
 #include "io/log/Logger.h"
+#include "platform/WindowsUtils.h"
 
 namespace {
 
@@ -47,15 +48,23 @@ D3D12Bridge::D3D12Bridge()
 D3D12Bridge::~D3D12Bridge() {
 	
 	// Resources may still be in use by the GPU
-	if(m_queue && m_fence) {
-		m_fenceValue++;
-		if(SUCCEEDED(m_queue->Signal(m_fence.Get(), m_fenceValue))) {
-			waitForGpu(m_fenceValue);
-		}
-	}
+	waitIdle();
 	
 	if(m_event) {
 		CloseHandle(m_event);
+	}
+	
+}
+
+void D3D12Bridge::waitIdle() {
+	
+	if(!m_queue || !m_fence || !m_event) {
+		return;
+	}
+	
+	m_fenceValue++;
+	if(SUCCEEDED(m_queue->Signal(m_fence.Get(), m_fenceValue))) {
+		waitForGpu(m_fenceValue);
 	}
 	
 }
@@ -306,6 +315,37 @@ public:
 } // anonymous namespace
 
 namespace d3d11 {
+
+std::wstring findUpscalerLibrary(const wchar_t * name, const std::string & searchPath) {
+	
+	// The executable directory is searched first, like NGX does
+	WCHAR module[MAX_PATH];
+	DWORD length = GetModuleFileNameW(nullptr, module, MAX_PATH);
+	if(length > 0 && length < MAX_PATH) {
+		std::wstring path(module, length);
+		size_t separator = path.find_last_of(L"\\/");
+		if(separator != std::wstring::npos) {
+			path.resize(separator + 1);
+			path += name;
+			if(GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+				return path;
+			}
+		}
+	}
+	
+	if(!searchPath.empty()) {
+		std::wstring path = platform::WideString(searchPath).c_str();
+		if(path.back() != L'\\' && path.back() != L'/') {
+			path += L'\\';
+		}
+		path += name;
+		if(GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+			return path;
+		}
+	}
+	
+	return std::wstring();
+}
 
 std::unique_ptr<D3D11Upscaler> createBridgeTestUpscaler(ID3D11Device * device, ID3D11DeviceContext * context) {
 	

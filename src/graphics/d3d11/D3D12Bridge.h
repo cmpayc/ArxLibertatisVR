@@ -68,6 +68,9 @@ public:
 	//! Submit the recorded commands, Direct3D 11 work submitted afterwards waits for them
 	bool end();
 	
+	//! Wait until the Direct3D 12 GPU work submitted so far has completed
+	void waitIdle();
+	
 	ID3D12Device * device() const { return m_device.Get(); }
 	ID3D12CommandQueue * queue() const { return m_queue.Get(); }
 	
