@@ -193,6 +193,12 @@ struct EERIE_3DOBJ {
 	util::HandleVector<VertexId, Vec4f> vertexClipPositions;
 	util::HandleVector<VertexId, ColorRGBA> vertexColors;
 	
+	// Clip positions from the 3D scene in this and the previous frame, for motion vectors
+	util::HandleVector<VertexId, Vec4f> vertexSceneClipPositions;
+	util::HandleVector<VertexId, Vec4f> vertexPreviousClipPositions;
+	u64 sceneClipFrame = 0;
+	bool hasPreviousClipPositions = false;
+	
 	std::vector<EERIE_FACE> facelist;
 	util::HandleVector<VertexGroupId, VertexGroup> grouplist;
 	std::vector<EERIE_ACTIONLIST> actionlist;

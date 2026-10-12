@@ -254,6 +254,10 @@ private:
 	ComPtr<ID3D11Texture2D> m_linearDepthTarget;
 	ComPtr<ID3D11RenderTargetView> m_linearDepthView;
 	ComPtr<ID3D11ShaderResourceView> m_linearDepthResource;
+	// Per-pixel motion of objects that provide their previous position, written while rendering the scene
+	ComPtr<ID3D11Texture2D> m_objectMotionTarget;
+	ComPtr<ID3D11RenderTargetView> m_objectMotionView;
+	ComPtr<ID3D11ShaderResourceView> m_objectMotionResource;
 	
 	// Scene camera tracking
 	glm::mat4x4 m_sceneProjection;
@@ -295,6 +299,7 @@ private:
 	ComPtr<ID3D11PixelShader> m_motionPixelShaderMS;
 	ComPtr<ID3D11PixelShader> m_debugDepthPixelShader;
 	ComPtr<ID3D11PixelShader> m_debugMotionPixelShader;
+	ComPtr<ID3D11PixelShader> m_debugObjectMotionPixelShader;
 	ComPtr<ID3D11Buffer> m_motionConstants;
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;

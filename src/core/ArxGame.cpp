@@ -1696,6 +1696,10 @@ void ArxGame::updateLevel() {
 
 	updateActiveCamera();
 
+	// Entities are animated and projected with the scene camera from here until the scene is rendered
+	g_sceneFrameIndex++;
+	g_renderingScene = true;
+	
 	ARX_GLOBALMODS_Apply();
 	
 	// Set Listener Position
@@ -1842,6 +1846,7 @@ void ArxGame::renderLevel() {
 	updateLightFlares();
 	renderLightFlares();
 	
+	g_renderingScene = false;
 	GRenderer->endScene();
 	
 	// Manage Death visual & Launch menu...

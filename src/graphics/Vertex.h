@@ -74,6 +74,9 @@ struct TexturedVertex {
 	
 	Vec2f uv = Vec2f(0.f);
 	
+	//! Position in the previous frame (same space as p and w) for motion vectors, unused if w <= 0
+	Vec4f prevP = Vec4f(0.f);
+	
 	constexpr TexturedVertex() arx_noexcept_default
 	
 	constexpr TexturedVertex(const Vec3f & _p, float _w, ColorRGBA _color, Vec2f _uv) noexcept

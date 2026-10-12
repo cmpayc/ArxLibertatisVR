@@ -47,6 +47,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <utility>
 
 #include "animation/Animation.h"
 
@@ -534,6 +535,27 @@ void DrawEERIEInter_ViewProjectTransform(EERIE_3DOBJ * eobj) {
 		eobj->vertexClipPositions[vertex] = worldToClipSpace(eobj->vertexWorldPositions[vertex].v);
 	}
 	
+	// Remember the clip positions of the 3D scene for motion vectors in the next frame
+	if(g_renderingScene) {
+		if(eobj->sceneClipFrame != g_sceneFrameIndex) {
+			eobj->hasPreviousClipPositions = (eobj->sceneClipFrame + 1 == g_sceneFrameIndex
+			                                  && eobj->vertexSceneClipPositions.size() == eobj->vertexClipPositions.size());
+			std::swap(eobj->vertexPreviousClipPositions, eobj->vertexSceneClipPositions);
+			eobj->sceneClipFrame = g_sceneFrameIndex;
+		}
+		eobj->vertexSceneClipPositions = eobj->vertexClipPositions;
+	}
+	
+}
+
+//! \return the clip position of a vertex in the previous frame, or zero if not known
+static Vec4f previousClipPosition(const EERIE_3DOBJ * eobj, VertexId vertex) {
+	
+	if(!g_renderingScene || !eobj->hasPreviousClipPositions || eobj->sceneClipFrame != g_sceneFrameIndex) {
+		return Vec4f(0.f);
+	}
+	
+	return eobj->vertexPreviousClipPositions[vertex];
 }
 
 static bool CullFace(const EERIE_3DOBJ * eobj, const EERIE_FACE & face) {
@@ -695,6 +717,7 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 			
 			tvList[n].p = Vec3f(eobj->vertexClipPositions[face.vid[n]]);
 			tvList[n].w = eobj->vertexClipPositions[face.vid[n]].w;
+			tvList[n].prevP = previousClipPosition(eobj, face.vid[n]);
 			tvList[n].uv.x = face.u[n];
 			tvList[n].uv.y = face.v[n];
 			
@@ -1038,6 +1061,7 @@ static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
 		for(size_t n = 0; n < 3; n++) {
 			tvList[n].p = Vec3f(eobj->vertexClipPositions[face.vid[n]]);
 			tvList[n].w = eobj->vertexClipPositions[face.vid[n]].w;
+			tvList[n].prevP = previousClipPosition(eobj, face.vid[n]);
 			tvList[n].uv = Vec2f(face.u[n], face.v[n]);
 			tvList[n].color = eobj->vertexColors[face.vid[n]];
 		}

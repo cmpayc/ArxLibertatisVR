@@ -416,6 +416,9 @@ Vec3f EE_RT(const Vec3f & in) {
 	return Vec3f(g_preparedCamera.m_worldToView * Vec4f(in, 1.0f));
 }
 
+u64 g_sceneFrameIndex = 0;
+bool g_renderingScene = false;
+
 Vec4f worldToClipSpace(const Vec3f & in) {
 	return g_preparedCamera.m_worldToScreen * Vec4f(in, 1.0f);
 }

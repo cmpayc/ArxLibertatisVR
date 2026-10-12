@@ -200,7 +200,7 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	
 	m_window = window;
 	
-	// Debug view for the scene: 1 = depth, 2 = motion vectors
+	// Debug view for the scene: 1 = depth, 2 = motion vectors, 3 = per-object motion
 	{
 		char value[16];
 		DWORD length = GetEnvironmentVariableA("ARX_SCENE_DEBUG", value, sizeof(value));
@@ -381,6 +381,8 @@ bool D3D11Renderer::compileShaders() {
 		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
 		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, UINT(offsetof(TexturedVertex, uv)),
 		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "PREVPOSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, UINT(offsetof(TexturedVertex, prevP)),
+		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
 	};
 	static_assert(offsetof(TexturedVertex, w) == offsetof(TexturedVertex, p) + 3 * sizeof(float),
 	              "TexturedVertex position must be followed by w");
@@ -498,6 +500,7 @@ bool D3D11Renderer::compileShaders() {
 			{ "psMotion", msaaDefines, std::addressof(m_motionPixelShaderMS) },
 			{ "psDebugDepth", nullptr, std::addressof(m_debugDepthPixelShader) },
 			{ "psDebugMotion", nullptr, std::addressof(m_debugMotionPixelShader) },
+			{ "psDebugObjectMotion", nullptr, std::addressof(m_debugObjectMotionPixelShader) },
 		};
 		for(const PixelShaderInfo & info : shaders) {
 			if(m_featureLevel < D3D_FEATURE_LEVEL_10_1) {
@@ -736,6 +739,18 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 			releaseSceneTargets();
 			return false;
 		}
+		// Written by the scene shaders for objects that provide their own motion (needs the same sample count)
+		if(m_sceneSamples == 1) {
+			desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_objectMotionTarget))
+			   || FAILED(m_device->CreateRenderTargetView(m_objectMotionTarget.Get(), nullptr, &m_objectMotionView))
+			   || FAILED(m_device->CreateShaderResourceView(m_objectMotionTarget.Get(), nullptr,
+			                                                &m_objectMotionResource))) {
+				LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 object motion target";
+				releaseSceneTargets();
+				return false;
+			}
+		}
 	}
 	
 	m_sceneSize = size;
@@ -755,6 +770,7 @@ void D3D11Renderer::releaseSceneTargets() {
 	unbindTextureView(m_sceneDepthResource.Get());
 	unbindTextureView(m_motionResource.Get());
 	unbindTextureView(m_linearDepthResource.Get());
+	unbindTextureView(m_objectMotionResource.Get());
 	
 	m_sceneResolvedView.Reset();
 	m_sceneResolved.Reset();
@@ -769,6 +785,9 @@ void D3D11Renderer::releaseSceneTargets() {
 	m_linearDepthResource.Reset();
 	m_linearDepthView.Reset();
 	m_linearDepthTarget.Reset();
+	m_objectMotionResource.Reset();
+	m_objectMotionView.Reset();
+	m_objectMotionTarget.Reset();
 	m_sceneSize = Vec2i(0);
 	
 }
@@ -873,14 +892,15 @@ void D3D11Renderer::renderSceneMotion() {
 	
 	ID3D11Buffer * buffer = m_motionConstants.Get();
 	m_context->PSSetConstantBuffers(2, 1, &buffer);
-	ID3D11ShaderResourceView * depth = m_sceneDepthResource.Get();
-	m_context->PSSetShaderResources(1, 1, &depth);
+	ID3D11ShaderResourceView * inputs[] = { m_sceneDepthResource.Get(), m_objectMotionResource.Get() };
+	m_context->PSSetShaderResources(1, UINT(std::size(inputs)), inputs);
 	
 	drawFullscreen(shader);
 	
-	ID3D11ShaderResourceView * none = nullptr;
-	m_context->PSSetShaderResources(1, 1, &none);
+	ID3D11ShaderResourceView * none[std::size(inputs)] = { };
+	m_context->PSSetShaderResources(1, UINT(std::size(none)), none);
 	m_currentViews[1] = nullptr;
+	m_currentViews[2] = nullptr;
 	
 }
 
@@ -922,6 +942,12 @@ void D3D11Renderer::bindRenderTargets() {
 	
 	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : m_colorView.Get();
 	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : m_depthView.Get();
+	
+	if(m_inScene && m_objectMotionView) {
+		ID3D11RenderTargetView * views[] = { colorView, m_objectMotionView.Get() };
+		m_context->OMSetRenderTargets(UINT(std::size(views)), views, depthView);
+		return;
+	}
 	
 	m_context->OMSetRenderTargets(1, &colorView, depthView);
 	
@@ -968,6 +994,12 @@ void D3D11Renderer::beginScene() {
 	unbindTextureView(m_sceneDepthResource.Get());
 	unbindTextureView(m_motionResource.Get());
 	unbindTextureView(m_linearDepthResource.Get());
+	unbindTextureView(m_objectMotionResource.Get());
+	
+	if(m_objectMotionView) {
+		const float none[4] = { 0.f, 0.f, 0.f, 0.f };
+		m_context->ClearRenderTargetView(m_objectMotionView.Get(), none);
+	}
 	
 	updateSceneCamera();
 	
@@ -1012,6 +1044,9 @@ void D3D11Renderer::endScene() {
 	} else if(m_sceneDebugView == 2 && m_debugMotionPixelShader && m_motionResource) {
 		view = m_motionResource.Get();
 		shader = m_debugMotionPixelShader.Get();
+	} else if(m_sceneDebugView == 3 && m_debugObjectMotionPixelShader && m_objectMotionResource) {
+		view = m_objectMotionResource.Get();
+		shader = m_debugObjectMotionPixelShader.Get();
 	}
 	
 	m_context->PSSetShaderResources(0, 1, &view);
@@ -1758,7 +1793,14 @@ ID3D11BlendState * D3D11Renderer::getBlendState(BlendingFactor src, BlendingFact
 	
 	D3D11_BLEND_DESC desc = {};
 	desc.AlphaToCoverageEnable = alphaToCoverage ? TRUE : FALSE;
-	desc.IndependentBlendEnable = FALSE;
+	desc.IndependentBlendEnable = TRUE;
+	// The second target (object motion or depth) is never blended and only written by opaque draws
+	D3D11_RENDER_TARGET_BLEND_DESC & motion = desc.RenderTarget[1];
+	motion.BlendEnable = FALSE;
+	motion.SrcBlend = motion.SrcBlendAlpha = D3D11_BLEND_ONE;
+	motion.DestBlend = motion.DestBlendAlpha = D3D11_BLEND_ZERO;
+	motion.BlendOp = motion.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+	motion.RenderTargetWriteMask = (colorWrite && src == BlendOne && dst == BlendZero) ? D3D11_COLOR_WRITE_ENABLE_ALL : 0;
 	D3D11_RENDER_TARGET_BLEND_DESC & target = desc.RenderTarget[0];
 	target.BlendEnable = (src != BlendOne || dst != BlendZero) ? TRUE : FALSE;
 	target.SrcBlend = arxToD3DBlendFactor[src];

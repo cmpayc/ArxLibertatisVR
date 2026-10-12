@@ -68,6 +68,8 @@ struct VSOutput {
 	float2 uv1 : TEXCOORD1;
 	float2 uv2 : TEXCOORD2;
 	float fog : TEXCOORD3;
+	float4 clip : TEXCOORD4;     // Clip position without jitter
+	float4 prevClip : TEXCOORD5; // Clip position in the previous frame, w <= 0 if unknown
 };
 
 struct PSInput {
@@ -77,9 +79,16 @@ struct PSInput {
 	INTERPOLATION float2 uv1 : TEXCOORD1;
 	INTERPOLATION float2 uv2 : TEXCOORD2;
 	float fog : TEXCOORD3;
+	float4 clip : TEXCOORD4;
+	float4 prevClip : TEXCOORD5;
 };
 
-VSOutput makeOutput(float4 clip, float4 color, float2 uv0, float2 uv1, float2 uv2) {
+struct PSOutput {
+	float4 color : SV_Target0;
+	float4 motion : SV_Target1; // xy = previous - current position in NDC, w = 1 if valid
+};
+
+VSOutput makeOutput(float4 clip, float4 prevClip, float4 color, float2 uv0, float2 uv1, float2 uv2) {
 	VSOutput o;
 	o.position = float4(clip.xy + jitter.xy * clip.w, (clip.z + clip.w) * 0.5, clip.w);
 	o.color = color;
@@ -88,20 +97,25 @@ VSOutput makeOutput(float4 clip, float4 color, float2 uv0, float2 uv1, float2 uv
 	o.uv2 = uv2;
 	// The eye-plane distance - both the TL and the projection matrices put view.z into w
 	o.fog = clip.w;
+	o.clip = clip;
+	o.prevClip = prevClip;
 	return o;
 }
 
-VSOutput vsTL(float4 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0) {
-	return makeOutput(mul(transform, position), color, uv, float2(0, 0), float2(0, 0));
+VSOutput vsTL(float4 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0,
+              float4 prevPosition : PREVPOSITION) {
+	float4 prevClip = prevPosition.w > 0 ? mul(transform, prevPosition) : float4(0, 0, 0, 0);
+	return makeOutput(mul(transform, position), prevClip, color, uv, float2(0, 0), float2(0, 0));
 }
 
 VSOutput vsWorld(float3 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0) {
-	return makeOutput(mul(transform, float4(position, 1)), color, uv, float2(0, 0), float2(0, 0));
+	return makeOutput(mul(transform, float4(position, 1)), float4(0, 0, 0, 0), color, uv, float2(0, 0),
+	                  float2(0, 0));
 }
 
 VSOutput vsWorld3(float3 position : POSITION, float4 color : COLOR, float2 uv0 : TEXCOORD0,
                   float2 uv1 : TEXCOORD1, float2 uv2 : TEXCOORD2) {
-	return makeOutput(mul(transform, float4(position, 1)), color, uv0, uv1, uv2);
+	return makeOutput(mul(transform, float4(position, 1)), float4(0, 0, 0, 0), color, uv0, uv1, uv2);
 }
 
 float3 combineColor(int op, float3 previous, float3 texel) {
@@ -135,11 +149,11 @@ float4 combine(int4 stage, float4 previous, float4 texel) {
 	                       combineAlpha(stage.y, previous.a, texel.a)));
 }
 
-float4 psMain(PSInput input
+PSOutput psMain(PSInput input
 #ifdef SAMPLE_SHADING
-              , uint sampleIndex : SV_SampleIndex
+                , uint sampleIndex : SV_SampleIndex
 #endif
-              ) : SV_Target {
+                ) {
 	
 	float4 color = input.color;
 	
@@ -167,7 +181,14 @@ float4 psMain(PSInput input
 		discard;
 	}
 	
-	return color;
+	PSOutput o;
+	o.color = color;
+	// Per-object motion, only written for opaque geometry while the motion target is bound
+	o.motion = float4(0, 0, 0, 0);
+	if(input.prevClip.w > 0 && input.clip.w > 0) {
+		o.motion = float4(input.prevClip.xy / input.prevClip.w - input.clip.xy / input.clip.w, 0, 1);
+	}
+	return o;
 }
 
 float4 vsClear(uint id : SV_VertexID) : SV_Position {
@@ -206,6 +227,7 @@ Texture2DMS<float> sceneDepth : register(t1);
 #else
 Texture2D<float> sceneDepth : register(t1);
 #endif
+Texture2D<float4> objectMotion : register(t2);
 
 struct MotionOutput {
 	float2 motion : SV_Target0;
@@ -236,6 +258,13 @@ MotionOutput psMotion(float4 position : SV_Position) {
 	MotionOutput o;
 	o.motion = (previousUV - uv) * targetSize.xy;
 	o.depth = saturate(z);
+	
+	// Moving objects (characters, items) provide their own motion
+	float4 object = objectMotion.Load(int3(pixel, 0));
+	if(object.w > 0) {
+		o.motion = object.xy * float2(0.5, -0.5) * targetSize.xy;
+	}
+	
 	return o;
 }
 
@@ -248,7 +277,14 @@ float4 psDebugDepth(BlitOutput input) : SV_Target {
 
 float4 psDebugMotion(BlitOutput input) : SV_Target {
 	float2 motion = texture0.Sample(sampler0, input.uv).rg;
-	return float4(saturate(abs(motion) * 0.1), saturate(length(motion) * 0.02), 1);
+	// Full red / green at one pixel of horizontal / vertical motion per frame, blue at ten pixels
+	return float4(saturate(abs(motion)), saturate(length(motion) * 0.1), 1);
+}
+
+float4 psDebugObjectMotion(BlitOutput input) : SV_Target {
+	// Green where objects provide their own motion, red for the amount (in normalized device coordinates)
+	float4 motion = texture0.Sample(sampler0, input.uv);
+	return float4(saturate(length(motion.xy) * 300), motion.w * 0.5, 0, 1);
 }
 
 )HLSL";
