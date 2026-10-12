@@ -131,6 +131,10 @@ public:
 	void setBloom(float strength) override;
 	bool supportsColorGrading() const override { return true; }
 	void setColorGrading(std::string_view preset) override;
+	bool supportsPixelLighting() const override { return true; }
+	void setPixelLighting(bool enabled) override;
+	bool usesPixelLighting() const override { return m_pixelLighting; }
+	void setPixelLights(const PixelLight * lights, size_t count) override;
 	
 	D3D11TextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
@@ -360,6 +364,7 @@ private:
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;
 	ComPtr<ID3D11Buffer> m_clearConstants;
+	ComPtr<ID3D11Buffer> m_lightConstants;
 	
 	RingBuffer m_vertexRing;
 	RingBuffer m_indexRing;
@@ -403,6 +408,15 @@ private:
 	bool m_vsConstantsValid;
 	unsigned char m_psConstantsData[96];
 	bool m_psConstantsValid;
+	
+	// Per-pixel lighting of world geometry
+	bool m_pixelLighting;
+	size_t m_pixelLightCount; //!< Number of lights in m_lightConstants
+	bool m_pixelLightsWarned;
+	
+	// Debug snapshot, see ARX_D3D11_SNAPSHOT
+	std::string m_snapshotPath;
+	LONGLONG m_snapshotTime;
 	
 	friend class D3D11TextureStage;
 	

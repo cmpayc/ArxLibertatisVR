@@ -103,6 +103,7 @@ constexpr const bool
 	showCrosshair = true,
 	antialiasing = true,
 	colorkeyAntialiasing = true,
+	pixelLighting = true,
 	limitSpeechWidth = true,
 	hudScaleInteger = true,
 	bookScaleInteger = false,
@@ -236,6 +237,7 @@ constexpr const std::string_view
 	colorGrading = "color_grading",
 	dlssPreset = "dlss_preset",
 	upscalerPath = "upscaler_path",
+	pixelLighting = "pixel_lighting",
 	colorkeyAntialiasing = "colorkey_antialiasing",
 	alphaCutoutAntialiasing = "alpha_cutout_antialiasing",
 	bufferSize = "buffer_size",
@@ -503,6 +505,7 @@ bool Config::save() {
 	writer.writeKey(Key::ambientOcclusion, video.ambientOcclusion);
 	writer.writeKey(Key::bloom, video.bloom);
 	writer.writeKey(Key::colorGrading, video.colorGrading);
+	writer.writeKey(Key::pixelLighting, video.pixelLighting);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
 	writer.writeKey(Key::alphaCutoutAntialiasing, video.alphaCutoutAntialiasing);
 	writer.writeKey(Key::bufferSize, video.bufferSize);
@@ -648,6 +651,7 @@ bool Config::init(const fs::path & file) {
 	float bloom = reader.getKey(Section::Video, Key::bloom, Default::bloom);
 	video.bloom = glm::clamp(bloom, 0.f, 1.f);
 	video.colorGrading = reader.getKey(Section::Video, Key::colorGrading, Default::colorGrading);
+	video.pixelLighting = reader.getKey(Section::Video, Key::pixelLighting, Default::pixelLighting);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);
 	int alphaCutoutAA = reader.getKey(Section::Video, Key::alphaCutoutAntialiasing, Default::alphaCutoutAntialiasing);
 	video.alphaCutoutAntialiasing = glm::clamp(alphaCutoutAA, 0, 2);

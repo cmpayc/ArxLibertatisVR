@@ -123,12 +123,21 @@ const ColorGradingPreset ColorGradingPresets[] = {
 const float BloomThreshold = 0.45f;
 const float BloomKnee = 0.2f;
 
+const size_t MaxPixelLights = 128;
+
+struct LightConstants {
+	s32 count[4];
+	// Per light: position + fall start, color * intensity + fall end
+	float lights[MaxPixelLights * 2][4];
+};
+
 static_assert(sizeof(VSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(PSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(ClearConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(AmbientOcclusionConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(BloomConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(GradingConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
+static_assert(sizeof(LightConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 
 const size_t VertexRingSize = 4 * 1024 * 1024;
 const size_t IndexRingSize = 1024 * 1024;
@@ -242,6 +251,10 @@ D3D11Renderer::D3D11Renderer()
 	, m_vsConstantsValid(false)
 	, m_psConstantsData()
 	, m_psConstantsValid(false)
+	, m_pixelLighting(false)
+	, m_pixelLightCount(0)
+	, m_pixelLightsWarned(false)
+	, m_snapshotTime(0)
 { }
 
 D3D11Renderer::~D3D11Renderer() {
@@ -263,12 +276,29 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	
 	m_window = window;
 	
-	// Debug view for the scene: 1 = depth, 2 = motion vectors, 3 = per-object motion
+	// Debug view for the scene: 1 = depth, 2 = motion vectors, 3 = per-object motion, 4 = ambient occlusion,
+	// 5 = bloom, 6 = per-pixel dynamic light
 	{
 		char value[16];
 		DWORD length = GetEnvironmentVariableA("ARX_SCENE_DEBUG", value, sizeof(value));
 		if(length > 0 && length < sizeof(value)) {
 			m_sceneDebugView = std::atoi(value);
+		}
+	}
+	
+	// Debug snapshot of the frame after a number of seconds, for testing without capturing the screen
+	{
+		WCHAR path[MAX_PATH];
+		DWORD length = GetEnvironmentVariableW(L"ARX_D3D11_SNAPSHOT", path, MAX_PATH);
+		if(length > 0 && length < MAX_PATH) {
+			m_snapshotPath = platform::WideString::toUTF8(path, length);
+			char value[16];
+			length = GetEnvironmentVariableA("ARX_D3D11_SNAPSHOT_TIME", value, sizeof(value));
+			float seconds = (length > 0 && length < sizeof(value)) ? float(std::atof(value)) : 20.f;
+			LARGE_INTEGER now, frequency;
+			QueryPerformanceCounter(&now);
+			QueryPerformanceFrequency(&frequency);
+			m_snapshotTime = now.QuadPart + LONGLONG(double(seconds) * double(frequency.QuadPart));
 		}
 	}
 	
@@ -432,6 +462,13 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_clearConstants))) {
 			return false;
 		}
+		bufferDesc.ByteWidth = sizeof(LightConstants);
+		LightConstants noLights = {};
+		D3D11_SUBRESOURCE_DATA initialData = { &noLights, 0, 0 };
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, &initialData, &m_lightConstants))) {
+			return false;
+		}
+		m_pixelLightCount = 0;
 		bufferDesc.ByteWidth = sizeof(MotionConstants);
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_motionConstants))) {
 			return false;
@@ -509,6 +546,8 @@ bool D3D11Renderer::compileShaders() {
 		{ "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, UINT(offsetof(SMY_VERTEX, color)),
 		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
 		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, UINT(offsetof(SMY_VERTEX, uv)),
+		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, UINT(offsetof(SMY_VERTEX, normal)),
 		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
 	};
 	
@@ -1535,6 +1574,58 @@ void D3D11Renderer::setUpscaler(std::string_view name, std::string_view preset) 
 	
 }
 
+void D3D11Renderer::setPixelLighting(bool enabled) {
+	
+	m_pixelLighting = enabled;
+	
+	if(!enabled) {
+		setPixelLights(nullptr, 0);
+	}
+	
+}
+
+void D3D11Renderer::setPixelLights(const PixelLight * lights, size_t count) {
+	
+	// Debug view 6 shows only the dynamic light
+	bool debugView = (m_sceneDebugView == 6);
+	
+	if(!m_lightConstants || !m_context || (count == 0 && m_pixelLightCount == 0 && !debugView)) {
+		return;
+	}
+	
+	if(count > MaxPixelLights) {
+		if(!m_pixelLightsWarned) {
+			LogWarning << "Too many lights for per-pixel lighting: " << count << " > " << MaxPixelLights;
+			m_pixelLightsWarned = true;
+		}
+		count = MaxPixelLights;
+	}
+	
+	LightConstants constants = {};
+	constants.count[0] = s32(count);
+	constants.count[1] = debugView ? 1 : 0;
+	for(size_t i = 0; i < count; i++) {
+		const PixelLight & light = lights[i];
+		float * a = constants.lights[i * 2];
+		float * b = constants.lights[i * 2 + 1];
+		a[0] = light.position.x;
+		a[1] = light.position.y;
+		a[2] = light.position.z;
+		a[3] = light.fallStart;
+		b[0] = light.color.r * light.intensity;
+		b[1] = light.color.g * light.intensity;
+		b[2] = light.color.b * light.intensity;
+		b[3] = light.fallEnd;
+	}
+	
+	m_context->UpdateSubresource(m_lightConstants.Get(), 0, nullptr, &constants, 0, 0);
+	if(count > 0 && m_pixelLightCount == 0) {
+		LogDebug("Per-pixel lighting with " << count << " dynamic lights");
+	}
+	m_pixelLightCount = count;
+	
+}
+
 void D3D11Renderer::updateUpscaler() {
 	
 	if(m_upscalerCreated) {
@@ -2154,6 +2245,20 @@ void D3D11Renderer::present() {
 		m_swapChain->ResizeBuffers(0, UINT(m_size.x), UINT(m_size.y), DXGI_FORMAT_UNKNOWN, swapChainDesc.Flags);
 	}
 	
+	if(!m_snapshotPath.empty()) {
+		LARGE_INTEGER now;
+		QueryPerformanceCounter(&now);
+		if(now.QuadPart >= m_snapshotTime) {
+			Image image;
+			if(getSnapshot(image) && image.save(fs::path(m_snapshotPath))) {
+				LogInfo << "Saved debug snapshot to " << m_snapshotPath;
+			} else {
+				LogError << "Failed to save debug snapshot to " << m_snapshotPath;
+			}
+			m_snapshotPath.clear();
+		}
+	}
+	
 	ComPtr<ID3D11Texture2D> backBuffer;
 	if(SUCCEEDED(m_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) {
 		D3D11_TEXTURE2D_DESC desc;
@@ -2311,6 +2416,8 @@ void D3D11Renderer::flushState(VertexType type) {
 		m_context->VSSetConstantBuffers(0, 1, &vsConstants);
 		ID3D11Buffer * psConstants = m_psConstants.Get();
 		m_context->PSSetConstantBuffers(0, 1, &psConstants);
+		ID3D11Buffer * lightConstants = m_lightConstants.Get();
+		m_context->PSSetConstantBuffers(6, 1, &lightConstants);
 		
 		m_currentVertexBuffer = nullptr;
 		m_currentTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;

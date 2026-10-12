@@ -916,6 +916,7 @@ public:
 		, m_ambientOcclusionCycleText(nullptr)
 		, m_bloomCycleText(nullptr)
 		, m_colorGradingCycleText(nullptr)
+		, m_pixelLightingCheckbox(nullptr)
 		, m_dlssAvailable(false)
 		, m_fsrAvailable(false)
 		, m_anyUpscalerAvailable(false)
@@ -929,6 +930,7 @@ public:
 	CycleTextWidget * m_ambientOcclusionCycleText;
 	CycleTextWidget * m_bloomCycleText;
 	CycleTextWidget * m_colorGradingCycleText;
+	CheckboxWidget * m_pixelLightingCheckbox;
 	bool m_dlssAvailable;
 	bool m_fsrAvailable;
 	bool m_anyUpscalerAvailable;
@@ -1186,6 +1188,18 @@ public:
 			addCenter(std::move(cb));
 		}
 		
+		{
+			std::string_view label = getLocalised("system_menus_options_video_pixel_lighting");
+			auto cb = std::make_unique<CheckboxWidget>(checkboxSize(), hFontMenu, label);
+			cb->setChecked(config.video.pixelLighting);
+			cb->stateChanged = [](bool checked) {
+				config.video.pixelLighting = checked;
+				GRenderer->setPixelLighting(checked);
+			};
+			m_pixelLightingCheckbox = cb.get();
+			addCenter(std::move(cb));
+		}
+		
 		setUpscalerState();
 		
 		{
@@ -1303,6 +1317,9 @@ private:
 		}
 		if(m_ambientOcclusionCycleText) {
 			m_ambientOcclusionCycleText->setEnabled(direct3D);
+		}
+		if(m_pixelLightingCheckbox) {
+			m_pixelLightingCheckbox->setEnabled(direct3D);
 		}
 		
 	}

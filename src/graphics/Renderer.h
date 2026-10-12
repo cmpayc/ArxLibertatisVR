@@ -446,6 +446,30 @@ public:
 	//! Select the color grading preset for the 3D scene: "off", "natural", "warm" or "cinematic"
 	virtual void setColorGrading(std::string_view preset) { ARX_UNUSED(preset); }
 	
+	//! A dynamic light for per-pixel lighting, see ApplyTileLights()
+	struct PixelLight {
+		Vec3f position = Vec3f(0.f);
+		float fallStart = 0.f;
+		Color3f color = Color3f::black; //!< In [0, 1]
+		float fallEnd = 0.f;
+		float intensity = 0.f;          //!< Factor for the light color at full strength
+	};
+	
+	//! \return true if this renderer can light world geometry per pixel
+	[[nodiscard]] virtual bool supportsPixelLighting() const { return false; }
+	
+	//! Enable or disable per-pixel lighting of world geometry, if supported
+	virtual void setPixelLighting(bool enabled) { ARX_UNUSED(enabled); }
+	
+	/*!
+	 * \return true if world geometry is lit per pixel with the lights from \ref setPixelLights().
+	 *         The vertex colors of world geometry then only contain the static lighting.
+	 */
+	[[nodiscard]] virtual bool usesPixelLighting() const { return false; }
+	
+	//! Set the dynamic lights for per-pixel lighting of world vertices with a non-zero normal
+	virtual void setPixelLights(const PixelLight * lights, size_t count) { ARX_UNUSED(lights), ARX_UNUSED(count); }
+	
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }
 	

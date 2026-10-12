@@ -48,6 +48,12 @@ cbuffer ClearConstants : register(b1) {
 	float4 clearDepth;
 };
 
+// Dynamic lights for per-pixel lighting of world geometry, see ApplyTileLights()
+cbuffer LightConstants : register(b6) {
+	int4 lightCount;
+	float4 lights[256]; // Per light: position + fall start, color * intensity + fall end
+};
+
 Texture2D texture0 : register(t0);
 Texture2D texture1 : register(t1);
 Texture2D texture2 : register(t2);
@@ -70,6 +76,8 @@ struct VSOutput {
 	float fog : TEXCOORD3;
 	float4 clip : TEXCOORD4;     // Clip position without jitter
 	float4 prevClip : TEXCOORD5; // Clip position in the previous frame, w <= 0 if unknown
+	float3 world : TEXCOORD6;    // World position for per-pixel lighting
+	float3 normal : TEXCOORD7;   // World normal for per-pixel lighting, zero if not lit
 };
 
 struct PSInput {
@@ -81,6 +89,8 @@ struct PSInput {
 	float fog : TEXCOORD3;
 	float4 clip : TEXCOORD4;
 	float4 prevClip : TEXCOORD5;
+	INTERPOLATION float3 world : TEXCOORD6;
+	INTERPOLATION float3 normal : TEXCOORD7;
 };
 
 struct PSOutput {
@@ -99,6 +109,8 @@ VSOutput makeOutput(float4 clip, float4 prevClip, float4 color, float2 uv0, floa
 	o.fog = clip.w;
 	o.clip = clip;
 	o.prevClip = prevClip;
+	o.world = float3(0, 0, 0);
+	o.normal = float3(0, 0, 0);
 	return o;
 }
 
@@ -108,9 +120,34 @@ VSOutput vsTL(float4 position : POSITION, float4 color : COLOR, float2 uv : TEXC
 	return makeOutput(mul(transform, position), prevClip, color, uv, float2(0, 0), float2(0, 0));
 }
 
-VSOutput vsWorld(float3 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0) {
-	return makeOutput(mul(transform, float4(position, 1)), float4(0, 0, 0, 0), color, uv, float2(0, 0),
-	                  float2(0, 0));
+VSOutput vsWorld(float3 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0,
+                 float3 normal : NORMAL) {
+	VSOutput o = makeOutput(mul(transform, float4(position, 1)), float4(0, 0, 0, 0), color, uv, float2(0, 0),
+	                        float2(0, 0));
+	o.world = position;
+	o.normal = normal;
+	return o;
+}
+
+// Same falloff as ApplyTileLights(), evaluated per pixel
+float3 pixelLighting(float3 position, float3 normal) {
+	float3 sum = float3(0, 0, 0);
+	[loop] for(int i = 0; i < lightCount.x; i++) {
+		float4 a = lights[i * 2];
+		float4 b = lights[i * 2 + 1];
+		float3 toLight = a.xyz - position;
+		float distance = length(toLight);
+		if(distance >= b.w) {
+			continue;
+		}
+		float cosAngle = dot(normal, toLight / max(distance, 0.0001));
+		if(cosAngle <= 0) {
+			continue;
+		}
+		float falloff = (distance <= a.w) ? 1 : saturate((b.w - distance) / max(b.w - a.w, 0.0001));
+		sum += b.rgb * (cosAngle * falloff);
+	}
+	return sum;
 }
 
 VSOutput vsWorld3(float3 position : POSITION, float4 color : COLOR, float2 uv0 : TEXCOORD0,
@@ -157,6 +194,14 @@ PSOutput psMain(PSInput input
 	
 	float4 color = input.color;
 	
+	// The vertex color holds the static lighting, add the dynamic lights
+	float normalLength = dot(input.normal, input.normal);
+	float3 dynamicLight = float3(0, 0, 0);
+	[branch] if(lightCount.x > 0 && normalLength > 0.01) {
+		dynamicLight = pixelLighting(input.world, input.normal * rsqrt(normalLength));
+		color.rgb = saturate(color.rgb + dynamicLight);
+	}
+	
 	// Gradients must be computed outside of flow control
 	float2 dx0 = ddx(input.uv0), dy0 = ddy(input.uv0);
 	float2 dx1 = ddx(input.uv1), dy1 = ddy(input.uv1);
@@ -179,6 +224,11 @@ PSOutput psMain(PSInput input
 	
 	if(color.a <= fogParams.w) {
 		discard;
+	}
+	
+	// Debug view: only the dynamic light of world geometry lit per pixel
+	if(lightCount.y != 0 && normalLength > 0.01) {
+		color.rgb = saturate(dynamicLight);
 	}
 	
 	PSOutput o;
@@ -286,6 +336,9 @@ float4 psDebugObjectMotion(BlitOutput input) : SV_Target {
 	float4 motion = texture0.Sample(sampler0, input.uv);
 	return float4(saturate(length(motion.xy) * 300), motion.w * 0.5, 0, 1);
 }
+
+)HLSL" // MSVC limits the length of a single string literal
+R"HLSL(
 
 /*
  * Screen-space ambient occlusion, based on Scalable Ambient Obscurance (McGuire et al. 2012).

@@ -1214,6 +1214,8 @@ static void ARX_PORTALS_Frustrum_RenderRoomTCullSoft(RoomHandle roomIndex, const
 	
 	SMY_VERTEX * pMyVertex = room.pVertexBuffer->lock(NoOverwrite);
 	
+	const bool pixelLighting = GRenderer->usesPixelLighting();
+	
 	for(const EP_DATA & epd : room.epdata) {
 		
 		auto tile = g_tiles->get(epd.tile);
@@ -1295,6 +1297,14 @@ static void ARX_PORTALS_Frustrum_RenderRoomTCullSoft(RoomHandle roomIndex, const
 				vertices[ep->uslInd[2]].color = Color::white.toRGBA();
 				if(to == 4) {
 					vertices[ep->uslInd[3]].color = Color::white.toRGBA();
+				}
+			} else if(!(ep->type & POLY_TRANS) && pixelLighting) {
+				// Dynamic lights are applied by the renderer
+				vertices[ep->uslInd[0]].color = ep->v[0].color;
+				vertices[ep->uslInd[1]].color = ep->v[1].color;
+				vertices[ep->uslInd[2]].color = ep->v[2].color;
+				if(to & 4) {
+					vertices[ep->uslInd[3]].color = ep->v[3].color;
 				}
 			} else  if(!(ep->type & POLY_TRANS)) {
 				ApplyTileLights(ep, epd.tile);
@@ -1560,6 +1570,7 @@ void ARX_SCENE_Update() {
 
 	TreatBackgroundDynlights();
 	PrecalcDynamicLighting(camPos, camDepth);
+	UploadPixelLights();
 	
 	g_tiles->resetActiveTiles();
 	

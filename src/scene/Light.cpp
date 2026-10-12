@@ -58,6 +58,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "graphics/Math.h"
 #include "graphics/Draw.h"
 #include "graphics/DrawLine.h"
+#include "graphics/Renderer.h"
 
 #include "platform/profiler/Profiler.h"
 
@@ -255,6 +256,35 @@ void PrecalcDynamicLighting(const Vec3f & camPos, float camDepth) {
 			}
 		}
 	}
+	
+}
+
+void UploadPixelLights() {
+	
+	if(!GRenderer->usesPixelLighting()) {
+		return;
+	}
+	
+	// Improve vision recolors the world on the CPU
+	if(player.m_improve) {
+		GRenderer->setPixelLights(nullptr, 0);
+		return;
+	}
+	
+	// Same parameters as ApplyTileLights()
+	std::array<Renderer::PixelLight, g_dynamicLightsMax> lights;
+	size_t count = 0;
+	for(size_t i = 0; i < g_culledDynamicLightsCount; i++) {
+		const EERIE_LIGHT & light = *g_culledDynamicLights[i];
+		Renderer::PixelLight & pixelLight = lights[count++];
+		pixelLight.position = light.pos;
+		pixelLight.fallStart = light.fallstart;
+		pixelLight.fallEnd = light.fallend;
+		pixelLight.color = light.rgb255 * (1.f / 255.f);
+		pixelLight.intensity = light.intensity * GLOBAL_LIGHT_FACTOR * 0.5f;
+	}
+	
+	GRenderer->setPixelLights(lights.data(), count);
 	
 }
 
