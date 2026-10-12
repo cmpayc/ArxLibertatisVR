@@ -463,6 +463,43 @@ float4 psBloomComposite(BlitOutput input) : SV_Target {
 	return float4(psBloomUpsample(input).rgb * bloomParams.z, 1);
 }
 
+/*
+ * Color grading, applied while copying the scene to the window.
+ */
+
+cbuffer GradingConstants : register(b5) {
+	float4 gradeParams;    // x = contrast, y = saturation, z = vignette strength, w = window aspect ratio
+	float4 gradeTint;      // rgb = color multiplier
+	float4 gradeShadows;   // rgb = color offset in dark areas
+	float4 gradeHighlights; // rgb = color offset in bright areas
+	float4 gradeTone;      // x = exposure, y = gamma (< 1 brightens dark areas), z = contrast pivot
+};
+
+float4 psColorGrading(BlitOutput input) : SV_Target {
+
+	float3 color = texture0.Sample(sampler0, input.uv).rgb * gradeTint.rgb * gradeTone.x;
+
+	// Arx scenes are dark, lift the shadows and mid tones without changing white
+	color = pow(max(color, 0), gradeTone.y);
+
+	// Contrast around a dark pivot so that most of the image does not get darker
+	color = (color - gradeTone.z) * gradeParams.x + gradeTone.z;
+	
+	float luma = dot(saturate(color), float3(0.2126, 0.7152, 0.0722));
+	color = lerp(luma.xxx, color, gradeParams.y);
+	
+	// Split toning: separate tints for shadows and highlights
+	color += gradeShadows.rgb * (1 - smoothstep(0, 0.5, luma));
+	color += gradeHighlights.rgb * smoothstep(0.4, 1, luma);
+	
+	// Darken towards the corners
+	float2 offset = (input.uv - 0.5) * float2(gradeParams.w, 1);
+	float vignette = smoothstep(0.35, 1.1, length(offset) * 1.4);
+	color *= 1 - gradeParams.z * vignette;
+	
+	return float4(saturate(color), 1);
+}
+
 )HLSL";
 
 #endif // ARX_GRAPHICS_D3D11_D3D11SHADERS_H

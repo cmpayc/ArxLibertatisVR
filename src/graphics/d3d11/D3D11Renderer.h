@@ -129,6 +129,8 @@ public:
 	void setAmbientOcclusion(float strength) override;
 	bool supportsBloom() const override { return true; }
 	void setBloom(float strength) override;
+	bool supportsColorGrading() const override { return true; }
+	void setColorGrading(std::string_view preset) override;
 	
 	D3D11TextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
@@ -280,6 +282,8 @@ private:
 	ComPtr<ID3D11Texture2D> m_bloomTargets[BloomLevels];
 	ComPtr<ID3D11RenderTargetView> m_bloomViews[BloomLevels];
 	ComPtr<ID3D11ShaderResourceView> m_bloomResources[BloomLevels];
+	
+	size_t m_colorGrading; //!< Index of the color grading preset, 0 = off
 	ComPtr<ID3D11ShaderResourceView> m_sceneDepthResource;
 	UINT m_sceneSamples;
 	float m_sceneLodBias;
@@ -351,6 +355,8 @@ private:
 	ComPtr<ID3D11PixelShader> m_bloomDownsamplePixelShader;
 	ComPtr<ID3D11PixelShader> m_bloomUpsamplePixelShader;
 	ComPtr<ID3D11PixelShader> m_bloomCompositePixelShader;
+	ComPtr<ID3D11Buffer> m_gradingConstants;
+	ComPtr<ID3D11PixelShader> m_gradingPixelShader;
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;
 	ComPtr<ID3D11Buffer> m_clearConstants;

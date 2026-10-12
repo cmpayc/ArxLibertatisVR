@@ -440,6 +440,12 @@ public:
 	//! Set the strength of the bloom for the 3D scene in [0, 1], 0 disables it
 	virtual void setBloom(float strength) { ARX_UNUSED(strength); }
 	
+	//! \return true if this renderer supports color grading for the 3D scene
+	[[nodiscard]] virtual bool supportsColorGrading() const { return false; }
+	
+	//! Select the color grading preset for the 3D scene: "off", "natural", "warm" or "cinematic"
+	virtual void setColorGrading(std::string_view preset) { ARX_UNUSED(preset); }
+	
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }
 	

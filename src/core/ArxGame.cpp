@@ -2047,6 +2047,7 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	renderer.setUpscalerSharpness(config.video.fsrSharpness);
 	renderer.setAmbientOcclusion(config.video.ambientOcclusion);
 	renderer.setBloom(config.video.bloom);
+	renderer.setColorGrading(config.video.colorGrading);
 	
 	ComputePortalVertexBuffer();
 	std::unique_ptr<VertexBuffer<SMY_VERTEX3>> vb3 = renderer.createVertexBuffer3(4000, Renderer::Stream);

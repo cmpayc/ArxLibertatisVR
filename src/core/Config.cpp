@@ -71,6 +71,7 @@ constexpr const std::string_view
 	bufferUpload,
 	extensionOverride,
 	upscaler = "off",
+	colorGrading = "off",
 	dlssPreset = "K",
 	upscalerPath,
 	thumbnailSize = BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_WIDTH) "x"
@@ -232,6 +233,7 @@ constexpr const std::string_view
 	ambientOcclusion = "ambient_occlusion",
 	bloom = "bloom",
 	upscaler = "upscaler",
+	colorGrading = "color_grading",
 	dlssPreset = "dlss_preset",
 	upscalerPath = "upscaler_path",
 	colorkeyAntialiasing = "colorkey_antialiasing",
@@ -500,6 +502,7 @@ bool Config::save() {
 	writer.writeKey(Key::fsrSharpness, video.fsrSharpness);
 	writer.writeKey(Key::ambientOcclusion, video.ambientOcclusion);
 	writer.writeKey(Key::bloom, video.bloom);
+	writer.writeKey(Key::colorGrading, video.colorGrading);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
 	writer.writeKey(Key::alphaCutoutAntialiasing, video.alphaCutoutAntialiasing);
 	writer.writeKey(Key::bufferSize, video.bufferSize);
@@ -644,6 +647,7 @@ bool Config::init(const fs::path & file) {
 	video.ambientOcclusion = glm::clamp(ambientOcclusion, 0.f, 1.f);
 	float bloom = reader.getKey(Section::Video, Key::bloom, Default::bloom);
 	video.bloom = glm::clamp(bloom, 0.f, 1.f);
+	video.colorGrading = reader.getKey(Section::Video, Key::colorGrading, Default::colorGrading);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);
 	int alphaCutoutAA = reader.getKey(Section::Video, Key::alphaCutoutAntialiasing, Default::alphaCutoutAntialiasing);
 	video.alphaCutoutAntialiasing = glm::clamp(alphaCutoutAA, 0, 2);

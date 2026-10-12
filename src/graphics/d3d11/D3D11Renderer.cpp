@@ -86,6 +86,39 @@ struct BloomConstants {
 	float source[4];
 };
 
+struct GradingConstants {
+	float params[4];
+	float tint[4];
+	float shadows[4];
+	float highlights[4];
+	float tone[4];
+};
+
+struct ColorGradingPreset {
+	const char * name;
+	float exposure;
+	float gamma; //!< Below 1 brightens dark areas
+	float contrast;
+	float saturation;
+	float vignette;
+	float tint[3];
+	float shadows[3];
+	float highlights[3];
+};
+
+// Contrast pivot, low because Arx scenes are dark
+const float ColorGradingPivot = 0.2f;
+
+// The first preset leaves the colors unchanged, the others are slightly brighter than the original
+const ColorGradingPreset ColorGradingPresets[] = {
+	{ "off", 1.f, 1.f, 1.f, 1.f, 0.f, { 1.f, 1.f, 1.f }, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f } },
+	{ "natural", 1.f, 0.95f, 1.06f, 1.15f, 0.f, { 1.f, 1.f, 1.f }, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f } },
+	{ "warm", 1.f, 0.95f, 1.05f, 1.1f, 0.1f, { 1.06f, 1.f, 0.9f }, { 0.01f, 0.f, -0.01f },
+	  { 0.02f, 0.01f, -0.01f } },
+	{ "cinematic", 1.f, 0.95f, 1.1f, 0.95f, 0.2f, { 1.f, 1.f, 1.f }, { -0.012f, 0.004f, 0.02f },
+	  { 0.03f, 0.01f, -0.02f } },
+};
+
 // Bloom settings: brightness where the bloom starts, width of the soft transition
 const float BloomThreshold = 0.45f;
 const float BloomKnee = 0.2f;
@@ -95,6 +128,7 @@ static_assert(sizeof(PSConstants) % 16 == 0, "constant buffer size must be a mul
 static_assert(sizeof(ClearConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(AmbientOcclusionConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(BloomConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
+static_assert(sizeof(GradingConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 
 const size_t VertexRingSize = 4 * 1024 * 1024;
 const size_t IndexRingSize = 1024 * 1024;
@@ -165,6 +199,7 @@ D3D11Renderer::D3D11Renderer()
 	, m_bloom(false)
 	, m_bloomStrength(0.f)
 	, m_bloomSizes()
+	, m_colorGrading(0)
 	, m_sceneSamples(1)
 	, m_sceneLodBias(0.f)
 	, m_sceneProjection(1.f)
@@ -409,6 +444,10 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_bloomConstants))) {
 			return false;
 		}
+		bufferDesc.ByteWidth = sizeof(GradingConstants);
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_gradingConstants))) {
+			return false;
+		}
 	}
 	
 	{
@@ -588,6 +627,7 @@ bool D3D11Renderer::compileShaders() {
 			{ "psBloomDownsample", nullptr, std::addressof(m_bloomDownsamplePixelShader) },
 			{ "psBloomUpsample", nullptr, std::addressof(m_bloomUpsamplePixelShader) },
 			{ "psBloomComposite", nullptr, std::addressof(m_bloomCompositePixelShader) },
+			{ "psColorGrading", nullptr, std::addressof(m_gradingPixelShader) },
 		};
 		for(const PixelShaderInfo & info : shaders) {
 			if(m_featureLevel < D3D_FEATURE_LEVEL_10_1) {
@@ -932,7 +972,26 @@ void D3D11Renderer::releaseSceneTargets() {
 }
 
 bool D3D11Renderer::sceneEnabled() const {
-	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion || m_bloom;
+	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion || m_bloom
+	       || m_colorGrading != 0;
+}
+
+void D3D11Renderer::setColorGrading(std::string_view preset) {
+	
+	size_t index = 0;
+	for(size_t i = 0; i < std::size(ColorGradingPresets); i++) {
+		if(preset == ColorGradingPresets[i].name) {
+			index = i;
+		}
+	}
+	
+	if(index != 0 && m_colorGrading == 0 && !m_inScene) {
+		// The scene is rendered to separate targets from now on
+		releaseSceneTargets();
+	}
+	
+	m_colorGrading = index;
+	
 }
 
 bool D3D11Renderer::upscalerInputsNeeded() const {
@@ -1362,6 +1421,25 @@ void D3D11Renderer::endScene() {
 	} else if(m_sceneDebugView == 4 && m_debugAOPixelShader && m_aoResource) {
 		view = m_aoResource.Get();
 		shader = m_debugAOPixelShader.Get();
+	} else if(m_colorGrading != 0 && m_gradingPixelShader) {
+		const ColorGradingPreset & preset = ColorGradingPresets[m_colorGrading];
+		GradingConstants constants = { };
+		constants.params[0] = preset.contrast;
+		constants.params[1] = preset.saturation;
+		constants.params[2] = preset.vignette;
+		constants.params[3] = float(m_size.x) / float(std::max<s32>(m_size.y, 1));
+		constants.tone[0] = preset.exposure;
+		constants.tone[1] = preset.gamma;
+		constants.tone[2] = ColorGradingPivot;
+		for(size_t i = 0; i < 3; i++) {
+			constants.tint[i] = preset.tint[i];
+			constants.shadows[i] = preset.shadows[i];
+			constants.highlights[i] = preset.highlights[i];
+		}
+		m_context->UpdateSubresource(m_gradingConstants.Get(), 0, nullptr, &constants, 0, 0);
+		ID3D11Buffer * buffer = m_gradingConstants.Get();
+		m_context->PSSetConstantBuffers(5, 1, &buffer);
+		shader = m_gradingPixelShader.Get();
 	}
 	
 	m_context->PSSetShaderResources(0, 1, &view);

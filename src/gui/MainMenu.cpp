@@ -915,6 +915,7 @@ public:
 		, m_fsrSharpnessCycleText(nullptr)
 		, m_ambientOcclusionCycleText(nullptr)
 		, m_bloomCycleText(nullptr)
+		, m_colorGradingCycleText(nullptr)
 		, m_dlssAvailable(false)
 		, m_fsrAvailable(false)
 		, m_anyUpscalerAvailable(false)
@@ -927,6 +928,7 @@ public:
 	CycleTextWidget * m_fsrSharpnessCycleText;
 	CycleTextWidget * m_ambientOcclusionCycleText;
 	CycleTextWidget * m_bloomCycleText;
+	CycleTextWidget * m_colorGradingCycleText;
 	bool m_dlssAvailable;
 	bool m_fsrAvailable;
 	bool m_anyUpscalerAvailable;
@@ -1161,6 +1163,29 @@ public:
 		m_bloomCycleText = addEffectStrength(getLocalised("system_menus_options_video_bloom"), &config.video.bloom,
 		                                     &Renderer::setBloom);
 		
+		{
+			static const char * const presets[] = { "off", "natural", "warm", "cinematic" };
+			std::string_view label = getLocalised("system_menus_options_video_color_grading");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				config.video.colorGrading = presets[pos];
+				GRenderer->setColorGrading(config.video.colorGrading);
+			};
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+			cb->addEntry(getLocalised("system_menus_options_video_color_grading_natural"));
+			cb->addEntry(getLocalised("system_menus_options_video_color_grading_warm"));
+			cb->addEntry(getLocalised("system_menus_options_video_color_grading_cinematic"));
+			int selected = 0;
+			for(int i = 0; i < int(std::size(presets)); i++) {
+				if(config.video.colorGrading == presets[i]) {
+					selected = i;
+				}
+			}
+			cb->setValue(selected);
+			m_colorGradingCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
 		setUpscalerState();
 		
 		{
@@ -1272,6 +1297,9 @@ private:
 		}
 		if(m_bloomCycleText) {
 			m_bloomCycleText->setEnabled(direct3D);
+		}
+		if(m_colorGradingCycleText) {
+			m_colorGradingCycleText->setEnabled(direct3D);
 		}
 		if(m_ambientOcclusionCycleText) {
 			m_ambientOcclusionCycleText->setEnabled(direct3D);
