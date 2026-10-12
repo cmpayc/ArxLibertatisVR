@@ -428,6 +428,12 @@ public:
 	//! Set the strength of the upscaler's sharpening pass in [0, 1], 0 disables it (only used by FSR)
 	virtual void setUpscalerSharpness(float sharpness) { ARX_UNUSED(sharpness); }
 	
+	//! \return true if this renderer supports screen-space ambient occlusion for the 3D scene
+	[[nodiscard]] virtual bool supportsAmbientOcclusion() const { return false; }
+	
+	//! Set the strength of screen-space ambient occlusion for the 3D scene in [0, 1], 0 disables it
+	virtual void setAmbientOcclusion(float strength) { ARX_UNUSED(strength); }
+	
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }
 	

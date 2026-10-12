@@ -913,6 +913,7 @@ public:
 		, m_upscalerCycleText(nullptr)
 		, m_dlssPresetCycleText(nullptr)
 		, m_fsrSharpnessCycleText(nullptr)
+		, m_ambientOcclusionCycleText(nullptr)
 		, m_dlssAvailable(false)
 		, m_fsrAvailable(false)
 		, m_anyUpscalerAvailable(false)
@@ -923,6 +924,7 @@ public:
 	CycleTextWidget * m_upscalerCycleText;
 	CycleTextWidget * m_dlssPresetCycleText;
 	CycleTextWidget * m_fsrSharpnessCycleText;
+	CycleTextWidget * m_ambientOcclusionCycleText;
 	bool m_dlssAvailable;
 	bool m_fsrAvailable;
 	bool m_anyUpscalerAvailable;
@@ -1151,6 +1153,32 @@ public:
 			addCenter(std::move(cb));
 		}
 		
+		{
+			// Off, low, medium, high
+			static const float strengths[] = { 0.f, 0.3f, 0.5f, 0.75f };
+			std::string_view label = getLocalised("system_menus_options_video_ambient_occlusion");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				config.video.ambientOcclusion = strengths[pos];
+				GRenderer->setAmbientOcclusion(config.video.ambientOcclusion);
+			};
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_low"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_med"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_high"));
+			// Select the closest strength
+			int selected = 0;
+			for(int i = 0; i < int(std::size(strengths)); i++) {
+				if(std::abs(strengths[i] - config.video.ambientOcclusion)
+				   < std::abs(strengths[selected] - config.video.ambientOcclusion)) {
+					selected = i;
+				}
+			}
+			cb->setValue(selected);
+			m_ambientOcclusionCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
 		setUpscalerState();
 		
 		{
@@ -1229,6 +1257,9 @@ private:
 		}
 		if(m_fsrSharpnessCycleText) {
 			m_fsrSharpnessCycleText->setEnabled(direct3D && m_fsrAvailable && config.video.upscaler == "fsr");
+		}
+		if(m_ambientOcclusionCycleText) {
+			m_ambientOcclusionCycleText->setEnabled(direct3D);
 		}
 		
 	}

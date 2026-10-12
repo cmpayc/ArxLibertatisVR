@@ -130,6 +130,7 @@ constexpr const float
 	fov = 75.f,
 	renderScale = 1.f,
 	fsrSharpness = 0.f,
+	ambientOcclusion = 0.5f,
 	hudScale = 0.5f,
 	bookScale = 1.f,
 	cursorScale = 0.5f,
@@ -227,6 +228,7 @@ constexpr const std::string_view
 	maxAnisotropicFiltering = "max_anisotropic_filtering",
 	renderScale = "render_scale",
 	fsrSharpness = "fsr_sharpness",
+	ambientOcclusion = "ambient_occlusion",
 	upscaler = "upscaler",
 	dlssPreset = "dlss_preset",
 	upscalerPath = "upscaler_path",
@@ -494,6 +496,7 @@ bool Config::save() {
 	writer.writeKey(Key::dlssPreset, video.dlssPreset);
 	writer.writeKey(Key::upscalerPath, video.upscalerPath);
 	writer.writeKey(Key::fsrSharpness, video.fsrSharpness);
+	writer.writeKey(Key::ambientOcclusion, video.ambientOcclusion);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
 	writer.writeKey(Key::alphaCutoutAntialiasing, video.alphaCutoutAntialiasing);
 	writer.writeKey(Key::bufferSize, video.bufferSize);
@@ -634,6 +637,8 @@ bool Config::init(const fs::path & file) {
 	video.upscalerPath = reader.getKey(Section::Video, Key::upscalerPath, Default::upscalerPath);
 	float fsrSharpness = reader.getKey(Section::Video, Key::fsrSharpness, Default::fsrSharpness);
 	video.fsrSharpness = glm::clamp(fsrSharpness, 0.f, 1.f);
+	float ambientOcclusion = reader.getKey(Section::Video, Key::ambientOcclusion, Default::ambientOcclusion);
+	video.ambientOcclusion = glm::clamp(ambientOcclusion, 0.f, 1.f);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);
 	int alphaCutoutAA = reader.getKey(Section::Video, Key::alphaCutoutAntialiasing, Default::alphaCutoutAntialiasing);
 	video.alphaCutoutAntialiasing = glm::clamp(alphaCutoutAA, 0, 2);

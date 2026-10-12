@@ -125,6 +125,8 @@ public:
 	std::string getUpscalerError(std::string_view name) const override;
 	void setUpscaler(std::string_view name, std::string_view preset) override;
 	void setUpscalerSharpness(float sharpness) override { m_upscalerSharpness = sharpness; }
+	bool supportsAmbientOcclusion() const override { return true; }
+	void setAmbientOcclusion(float strength) override;
 	
 	D3D11TextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
@@ -183,6 +185,12 @@ private:
 	
 	//! Generate motion vectors and normalized depth for the scene
 	void renderSceneMotion();
+	
+	/*!
+	 * Compute screen-space ambient occlusion from the scene depth
+	 * \param apply multiply the resolved scene with it, false for the debug view
+	 */
+	void renderAmbientOcclusion(bool apply);
 	
 	//! Create the requested upscaler if that was not tried yet
 	void updateUpscaler();
@@ -244,6 +252,17 @@ private:
 	ComPtr<ID3D11DepthStencilView> m_sceneDepthView;
 	ComPtr<ID3D11Texture2D> m_sceneResolved;
 	ComPtr<ID3D11ShaderResourceView> m_sceneResolvedView;
+	ComPtr<ID3D11RenderTargetView> m_sceneResolvedTargetView;
+	
+	// Screen-space ambient occlusion and the intermediate blur result
+	bool m_ambientOcclusion;
+	float m_ambientOcclusionStrength;
+	ComPtr<ID3D11Texture2D> m_aoTarget;
+	ComPtr<ID3D11RenderTargetView> m_aoView;
+	ComPtr<ID3D11ShaderResourceView> m_aoResource;
+	ComPtr<ID3D11Texture2D> m_aoBlurTarget;
+	ComPtr<ID3D11RenderTargetView> m_aoBlurView;
+	ComPtr<ID3D11ShaderResourceView> m_aoBlurResource;
 	ComPtr<ID3D11ShaderResourceView> m_sceneDepthResource;
 	UINT m_sceneSamples;
 	float m_sceneLodBias;
@@ -304,6 +323,12 @@ private:
 	ComPtr<ID3D11PixelShader> m_debugMotionPixelShader;
 	ComPtr<ID3D11PixelShader> m_debugObjectMotionPixelShader;
 	ComPtr<ID3D11Buffer> m_motionConstants;
+	ComPtr<ID3D11Buffer> m_aoConstants;
+	ComPtr<ID3D11PixelShader> m_aoPixelShader;
+	ComPtr<ID3D11PixelShader> m_aoBlurPixelShader;
+	ComPtr<ID3D11PixelShader> m_aoBlurVerticalPixelShader;
+	ComPtr<ID3D11PixelShader> m_aoApplyPixelShader;
+	ComPtr<ID3D11PixelShader> m_debugAOPixelShader;
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;
 	ComPtr<ID3D11Buffer> m_clearConstants;

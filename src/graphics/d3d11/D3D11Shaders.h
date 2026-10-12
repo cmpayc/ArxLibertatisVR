@@ -287,6 +287,118 @@ float4 psDebugObjectMotion(BlitOutput input) : SV_Target {
 	return float4(saturate(length(motion.xy) * 300), motion.w * 0.5, 0, 1);
 }
 
+/*
+ * Screen-space ambient occlusion, based on Scalable Ambient Obscurance (McGuire et al. 2012).
+ * Positions and normals are reconstructed from the scene depth written by psMotion.
+ */
+
+cbuffer AmbientOcclusionConstants : register(b3) {
+	float4 aoTarget;     // xy = size, zw = 1 / size
+	float4 aoProjection; // x = 1 / projection[0][0], y = 1 / projection[1][1], z = near, w = far
+	float4 aoParams;     // x = radius in world units, y = strength, z = bias, w = projected radius scale
+};
+
+Texture2D<float> aoDepth : register(t0);
+Texture2D<float> aoInput : register(t1);
+
+float aoViewDistance(float depth) {
+	return aoProjection.z * aoProjection.w / (aoProjection.w - depth * (aoProjection.w - aoProjection.z));
+}
+
+float3 aoViewPosition(int2 pixel) {
+	pixel = clamp(pixel, int2(0, 0), int2(aoTarget.xy) - 1);
+	float distance = aoViewDistance(aoDepth.Load(int3(pixel, 0)));
+	float2 ndc = (float2(pixel) + 0.5) * aoTarget.zw * float2(2, -2) + float2(-1, 1);
+	return float3(ndc * aoProjection.xy * distance, distance);
+}
+
+float psAmbientOcclusion(float4 position : SV_Position) : SV_Target {
+	
+	int2 pixel = int2(position.xy);
+	float depth = aoDepth.Load(int3(pixel, 0));
+	if(depth >= 0.99999) {
+		return 1; // Sky or nothing rendered
+	}
+	
+	float3 center = aoViewPosition(pixel);
+	
+	// Normal from the neighbors with the smaller depth difference to avoid artifacts at edges
+	float3 left = center - aoViewPosition(pixel - int2(1, 0));
+	float3 right = aoViewPosition(pixel + int2(1, 0)) - center;
+	float3 up = center - aoViewPosition(pixel - int2(0, 1));
+	float3 down = aoViewPosition(pixel + int2(0, 1)) - center;
+	float3 dx = (abs(left.z) < abs(right.z)) ? left : right;
+	float3 dy = (abs(up.z) < abs(down.z)) ? up : down;
+	float3 normal = normalize(cross(dy, dx));
+	if(dot(normal, center) > 0) {
+		normal = -normal;
+	}
+	
+	// Interleaved gradient noise rotates the sample spiral per pixel, the blur removes the pattern
+	float noise = frac(52.9829189 * frac(dot(position.xy, float2(0.06711056, 0.00583715))));
+	float angle = noise * 6.28318531;
+	
+	float radius = aoParams.x;
+	float screenRadius = aoParams.w * radius / center.z;
+	if(screenRadius < 1) {
+		return 1;
+	}
+	screenRadius = min(screenRadius, 256);
+	
+	const int samples = 16;
+	const float turns = 7;
+	float radius2 = radius * radius;
+	float sum = 0;
+	[unroll] for(int i = 0; i < samples; i++) {
+		float alpha = (float(i) + 0.5) / float(samples);
+		float a = alpha * turns * 6.28318531 + angle;
+		int2 offset = int2(float2(cos(a), sin(a)) * alpha * screenRadius);
+		float3 v = aoViewPosition(pixel + offset) - center;
+		float vv = dot(v, v);
+		float vn = dot(v, normal);
+		float f = max(radius2 - vv, 0);
+		sum += f * f * f * max((vn - aoParams.z * center.z * 0.01) / (vv + 0.01 * radius2), 0);
+	}
+	
+	// Scaled by the radius so that the result does not depend on the world units
+	float occlusion = sum * 5 * radius / (radius2 * radius2 * radius2 * float(samples));
+	return saturate(1 - occlusion);
+}
+
+// Depth-aware blur, horizontal or vertical
+float psAmbientOcclusionBlur(float4 position : SV_Position) : SV_Target {
+	
+	int2 pixel = int2(position.xy);
+	#ifdef BLUR_VERTICAL
+	int2 axis = int2(0, 1);
+	#else
+	int2 axis = int2(1, 0);
+	#endif
+	
+	float centerDistance = aoViewDistance(aoDepth.Load(int3(pixel, 0)));
+	float sum = 0;
+	float weights = 0;
+	[unroll] for(int i = -4; i <= 4; i++) {
+		int2 p = clamp(pixel + axis * i, int2(0, 0), int2(aoTarget.xy) - 1);
+		float distance = aoViewDistance(aoDepth.Load(int3(p, 0)));
+		float weight = exp(-float(i * i) / 12) * exp(-abs(distance - centerDistance) / (centerDistance * 0.02 + 1));
+		sum += aoInput.Load(int3(p, 0)) * weight;
+		weights += weight;
+	}
+	
+	return sum / weights;
+}
+
+// Multiplied into the scene color by the blend state
+float4 psApplyAmbientOcclusion(float4 position : SV_Position) : SV_Target {
+	float ao = lerp(1, aoInput.Load(int3(int2(position.xy), 0)), aoParams.y);
+	return float4(ao.xxx, 1);
+}
+
+float4 psDebugAmbientOcclusion(BlitOutput input) : SV_Target {
+	return float4(texture0.Sample(sampler0, input.uv).rrr, 1);
+}
+
 )HLSL";
 
 #endif // ARX_GRAPHICS_D3D11_D3D11SHADERS_H

@@ -71,9 +71,20 @@ struct ClearConstants {
 	float depth[4];
 };
 
+struct AmbientOcclusionConstants {
+	float target[4];
+	float projection[4];
+	float params[4];
+};
+
+// Ambient occlusion settings: sample radius in world units (about centimeters), depth bias
+const float AmbientOcclusionRadius = 60.f;
+const float AmbientOcclusionBias = 1.f;
+
 static_assert(sizeof(VSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(PSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(ClearConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
+static_assert(sizeof(AmbientOcclusionConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 
 const size_t VertexRingSize = 4 * 1024 * 1024;
 const size_t IndexRingSize = 1024 * 1024;
@@ -139,6 +150,8 @@ D3D11Renderer::D3D11Renderer()
 	, m_sceneScale(1.f)
 	, m_inScene(false)
 	, m_sceneSize(0)
+	, m_ambientOcclusion(false)
+	, m_ambientOcclusionStrength(0.f)
 	, m_sceneSamples(1)
 	, m_sceneLodBias(0.f)
 	, m_sceneProjection(1.f)
@@ -375,6 +388,10 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_motionConstants))) {
 			return false;
 		}
+		bufferDesc.ByteWidth = sizeof(AmbientOcclusionConstants);
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_aoConstants))) {
+			return false;
+		}
 	}
 	
 	{
@@ -538,12 +555,18 @@ bool D3D11Renderer::compileShaders() {
 			ComPtr<ID3D11PixelShader> * shader;
 		};
 		const D3D_SHADER_MACRO msaaDefines[] = { { "MSAA_DEPTH", "1" }, { nullptr, nullptr } };
+		const D3D_SHADER_MACRO verticalDefines[] = { { "BLUR_VERTICAL", "1" }, { nullptr, nullptr } };
 		const PixelShaderInfo shaders[] = {
 			{ "psMotion", nullptr, std::addressof(m_motionPixelShader) },
 			{ "psMotion", msaaDefines, std::addressof(m_motionPixelShaderMS) },
 			{ "psDebugDepth", nullptr, std::addressof(m_debugDepthPixelShader) },
 			{ "psDebugMotion", nullptr, std::addressof(m_debugMotionPixelShader) },
 			{ "psDebugObjectMotion", nullptr, std::addressof(m_debugObjectMotionPixelShader) },
+			{ "psAmbientOcclusion", nullptr, std::addressof(m_aoPixelShader) },
+			{ "psAmbientOcclusionBlur", nullptr, std::addressof(m_aoBlurPixelShader) },
+			{ "psAmbientOcclusionBlur", verticalDefines, std::addressof(m_aoBlurVerticalPixelShader) },
+			{ "psApplyAmbientOcclusion", nullptr, std::addressof(m_aoApplyPixelShader) },
+			{ "psDebugAmbientOcclusion", nullptr, std::addressof(m_debugAOPixelShader) },
 		};
 		for(const PixelShaderInfo & info : shaders) {
 			if(m_featureLevel < D3D_FEATURE_LEVEL_10_1) {
@@ -747,14 +770,17 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 	
 	if(m_sceneSamples > 1) {
 		desc.Format = ColorFormat;
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneResolved))) {
+		// Ambient occlusion is applied to the resolved scene
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneResolved))
+		   || FAILED(m_device->CreateRenderTargetView(m_sceneResolved.Get(), nullptr, &m_sceneResolvedTargetView))) {
 			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 scene resolve target";
 			releaseSceneTargets();
 			return false;
 		}
 	} else {
 		m_sceneResolved = m_sceneColorTarget;
+		m_sceneResolvedTargetView = m_sceneColorView;
 	}
 	
 	if(FAILED(m_device->CreateShaderResourceView(m_sceneResolved.Get(), nullptr, &m_sceneResolvedView))) {
@@ -796,6 +822,22 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		}
 	}
 	
+	// Ambient occlusion and the intermediate blur result
+	if(m_ambientOcclusion) {
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		desc.Format = DXGI_FORMAT_R8_UNORM;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_aoTarget))
+		   || FAILED(m_device->CreateRenderTargetView(m_aoTarget.Get(), nullptr, &m_aoView))
+		   || FAILED(m_device->CreateShaderResourceView(m_aoTarget.Get(), nullptr, &m_aoResource))
+		   || FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_aoBlurTarget))
+		   || FAILED(m_device->CreateRenderTargetView(m_aoBlurTarget.Get(), nullptr, &m_aoBlurView))
+		   || FAILED(m_device->CreateShaderResourceView(m_aoBlurTarget.Get(), nullptr, &m_aoBlurResource))) {
+			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 ambient occlusion target";
+			releaseSceneTargets();
+			return false;
+		}
+	}
+	
 	m_sceneSize = size;
 	m_resetHistory = true;
 	
@@ -814,7 +856,16 @@ void D3D11Renderer::releaseSceneTargets() {
 	unbindTextureView(m_motionResource.Get());
 	unbindTextureView(m_linearDepthResource.Get());
 	unbindTextureView(m_objectMotionResource.Get());
+	unbindTextureView(m_aoResource.Get());
+	unbindTextureView(m_aoBlurResource.Get());
 	
+	m_aoResource.Reset();
+	m_aoView.Reset();
+	m_aoTarget.Reset();
+	m_aoBlurResource.Reset();
+	m_aoBlurView.Reset();
+	m_aoBlurTarget.Reset();
+	m_sceneResolvedTargetView.Reset();
 	m_sceneResolvedView.Reset();
 	m_sceneResolved.Reset();
 	m_sceneColorView.Reset();
@@ -836,11 +887,94 @@ void D3D11Renderer::releaseSceneTargets() {
 }
 
 bool D3D11Renderer::sceneEnabled() const {
-	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled;
+	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion;
 }
 
 bool D3D11Renderer::upscalerInputsNeeded() const {
-	return m_sceneDebugView != 0 || m_jitterEnabled;
+	// Ambient occlusion uses the depth written by the motion pass
+	return m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion;
+}
+
+void D3D11Renderer::setAmbientOcclusion(float strength) {
+	
+	m_ambientOcclusionStrength = glm::clamp(strength, 0.f, 1.f);
+	
+	bool enabled = (m_ambientOcclusionStrength > 0.f);
+	if(enabled == m_ambientOcclusion) {
+		return;
+	}
+	
+	m_ambientOcclusion = enabled;
+	
+	if(!m_inScene) {
+		releaseSceneTargets();
+	}
+	
+}
+
+void D3D11Renderer::renderAmbientOcclusion(bool apply) {
+	
+	if(!m_aoView || !m_aoBlurView || !m_linearDepthResource || !m_sceneResolvedTargetView || !m_aoPixelShader
+	   || !m_aoBlurPixelShader || !m_aoBlurVerticalPixelShader || !m_aoApplyPixelShader) {
+		return;
+	}
+	
+	// See runUpscaler() for the projection layout
+	float q = m_sceneProjection[2][2];
+	float nearPlane = (q != 0.f) ? -m_sceneProjection[3][2] / q : 1.f;
+	float farPlane = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
+	float scaleX = std::max(std::abs(m_sceneProjection[0][0]), 0.0001f);
+	float scaleY = std::max(std::abs(m_sceneProjection[1][1]), 0.0001f);
+	
+	AmbientOcclusionConstants constants;
+	constants.target[0] = float(m_sceneSize.x);
+	constants.target[1] = float(m_sceneSize.y);
+	constants.target[2] = 1.f / float(m_sceneSize.x);
+	constants.target[3] = 1.f / float(m_sceneSize.y);
+	constants.projection[0] = 1.f / scaleX;
+	constants.projection[1] = 1.f / scaleY;
+	constants.projection[2] = nearPlane;
+	constants.projection[3] = farPlane;
+	constants.params[0] = AmbientOcclusionRadius;
+	constants.params[1] = m_ambientOcclusionStrength;
+	constants.params[2] = AmbientOcclusionBias;
+	// Pixels per world unit at distance 1
+	constants.params[3] = 0.5f * float(m_sceneSize.y) * scaleY;
+	m_context->UpdateSubresource(m_aoConstants.Get(), 0, nullptr, &constants, 0, 0);
+	ID3D11Buffer * buffer = m_aoConstants.Get();
+	m_context->PSSetConstantBuffers(3, 1, &buffer);
+	
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
+	m_context->RSSetViewports(1, &viewport);
+	m_context->RSSetState(getRasterizerState(false, 0, false, false));
+	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
+	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
+	
+	ID3D11ShaderResourceView * none[2] = { };
+	
+	auto pass = [&](ID3D11RenderTargetView * target, ID3D11ShaderResourceView * input, ID3D11PixelShader * shader) {
+		m_context->PSSetShaderResources(0, 2, none);
+		m_context->OMSetRenderTargets(1, &target, nullptr);
+		ID3D11ShaderResourceView * inputs[] = { m_linearDepthResource.Get(), input };
+		m_context->PSSetShaderResources(0, 2, inputs);
+		drawFullscreen(shader);
+	};
+	
+	pass(m_aoView.Get(), nullptr, m_aoPixelShader.Get());
+	pass(m_aoBlurView.Get(), m_aoResource.Get(), m_aoBlurPixelShader.Get());
+	pass(m_aoView.Get(), m_aoBlurResource.Get(), m_aoBlurVerticalPixelShader.Get());
+	
+	if(apply) {
+		// Darken the scene by multiplying it with the ambient occlusion
+		m_context->OMSetBlendState(getBlendState(BlendZero, BlendSrcColor, false, true), nullptr, 0xffffffff);
+		pass(m_sceneResolvedTargetView.Get(), m_aoResource.Get(), m_aoApplyPixelShader.Get());
+	}
+	
+	m_context->PSSetShaderResources(0, 2, none);
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	m_currentViews[0] = nullptr;
+	m_currentViews[1] = nullptr;
+	
 }
 
 static float halton(u32 index, u32 base) {
@@ -1027,7 +1161,8 @@ void D3D11Renderer::beginScene() {
 	Vec2i size(std::max<s32>(s32(float(m_size.x) * scale + 0.5f), 1),
 	           std::max<s32>(s32(float(m_size.y) * scale + 0.5f), 1));
 	UINT samples = m_upscaler ? 1 : m_msaaSamples;
-	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded() || samples != m_sceneSamples)
+	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded() || bool(m_aoView) != m_ambientOcclusion
+	    || samples != m_sceneSamples)
 	   && !createSceneTargets(size)) {
 		return;
 	}
@@ -1066,6 +1201,11 @@ void D3D11Renderer::endScene() {
 	
 	renderSceneMotion();
 	
+	if(m_ambientOcclusion) {
+		// The debug view shows the ambient occlusion without applying it
+		renderAmbientOcclusion(m_sceneDebugView != 4);
+	}
+	
 	ID3D11ShaderResourceView * upscaled = runUpscaler();
 	
 	// Upscale the scene to the window
@@ -1090,6 +1230,9 @@ void D3D11Renderer::endScene() {
 	} else if(m_sceneDebugView == 3 && m_debugObjectMotionPixelShader && m_objectMotionResource) {
 		view = m_objectMotionResource.Get();
 		shader = m_debugObjectMotionPixelShader.Get();
+	} else if(m_sceneDebugView == 4 && m_debugAOPixelShader && m_aoResource) {
+		view = m_aoResource.Get();
+		shader = m_debugAOPixelShader.Get();
 	}
 	
 	m_context->PSSetShaderResources(0, 1, &view);
