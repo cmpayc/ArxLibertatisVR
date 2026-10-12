@@ -220,28 +220,44 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		D3D_FEATURE_LEVEL_10_0,
 	};
 	
+	// Create the factory through the dxgi.dll exports and not from the device: tools that wrap DXGI
+	// (e.g. the OptiScaler overlay) only see swap chains created by a factory they handed out
+	ComPtr<IDXGIFactory2> factory;
+	ComPtr<IDXGIAdapter1> defaultAdapter;
+	if(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+		factory->EnumAdapters1(0, &defaultAdapter);
+	}
+	
+	auto createDevice = [&](UINT deviceFlags, const D3D_FEATURE_LEVEL * featureLevels, UINT count) {
+		HRESULT result = E_FAIL;
+		if(defaultAdapter) {
+			result = D3D11CreateDevice(defaultAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, deviceFlags,
+			                           featureLevels, count, D3D11_SDK_VERSION, &m_device, &m_featureLevel,
+			                           &m_context);
+		}
+		if(FAILED(result) && result != E_INVALIDARG) {
+			result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, deviceFlags, featureLevels, count,
+			                           D3D11_SDK_VERSION, &m_device, &m_featureLevel, &m_context);
+		}
+		return result;
+	};
+	
 	HRESULT hr = E_FAIL;
 	
 	#ifdef ARX_DEBUG
-	hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags | D3D11_CREATE_DEVICE_DEBUG,
-	                       levels, UINT(std::size(levels)), D3D11_SDK_VERSION, &m_device, &m_featureLevel,
-	                       &m_context);
+	hr = createDevice(flags | D3D11_CREATE_DEVICE_DEBUG, levels, UINT(std::size(levels)));
 	if(FAILED(hr)) {
 		LogWarning << "Direct3D 11 debug layer not available";
 	}
 	#endif
 	
 	if(FAILED(hr)) {
-		hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels,
-		                       UINT(std::size(levels)), D3D11_SDK_VERSION, &m_device, &m_featureLevel,
-		                       &m_context);
+		hr = createDevice(flags, levels, UINT(std::size(levels)));
 	}
 	
 	if(hr == E_INVALIDARG) {
 		// Direct3D 11.0 runtimes do not know about D3D_FEATURE_LEVEL_11_1
-		hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels + 1,
-		                       UINT(std::size(levels) - 1), D3D11_SDK_VERSION, &m_device, &m_featureLevel,
-		                       &m_context);
+		hr = createDevice(flags, levels + 1, UINT(std::size(levels) - 1));
 	}
 	
 	if(FAILED(hr)) {
@@ -249,13 +265,23 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		return false;
 	}
 	
+	// Fall back to the factory of the device if it was not created on the default adapter
 	ComPtr<IDXGIDevice> dxgiDevice;
 	ComPtr<IDXGIAdapter> adapter;
-	ComPtr<IDXGIFactory2> factory;
-	if(FAILED(m_device.As(&dxgiDevice)) || FAILED(dxgiDevice->GetAdapter(&adapter))
-	   || FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) {
-		LogError << "Failed to get the DXGI 1.2 factory";
+	DXGI_ADAPTER_DESC adapterDesc, defaultDesc;
+	if(FAILED(m_device.As(&dxgiDevice)) || FAILED(dxgiDevice->GetAdapter(&adapter))) {
+		LogError << "Failed to get the DXGI adapter";
 		return false;
+	}
+	if(!factory || !defaultAdapter || FAILED(adapter->GetDesc(&adapterDesc))
+	   || FAILED(defaultAdapter->GetDesc(&defaultDesc))
+	   || adapterDesc.AdapterLuid.LowPart != defaultDesc.AdapterLuid.LowPart
+	   || adapterDesc.AdapterLuid.HighPart != defaultDesc.AdapterLuid.HighPart) {
+		factory.Reset();
+		if(FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) {
+			LogError << "Failed to get the DXGI 1.2 factory";
+			return false;
+		}
 	}
 	
 	ComPtr<IDXGIFactory5> factory5;
@@ -268,6 +294,21 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	}
 	
 	DXGI_SWAP_CHAIN_DESC1 desc = {};
+	// Use an explicit size: tools that hook DXGI (e.g. OptiScaler) take small swap chains for overlays and ignore them.
+	// The window may not have its final size yet, the buffers are resized later.
+	RECT client;
+	if(GetClientRect(m_window, &client)) {
+		desc.Width = UINT(std::max<LONG>(client.right - client.left, 0));
+		desc.Height = UINT(std::max<LONG>(client.bottom - client.top, 0));
+	}
+	if(desc.Width < 640 || desc.Height < 480) {
+		MONITORINFO monitor = {};
+		monitor.cbSize = sizeof(monitor);
+		if(GetMonitorInfoW(MonitorFromWindow(m_window, MONITOR_DEFAULTTONEAREST), &monitor)) {
+			desc.Width = UINT(monitor.rcMonitor.right - monitor.rcMonitor.left);
+			desc.Height = UINT(monitor.rcMonitor.bottom - monitor.rcMonitor.top);
+		}
+	}
 	desc.Format = ColorFormat;
 	desc.SampleDesc.Count = 1;
 	desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -1783,6 +1824,9 @@ void D3D11Renderer::present() {
 	UINT flags = (interval == 0 && m_allowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
 	
 	HRESULT hr = m_swapChain->Present(interval, flags);
+
+	// Overlays that hook Present (e.g. OptiScaler) may draw with our context and leave their state bound
+	invalidateCachedState();
 	if(hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
 		static bool warned = false;
 		if(!warned) {

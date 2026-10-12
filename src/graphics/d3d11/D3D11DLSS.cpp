@@ -65,6 +65,23 @@ NVSDK_NGX_DLSS_Hint_Render_Preset presetFromName(const std::string & name) {
 	return NVSDK_NGX_DLSS_Hint_Render_Preset_Default;
 }
 
+/*!
+ * Shut down NGX, ignoring crashes: tools that intercept DLSS (e.g. OptiScaler, which runs it on Direct3D 12)
+ * may crash in the Direct3D 11 shutdown, which would otherwise crash the game on exit.
+ * This function must not have objects with destructors.
+ */
+void shutdownNGX(ID3D11Device * device) {
+	#if defined(_MSC_VER)
+	__try {
+		NVSDK_NGX_D3D11_Shutdown1(device);
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		// Nothing left to clean up
+	}
+	#else
+	NVSDK_NGX_D3D11_Shutdown1(device);
+	#endif
+}
+
 class DLSSUpscaler final : public D3D11Upscaler {
 	
 	ID3D11Device * m_device;
@@ -145,7 +162,7 @@ public:
 			NVSDK_NGX_D3D11_DestroyParameters(m_parameters);
 		}
 		if(m_initialized) {
-			NVSDK_NGX_D3D11_Shutdown1(m_device);
+			shutdownNGX(m_device);
 		}
 	}
 	
