@@ -1783,6 +1783,9 @@ void ArxGame::renderLevel() {
 	
 	ARX_PROFILE_FUNC();
 	
+	// The 3D scene may be rendered at a lower resolution and is upscaled before drawing the interface
+	GRenderer->beginScene();
+	
 	// Clear screen & Z buffers
 	GRenderer->Clear(Renderer::ColorBuffer | Renderer::DepthBuffer, g_fogColor);
 	
@@ -1838,6 +1841,8 @@ void ArxGame::renderLevel() {
 
 	updateLightFlares();
 	renderLightFlares();
+	
+	GRenderer->endScene();
 	
 	// Manage Death visual & Launch menu...
 	ARX_PLAYER_Manage_Death();
@@ -2031,6 +2036,8 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	float fogStart = fogEnd * 0.65f;
 	renderer.SetFogParams(fogStart, fogEnd);
 	renderer.SetFogColor(g_fogColor);
+	
+	renderer.setSceneScale(config.video.renderScale);
 	
 	ComputePortalVertexBuffer();
 	std::unique_ptr<VertexBuffer<SMY_VERTEX3>> vb3 = renderer.createVertexBuffer3(4000, Renderer::Stream);

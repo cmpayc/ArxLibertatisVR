@@ -178,6 +178,23 @@ float4 psClear() : SV_Target {
 	return clearColor;
 }
 
+struct BlitOutput {
+	float4 position : SV_Position;
+	float2 uv : TEXCOORD0;
+};
+
+BlitOutput vsBlit(uint id : SV_VertexID) {
+	BlitOutput o;
+	float2 p = float2((id << 1) & 2, id & 2);
+	o.position = float4(p * float2(2, -2) + float2(-1, 1), 0, 1);
+	o.uv = p;
+	return o;
+}
+
+float4 psBlit(BlitOutput input) : SV_Target {
+	return texture0.Sample(sampler0, input.uv);
+}
+
 )HLSL";
 
 #endif // ARX_GRAPHICS_D3D11_D3D11SHADERS_H

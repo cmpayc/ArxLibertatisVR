@@ -19,6 +19,7 @@
 
 #include "graphics/d3d11/D3D11Renderer.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <algorithm>
@@ -125,6 +126,9 @@ D3D11Renderer::D3D11Renderer()
 	, m_vsync(1)
 	, m_size(0)
 	, m_msaaSamples(1)
+	, m_sceneScale(1.f)
+	, m_inScene(false)
+	, m_sceneSize(0)
 	, m_maximumAnisotropy(1.f)
 	, m_maximumSupportedAnisotropy(1.f)
 	, m_wireframe(false)
@@ -421,6 +425,28 @@ bool D3D11Renderer::compileShaders() {
 		}
 	}
 	
+	{
+		ComPtr<ID3DBlob> code = compileShader("vsBlit", "vs_4_0");
+		if(!code || FAILED(m_device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(),
+		                                                nullptr, &m_blitVertexShader))) {
+			return false;
+		}
+		code = compileShader("psBlit", "ps_4_0");
+		if(!code || FAILED(m_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
+		                                               nullptr, &m_blitPixelShader))) {
+			return false;
+		}
+		D3D11_SAMPLER_DESC desc = {};
+		desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+		desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+		desc.MaxAnisotropy = 1;
+		desc.MaxLOD = D3D11_FLOAT32_MAX;
+		if(FAILED(m_device->CreateSamplerState(&desc, &m_blitSampler))) {
+			return false;
+		}
+	}
+	
 	return true;
 }
 
@@ -491,12 +517,6 @@ void D3D11Renderer::afterResize() {
 	
 	releaseSizeDependentResources();
 	
-	HRESULT hr = m_swapChain->ResizeBuffers(0, UINT(size.x), UINT(size.y), DXGI_FORMAT_UNKNOWN,
-	                                        m_allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
-	if(FAILED(hr)) {
-		LogError << "Failed to resize Direct3D 11 swap chain: " << hresultString(hr);
-	}
-	
 	createSizeDependentResources();
 	
 }
@@ -505,6 +525,18 @@ bool D3D11Renderer::createSizeDependentResources() {
 	
 	Vec2i size = mainApp->getWindow()->getSize();
 	m_size = Vec2i(std::max<s32>(size.x, 1), std::max<s32>(size.y, 1));
+	
+	// The swap chain was created for the hidden window and is not resized when entering fullscreen
+	DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
+	if(SUCCEEDED(m_swapChain->GetDesc1(&swapChainDesc))
+	   && (swapChainDesc.Width != UINT(m_size.x) || swapChainDesc.Height != UINT(m_size.y))) {
+		HRESULT hr = m_swapChain->ResizeBuffers(0, UINT(m_size.x), UINT(m_size.y), DXGI_FORMAT_UNKNOWN,
+		                                        swapChainDesc.Flags);
+		if(FAILED(hr)) {
+			LogError << "Failed to resize Direct3D 11 swap chain to " << m_size.x << "x" << m_size.y << ": "
+			         << hresultString(hr);
+		}
+	}
 	
 	D3D11_TEXTURE2D_DESC desc = {};
 	desc.Width = UINT(m_size.x);
@@ -546,7 +578,204 @@ void D3D11Renderer::releaseSizeDependentResources() {
 	m_depthView.Reset();
 	m_depthTarget.Reset();
 	
+	releaseSceneTargets();
+	
 	invalidateCachedState();
+	
+}
+
+bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
+	
+	releaseSceneTargets();
+	
+	D3D11_TEXTURE2D_DESC desc = {};
+	desc.Width = UINT(size.x);
+	desc.Height = UINT(size.y);
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.SampleDesc.Count = m_msaaSamples;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	
+	desc.Format = ColorFormat;
+	desc.BindFlags = D3D11_BIND_RENDER_TARGET | (m_msaaSamples > 1 ? 0 : D3D11_BIND_SHADER_RESOURCE);
+	if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneColorTarget))
+	   || FAILED(m_device->CreateRenderTargetView(m_sceneColorTarget.Get(), nullptr, &m_sceneColorView))) {
+		LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 scene color target";
+		releaseSceneTargets();
+		return false;
+	}
+	
+	desc.Format = DepthFormat;
+	desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+	if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneDepthTarget))
+	   || FAILED(m_device->CreateDepthStencilView(m_sceneDepthTarget.Get(), nullptr, &m_sceneDepthView))) {
+		LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 scene depth target";
+		releaseSceneTargets();
+		return false;
+	}
+	
+	if(m_msaaSamples > 1) {
+		desc.SampleDesc.Count = 1;
+		desc.Format = ColorFormat;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneResolved))) {
+			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 scene resolve target";
+			releaseSceneTargets();
+			return false;
+		}
+	} else {
+		m_sceneResolved = m_sceneColorTarget;
+	}
+	
+	if(FAILED(m_device->CreateShaderResourceView(m_sceneResolved.Get(), nullptr, &m_sceneResolvedView))) {
+		LogError << "Failed to create Direct3D 11 scene view";
+		releaseSceneTargets();
+		return false;
+	}
+	
+	m_sceneSize = size;
+	
+	return true;
+}
+
+void D3D11Renderer::releaseSceneTargets() {
+	
+	if(m_inScene) {
+		m_inScene = false;
+		invalidateCachedState();
+	}
+	
+	unbindTextureView(m_sceneResolvedView.Get());
+	
+	m_sceneResolvedView.Reset();
+	m_sceneResolved.Reset();
+	m_sceneColorView.Reset();
+	m_sceneColorTarget.Reset();
+	m_sceneDepthView.Reset();
+	m_sceneDepthTarget.Reset();
+	m_sceneSize = Vec2i(0);
+	
+}
+
+Vec2f D3D11Renderer::targetScale() const {
+	
+	if(!m_inScene || m_size.x <= 0 || m_size.y <= 0) {
+		return Vec2f(1.f);
+	}
+	
+	return Vec2f(m_sceneSize) / Vec2f(m_size);
+}
+
+D3D11_VIEWPORT D3D11Renderer::toTargetViewport(const Rect & rect) const {
+	
+	Vec2f scale = targetScale();
+	
+	D3D11_VIEWPORT viewport = {
+		float(rect.left) * scale.x, float(rect.top) * scale.y,
+		float(rect.width()) * scale.x, float(rect.height()) * scale.y,
+		0.f, 1.f
+	};
+	
+	return viewport;
+}
+
+D3D11_RECT D3D11Renderer::toTargetRect(const Rect & rect) const {
+	
+	Vec2f scale = targetScale();
+	
+	D3D11_RECT result = {
+		LONG(std::floor(float(rect.left) * scale.x + 0.5f)), LONG(std::floor(float(rect.top) * scale.y + 0.5f)),
+		LONG(std::floor(float(rect.right) * scale.x + 0.5f)), LONG(std::floor(float(rect.bottom) * scale.y + 0.5f))
+	};
+	
+	return result;
+}
+
+void D3D11Renderer::bindRenderTargets() {
+	
+	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : m_colorView.Get();
+	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : m_depthView.Get();
+	
+	m_context->OMSetRenderTargets(1, &colorView, depthView);
+	
+}
+
+void D3D11Renderer::setSceneScale(float scale) {
+	
+	scale = glm::clamp(scale, 0.25f, 1.f);
+	if(scale == m_sceneScale) {
+		return;
+	}
+	
+	m_sceneScale = scale;
+	
+	if(!m_inScene) {
+		releaseSceneTargets();
+	}
+	
+}
+
+void D3D11Renderer::beginScene() {
+	
+	if(m_inScene || m_sceneScale >= 1.f || !m_colorView) {
+		return;
+	}
+	
+	Vec2i size(std::max<s32>(s32(float(m_size.x) * m_sceneScale + 0.5f), 1),
+	           std::max<s32>(s32(float(m_size.y) * m_sceneScale + 0.5f), 1));
+	if(size != m_sceneSize && !createSceneTargets(size)) {
+		return;
+	}
+	
+	// The scene texture is about to become a render target
+	unbindTextureView(m_sceneResolvedView.Get());
+	
+	m_inScene = true;
+	invalidateCachedState();
+	
+}
+
+void D3D11Renderer::endScene() {
+	
+	if(!m_inScene) {
+		return;
+	}
+	
+	m_inScene = false;
+	
+	if(m_msaaSamples > 1) {
+		m_context->ResolveSubresource(m_sceneResolved.Get(), 0, m_sceneColorTarget.Get(), 0, ColorFormat);
+	}
+	
+	// Upscale the scene to the window
+	
+	ID3D11RenderTargetView * colorView = m_colorView.Get();
+	m_context->OMSetRenderTargets(1, &colorView, nullptr);
+	
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_size.x), float(m_size.y), 0.f, 1.f };
+	m_context->RSSetViewports(1, &viewport);
+	m_context->RSSetState(getRasterizerState(false, 0, false, false));
+	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
+	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
+	
+	m_context->IASetInputLayout(nullptr);
+	m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	m_context->VSSetShader(m_blitVertexShader.Get(), nullptr, 0);
+	m_context->PSSetShader(m_blitPixelShader.Get(), nullptr, 0);
+	
+	ID3D11ShaderResourceView * view = m_sceneResolvedView.Get();
+	m_context->PSSetShaderResources(0, 1, &view);
+	ID3D11SamplerState * sampler = m_blitSampler.Get();
+	m_context->PSSetSamplers(0, 1, &sampler);
+	
+	m_context->Draw(3, 0);
+	
+	// The interface is drawn on top of the scene, with its own depth
+	m_context->ClearDepthStencilView(m_depthView.Get(), D3D11_CLEAR_DEPTH, 1.f, 0);
+	
+	invalidateCachedState();
+	m_currentViews[0] = view;
+	m_currentSamplers[0] = sampler;
 	
 }
 
@@ -658,8 +887,7 @@ void D3D11Renderer::SetViewport(const Rect & viewport) {
 	m_viewport = viewport;
 	
 	if(m_context && m_stateValid) {
-		D3D11_VIEWPORT vp = { float(m_viewport.left), float(m_viewport.top), float(m_viewport.width()),
-		                      float(m_viewport.height()), 0.f, 1.f };
+		D3D11_VIEWPORT vp = toTargetViewport(m_viewport);
 		m_context->RSSetViewports(1, &vp);
 	}
 	
@@ -670,8 +898,7 @@ void D3D11Renderer::SetScissor(const Rect & rect) {
 	m_scissor = rect;
 	
 	if(m_context && m_stateValid && m_scissor.isValid()) {
-		D3D11_RECT r = { LONG(m_scissor.left), LONG(m_scissor.top), LONG(m_scissor.right),
-		                 LONG(m_scissor.bottom) };
+		D3D11_RECT r = toTargetRect(m_scissor);
 		m_context->RSSetScissorRects(1, &r);
 	}
 	
@@ -686,13 +913,16 @@ void D3D11Renderer::Clear(BufferFlags bufferFlags, Color clearColor, float clear
 	
 	Color4f color(clearColor);
 	
+	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : m_colorView.Get();
+	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : m_depthView.Get();
+	
 	if(nrects == 0) {
 		if(bufferFlags & ColorBuffer) {
 			const float c[4] = { color.r, color.g, color.b, color.a };
-			m_context->ClearRenderTargetView(m_colorView.Get(), c);
+			m_context->ClearRenderTargetView(colorView, c);
 		}
 		if(bufferFlags & DepthBuffer) {
-			m_context->ClearDepthStencilView(m_depthView.Get(), D3D11_CLEAR_DEPTH, clearDepth, 0);
+			m_context->ClearDepthStencilView(depthView, D3D11_CLEAR_DEPTH, clearDepth, 0);
 		}
 		return;
 	}
@@ -702,8 +932,7 @@ void D3D11Renderer::Clear(BufferFlags bufferFlags, Color clearColor, float clear
 	ClearConstants constants = { { color.r, color.g, color.b, color.a }, { clearDepth, 0.f, 0.f, 0.f } };
 	m_context->UpdateSubresource(m_clearConstants.Get(), 0, nullptr, &constants, 0, 0);
 	
-	ID3D11RenderTargetView * colorView = m_colorView.Get();
-	m_context->OMSetRenderTargets(1, &colorView, m_depthView.Get());
+	m_context->OMSetRenderTargets(1, &colorView, depthView);
 	m_context->IASetInputLayout(nullptr);
 	m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	m_context->VSSetShader(m_clearVertexShader.Get(), nullptr, 0);
@@ -716,11 +945,11 @@ void D3D11Renderer::Clear(BufferFlags bufferFlags, Color clearColor, float clear
 	m_context->OMSetDepthStencilState(getDepthState(false, (bufferFlags & DepthBuffer) != 0), 0);
 	m_context->RSSetState(getRasterizerState(false, 0, false, true));
 	
-	D3D11_VIEWPORT vp = { 0.f, 0.f, float(m_size.x), float(m_size.y), 0.f, 1.f };
+	D3D11_VIEWPORT vp = toTargetViewport(Rect(m_size.x, m_size.y));
 	m_context->RSSetViewports(1, &vp);
 	
 	for(size_t i = 0; i < nrects; i++) {
-		D3D11_RECT r = { LONG(rect[i].left), LONG(rect[i].top), LONG(rect[i].right), LONG(rect[i].bottom) };
+		D3D11_RECT r = toTargetRect(rect[i]);
 		m_context->RSSetScissorRects(1, &r);
 		m_context->Draw(3, 0);
 	}
@@ -1046,6 +1275,12 @@ void D3D11Renderer::present() {
 		return;
 	}
 	
+	DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
+	if(SUCCEEDED(m_swapChain->GetDesc1(&swapChainDesc))
+	   && (swapChainDesc.Width != UINT(m_size.x) || swapChainDesc.Height != UINT(m_size.y))) {
+		m_swapChain->ResizeBuffers(0, UINT(m_size.x), UINT(m_size.y), DXGI_FORMAT_UNKNOWN, swapChainDesc.Flags);
+	}
+	
 	ComPtr<ID3D11Texture2D> backBuffer;
 	if(SUCCEEDED(m_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) {
 		D3D11_TEXTURE2D_DESC desc;
@@ -1174,16 +1409,13 @@ void D3D11Renderer::flushState(VertexType type) {
 	
 	if(force) {
 		
-		ID3D11RenderTargetView * colorView = m_colorView.Get();
-		m_context->OMSetRenderTargets(1, &colorView, m_depthView.Get());
+		bindRenderTargets();
 		
-		D3D11_VIEWPORT vp = { float(m_viewport.left), float(m_viewport.top), float(m_viewport.width()),
-		                      float(m_viewport.height()), 0.f, 1.f };
+		D3D11_VIEWPORT vp = toTargetViewport(m_viewport);
 		m_context->RSSetViewports(1, &vp);
 		
 		if(m_scissor.isValid()) {
-			D3D11_RECT r = { LONG(m_scissor.left), LONG(m_scissor.top), LONG(m_scissor.right),
-			                 LONG(m_scissor.bottom) };
+			D3D11_RECT r = toTargetRect(m_scissor);
 			m_context->RSSetScissorRects(1, &r);
 		}
 		

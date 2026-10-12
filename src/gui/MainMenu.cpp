@@ -1012,6 +1012,23 @@ public:
 			addCenter(std::move(cb));
 		}
 		
+		if(GRenderer->supportsSceneScale()) {
+			std::string_view label = getLocalised("system_menus_options_video_render_scale", "Render scale");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int /* pos */, std::string_view string) {
+				float scale = float(util::toInt(string.substr(0, string.size() - 1)).value_or(100)) / 100.f;
+				config.video.renderScale = scale;
+				GRenderer->setSceneScale(scale);
+			};
+			for(int percent : { 100, 75, 67, 58, 50, 33 }) {
+				cb->addEntry(std::to_string(percent) + "%");
+				if(int(config.video.renderScale * 100.f + 0.5f) <= percent) {
+					cb->selectLast();
+				}
+			}
+			addCenter(std::move(cb));
+		}
+		
 		{
 			std::string_view label = getLocalised("system_menus_options_video_texture_filter_anisotropic");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);

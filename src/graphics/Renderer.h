@@ -384,6 +384,23 @@ public:
 	virtual bool getSnapshot(Image & image) = 0;
 	virtual bool getSnapshot(Image & image, size_t width, size_t height) = 0;
 	
+	// Scene rendering
+	
+	//! \return true if the 3D scene can be rendered at a lower resolution than the window
+	[[nodiscard]] virtual bool supportsSceneScale() const { return false; }
+	
+	//! Set the fraction of the window resolution used for the 3D scene
+	virtual void setSceneScale(float scale) { ARX_UNUSED(scale); }
+	
+	/*!
+	 * Following draw calls render the 3D scene, which may use a lower resolution than the window.
+	 * Coordinates are still specified in window pixels.
+	 */
+	virtual void beginScene() { }
+	
+	//! Upscale the 3D scene to the window, following draw calls render at the window resolution
+	virtual void endScene() { }
+	
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }
 	

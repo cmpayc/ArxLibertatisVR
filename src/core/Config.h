@@ -140,6 +140,7 @@ public:
 		float fogDistance;
 		bool antialiasing;
 		int maxAnisotropicFiltering;
+		float renderScale;
 		bool colorkeyAntialiasing;
 		int alphaCutoutAntialiasing;
 		

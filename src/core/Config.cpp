@@ -125,6 +125,7 @@ constexpr const float
 	fogDistance = 10.f,
 	gamma = 5.f,
 	fov = 75.f,
+	renderScale = 1.f,
 	hudScale = 0.5f,
 	bookScale = 1.f,
 	cursorScale = 0.5f,
@@ -220,6 +221,7 @@ constexpr const std::string_view
 	screenShake = "screen_shake",
 	antialiasing = "antialiasing",
 	maxAnisotropicFiltering = "max_anisotropic_filtering",
+	renderScale = "render_scale",
 	colorkeyAntialiasing = "colorkey_antialiasing",
 	alphaCutoutAntialiasing = "alpha_cutout_antialiasing",
 	bufferSize = "buffer_size",
@@ -479,6 +481,7 @@ bool Config::save() {
 	writer.writeKey(Key::screenShake, video.screenShake);
 	writer.writeKey(Key::antialiasing, video.antialiasing);
 	writer.writeKey(Key::maxAnisotropicFiltering, video.maxAnisotropicFiltering);
+	writer.writeKey(Key::renderScale, video.renderScale);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
 	writer.writeKey(Key::alphaCutoutAntialiasing, video.alphaCutoutAntialiasing);
 	writer.writeKey(Key::bufferSize, video.bufferSize);
@@ -612,6 +615,8 @@ bool Config::init(const fs::path & file) {
 	video.antialiasing = reader.getKey(Section::Video, Key::antialiasing, Default::antialiasing);
 	int anisoFiltering = reader.getKey(Section::Video, Key::maxAnisotropicFiltering, Default::maxAnisotropicFiltering);
 	video.maxAnisotropicFiltering = std::max(anisoFiltering, 1);
+	float renderScale = reader.getKey(Section::Video, Key::renderScale, Default::renderScale);
+	video.renderScale = glm::clamp(renderScale, 0.25f, 1.f);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);
 	int alphaCutoutAA = reader.getKey(Section::Video, Key::alphaCutoutAntialiasing, Default::alphaCutoutAntialiasing);
 	video.alphaCutoutAntialiasing = glm::clamp(alphaCutoutAA, 0, 2);

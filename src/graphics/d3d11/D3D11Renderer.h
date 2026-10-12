@@ -114,6 +114,11 @@ public:
 	bool getSnapshot(Image & image) override;
 	bool getSnapshot(Image & image, size_t width, size_t height) override;
 	
+	bool supportsSceneScale() const override { return true; }
+	void setSceneScale(float scale) override;
+	void beginScene() override;
+	void endScene() override;
+	
 	D3D11TextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
 	}
@@ -154,6 +159,14 @@ private:
 	};
 	
 	bool createSizeDependentResources();
+	bool createSceneTargets(const Vec2i & size);
+	void releaseSceneTargets();
+	
+	//! Render target size divided by the window size
+	Vec2f targetScale() const;
+	D3D11_VIEWPORT toTargetViewport(const Rect & rect) const;
+	D3D11_RECT toTargetRect(const Rect & rect) const;
+	void bindRenderTargets();
 	void releaseSizeDependentResources();
 	bool compileShaders();
 	
@@ -190,12 +203,26 @@ private:
 	ComPtr<ID3D11Texture2D> m_depthTarget;
 	ComPtr<ID3D11DepthStencilView> m_depthView;
 	
+	// 3D scene rendered at a lower resolution
+	float m_sceneScale;
+	bool m_inScene;
+	Vec2i m_sceneSize;
+	ComPtr<ID3D11Texture2D> m_sceneColorTarget;
+	ComPtr<ID3D11RenderTargetView> m_sceneColorView;
+	ComPtr<ID3D11Texture2D> m_sceneDepthTarget;
+	ComPtr<ID3D11DepthStencilView> m_sceneDepthView;
+	ComPtr<ID3D11Texture2D> m_sceneResolved;
+	ComPtr<ID3D11ShaderResourceView> m_sceneResolvedView;
+	
 	ComPtr<ID3D11VertexShader> m_vertexShaders[VertexTypeCount];
 	ComPtr<ID3D11InputLayout> m_inputLayouts[VertexTypeCount];
 	ComPtr<ID3D11PixelShader> m_pixelShader;
 	ComPtr<ID3D11PixelShader> m_pixelShaderSampleShading;
 	ComPtr<ID3D11VertexShader> m_clearVertexShader;
 	ComPtr<ID3D11PixelShader> m_clearPixelShader;
+	ComPtr<ID3D11VertexShader> m_blitVertexShader;
+	ComPtr<ID3D11PixelShader> m_blitPixelShader;
+	ComPtr<ID3D11SamplerState> m_blitSampler;
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;
 	ComPtr<ID3D11Buffer> m_clearConstants;
