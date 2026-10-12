@@ -127,6 +127,8 @@ public:
 	void setUpscalerSharpness(float sharpness) override { m_upscalerSharpness = sharpness; }
 	bool supportsAmbientOcclusion() const override { return true; }
 	void setAmbientOcclusion(float strength) override;
+	bool supportsBloom() const override { return true; }
+	void setBloom(float strength) override;
 	
 	D3D11TextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
@@ -191,6 +193,12 @@ private:
 	 * \param apply multiply the resolved scene with it, false for the debug view
 	 */
 	void renderAmbientOcclusion(bool apply);
+	
+	/*!
+	 * Blur the bright parts of the scene through the bloom chain
+	 * \param apply add the result to the resolved scene, false for the debug view
+	 */
+	void renderBloom(bool apply);
 	
 	//! Create the requested upscaler if that was not tried yet
 	void updateUpscaler();
@@ -263,6 +271,15 @@ private:
 	ComPtr<ID3D11Texture2D> m_aoBlurTarget;
 	ComPtr<ID3D11RenderTargetView> m_aoBlurView;
 	ComPtr<ID3D11ShaderResourceView> m_aoBlurResource;
+	
+	// Bloom chain, each level half the size of the previous one
+	static constexpr size_t BloomLevels = 6;
+	bool m_bloom;
+	float m_bloomStrength;
+	Vec2i m_bloomSizes[BloomLevels];
+	ComPtr<ID3D11Texture2D> m_bloomTargets[BloomLevels];
+	ComPtr<ID3D11RenderTargetView> m_bloomViews[BloomLevels];
+	ComPtr<ID3D11ShaderResourceView> m_bloomResources[BloomLevels];
 	ComPtr<ID3D11ShaderResourceView> m_sceneDepthResource;
 	UINT m_sceneSamples;
 	float m_sceneLodBias;
@@ -329,6 +346,11 @@ private:
 	ComPtr<ID3D11PixelShader> m_aoBlurVerticalPixelShader;
 	ComPtr<ID3D11PixelShader> m_aoApplyPixelShader;
 	ComPtr<ID3D11PixelShader> m_debugAOPixelShader;
+	ComPtr<ID3D11Buffer> m_bloomConstants;
+	ComPtr<ID3D11PixelShader> m_bloomPrefilterPixelShader;
+	ComPtr<ID3D11PixelShader> m_bloomDownsamplePixelShader;
+	ComPtr<ID3D11PixelShader> m_bloomUpsamplePixelShader;
+	ComPtr<ID3D11PixelShader> m_bloomCompositePixelShader;
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;
 	ComPtr<ID3D11Buffer> m_clearConstants;

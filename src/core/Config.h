@@ -146,6 +146,7 @@ public:
 		std::string upscalerPath;
 		float fsrSharpness;
 		float ambientOcclusion; //!< Strength in [0, 1], 0 = off
+		float bloom; //!< Strength in [0, 1], 0 = off
 		bool colorkeyAntialiasing;
 		int alphaCutoutAntialiasing;
 		

@@ -434,6 +434,12 @@ public:
 	//! Set the strength of screen-space ambient occlusion for the 3D scene in [0, 1], 0 disables it
 	virtual void setAmbientOcclusion(float strength) { ARX_UNUSED(strength); }
 	
+	//! \return true if this renderer supports bloom for the 3D scene
+	[[nodiscard]] virtual bool supportsBloom() const { return false; }
+	
+	//! Set the strength of the bloom for the 3D scene in [0, 1], 0 disables it
+	virtual void setBloom(float strength) { ARX_UNUSED(strength); }
+	
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }
 	

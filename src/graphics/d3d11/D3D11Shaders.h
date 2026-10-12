@@ -399,6 +399,70 @@ float4 psDebugAmbientOcclusion(BlitOutput input) : SV_Target {
 	return float4(texture0.Sample(sampler0, input.uv).rrr, 1);
 }
 
+/*
+ * Bloom: bright parts of the scene are extracted, blurred through a chain of downsampled textures and
+ * added back to the scene (similar to the Call of Duty: Advanced Warfare bloom).
+ */
+
+cbuffer BloomConstants : register(b4) {
+	float4 bloomParams; // x = threshold, y = soft knee, z = intensity
+	float4 bloomSource; // xy = 1 / source size
+};
+
+float3 bloomThreshold(float3 color) {
+	float brightness = max(color.r, max(color.g, color.b));
+	float knee = bloomParams.y;
+	float soft = clamp(brightness - bloomParams.x + knee, 0, 2 * knee);
+	soft = soft * soft / (4 * knee + 0.00001);
+	float contribution = max(soft, brightness - bloomParams.x) / max(brightness, 0.00001);
+	return color * contribution;
+}
+
+float bloomKarisWeight(float3 color) {
+	// Averaging by luma weight avoids flickering from single bright pixels
+	return 1 / (1 + dot(color, float3(0.2126, 0.7152, 0.0722)));
+}
+
+// First downsample from the scene with the threshold
+float4 psBloomPrefilter(BlitOutput input) : SV_Target {
+	float2 t = bloomSource.xy;
+	float3 a = bloomThreshold(texture0.Sample(sampler0, input.uv + t * float2(-1, -1)).rgb);
+	float3 b = bloomThreshold(texture0.Sample(sampler0, input.uv + t * float2(1, -1)).rgb);
+	float3 c = bloomThreshold(texture0.Sample(sampler0, input.uv + t * float2(-1, 1)).rgb);
+	float3 d = bloomThreshold(texture0.Sample(sampler0, input.uv + t * float2(1, 1)).rgb);
+	float wa = bloomKarisWeight(a), wb = bloomKarisWeight(b), wc = bloomKarisWeight(c), wd = bloomKarisWeight(d);
+	return float4((a * wa + b * wb + c * wc + d * wd) / (wa + wb + wc + wd), 1);
+}
+
+float4 psBloomDownsample(BlitOutput input) : SV_Target {
+	float2 t = bloomSource.xy;
+	float3 sum = texture0.Sample(sampler0, input.uv + t * float2(-1, -1)).rgb
+	           + texture0.Sample(sampler0, input.uv + t * float2(1, -1)).rgb
+	           + texture0.Sample(sampler0, input.uv + t * float2(-1, 1)).rgb
+	           + texture0.Sample(sampler0, input.uv + t * float2(1, 1)).rgb;
+	return float4(sum * 0.25, 1);
+}
+
+// 3x3 tent filter, added to the next larger level by the blend state
+float4 psBloomUpsample(BlitOutput input) : SV_Target {
+	float2 t = bloomSource.xy;
+	float3 sum = texture0.Sample(sampler0, input.uv).rgb * 4;
+	sum += (texture0.Sample(sampler0, input.uv + t * float2(-1, 0)).rgb
+	        + texture0.Sample(sampler0, input.uv + t * float2(1, 0)).rgb
+	        + texture0.Sample(sampler0, input.uv + t * float2(0, -1)).rgb
+	        + texture0.Sample(sampler0, input.uv + t * float2(0, 1)).rgb) * 2;
+	sum += texture0.Sample(sampler0, input.uv + t * float2(-1, -1)).rgb
+	       + texture0.Sample(sampler0, input.uv + t * float2(1, -1)).rgb
+	       + texture0.Sample(sampler0, input.uv + t * float2(-1, 1)).rgb
+	       + texture0.Sample(sampler0, input.uv + t * float2(1, 1)).rgb;
+	return float4(sum / 16, 1);
+}
+
+// Added to the scene by the blend state
+float4 psBloomComposite(BlitOutput input) : SV_Target {
+	return float4(psBloomUpsample(input).rgb * bloomParams.z, 1);
+}
+
 )HLSL";
 
 #endif // ARX_GRAPHICS_D3D11_D3D11SHADERS_H

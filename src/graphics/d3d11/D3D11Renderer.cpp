@@ -81,10 +81,20 @@ struct AmbientOcclusionConstants {
 const float AmbientOcclusionRadius = 60.f;
 const float AmbientOcclusionBias = 1.f;
 
+struct BloomConstants {
+	float params[4];
+	float source[4];
+};
+
+// Bloom settings: brightness where the bloom starts, width of the soft transition
+const float BloomThreshold = 0.45f;
+const float BloomKnee = 0.2f;
+
 static_assert(sizeof(VSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(PSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(ClearConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(AmbientOcclusionConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
+static_assert(sizeof(BloomConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 
 const size_t VertexRingSize = 4 * 1024 * 1024;
 const size_t IndexRingSize = 1024 * 1024;
@@ -152,6 +162,9 @@ D3D11Renderer::D3D11Renderer()
 	, m_sceneSize(0)
 	, m_ambientOcclusion(false)
 	, m_ambientOcclusionStrength(0.f)
+	, m_bloom(false)
+	, m_bloomStrength(0.f)
+	, m_bloomSizes()
 	, m_sceneSamples(1)
 	, m_sceneLodBias(0.f)
 	, m_sceneProjection(1.f)
@@ -392,6 +405,10 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_aoConstants))) {
 			return false;
 		}
+		bufferDesc.ByteWidth = sizeof(BloomConstants);
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_bloomConstants))) {
+			return false;
+		}
 	}
 	
 	{
@@ -567,6 +584,10 @@ bool D3D11Renderer::compileShaders() {
 			{ "psAmbientOcclusionBlur", verticalDefines, std::addressof(m_aoBlurVerticalPixelShader) },
 			{ "psApplyAmbientOcclusion", nullptr, std::addressof(m_aoApplyPixelShader) },
 			{ "psDebugAmbientOcclusion", nullptr, std::addressof(m_debugAOPixelShader) },
+			{ "psBloomPrefilter", nullptr, std::addressof(m_bloomPrefilterPixelShader) },
+			{ "psBloomDownsample", nullptr, std::addressof(m_bloomDownsamplePixelShader) },
+			{ "psBloomUpsample", nullptr, std::addressof(m_bloomUpsamplePixelShader) },
+			{ "psBloomComposite", nullptr, std::addressof(m_bloomCompositePixelShader) },
 		};
 		for(const PixelShaderInfo & info : shaders) {
 			if(m_featureLevel < D3D_FEATURE_LEVEL_10_1) {
@@ -838,6 +859,24 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		}
 	}
 	
+	// Bloom chain from half the scene size down
+	if(m_bloom) {
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		desc.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+		for(size_t i = 0; i < BloomLevels; i++) {
+			m_bloomSizes[i] = Vec2i(std::max<s32>(size.x >> (i + 1), 1), std::max<s32>(size.y >> (i + 1), 1));
+			desc.Width = UINT(m_bloomSizes[i].x);
+			desc.Height = UINT(m_bloomSizes[i].y);
+			if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_bloomTargets[i]))
+			   || FAILED(m_device->CreateRenderTargetView(m_bloomTargets[i].Get(), nullptr, &m_bloomViews[i]))
+			   || FAILED(m_device->CreateShaderResourceView(m_bloomTargets[i].Get(), nullptr, &m_bloomResources[i]))) {
+				LogError << "Failed to create " << desc.Width << "x" << desc.Height << " Direct3D 11 bloom target";
+				releaseSceneTargets();
+				return false;
+			}
+		}
+	}
+	
 	m_sceneSize = size;
 	m_resetHistory = true;
 	
@@ -865,6 +904,12 @@ void D3D11Renderer::releaseSceneTargets() {
 	m_aoBlurResource.Reset();
 	m_aoBlurView.Reset();
 	m_aoBlurTarget.Reset();
+	for(size_t i = 0; i < BloomLevels; i++) {
+		unbindTextureView(m_bloomResources[i].Get());
+		m_bloomResources[i].Reset();
+		m_bloomViews[i].Reset();
+		m_bloomTargets[i].Reset();
+	}
 	m_sceneResolvedTargetView.Reset();
 	m_sceneResolvedView.Reset();
 	m_sceneResolved.Reset();
@@ -887,7 +932,7 @@ void D3D11Renderer::releaseSceneTargets() {
 }
 
 bool D3D11Renderer::sceneEnabled() const {
-	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion;
+	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion || m_bloom;
 }
 
 bool D3D11Renderer::upscalerInputsNeeded() const {
@@ -909,6 +954,84 @@ void D3D11Renderer::setAmbientOcclusion(float strength) {
 	if(!m_inScene) {
 		releaseSceneTargets();
 	}
+	
+}
+
+void D3D11Renderer::setBloom(float strength) {
+	
+	m_bloomStrength = glm::clamp(strength, 0.f, 1.f);
+	
+	bool enabled = (m_bloomStrength > 0.f);
+	if(enabled == m_bloom) {
+		return;
+	}
+	
+	m_bloom = enabled;
+	
+	if(!m_inScene) {
+		releaseSceneTargets();
+	}
+	
+}
+
+void D3D11Renderer::renderBloom(bool apply) {
+	
+	if(!m_bloomViews[0] || !m_sceneResolvedTargetView || !m_bloomPrefilterPixelShader || !m_bloomDownsamplePixelShader
+	   || !m_bloomUpsamplePixelShader || !m_bloomCompositePixelShader) {
+		return;
+	}
+	
+	m_context->RSSetState(getRasterizerState(false, 0, false, false));
+	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
+	ID3D11SamplerState * sampler = m_blitSampler.Get();
+	m_context->PSSetSamplers(0, 1, &sampler);
+	ID3D11Buffer * buffer = m_bloomConstants.Get();
+	m_context->PSSetConstantBuffers(4, 1, &buffer);
+	
+	ID3D11ShaderResourceView * none = nullptr;
+	
+	auto pass = [&](ID3D11RenderTargetView * target, const Vec2i & targetSize, ID3D11ShaderResourceView * source,
+	                const Vec2i & sourceSize, ID3D11PixelShader * shader, bool additive) {
+		
+		BloomConstants constants = { };
+		constants.params[0] = BloomThreshold;
+		constants.params[1] = BloomKnee;
+		// The upsampled levels add up, normalize the result
+		constants.params[2] = 6.f * m_bloomStrength / float(BloomLevels);
+		constants.source[0] = 1.f / float(sourceSize.x);
+		constants.source[1] = 1.f / float(sourceSize.y);
+		m_context->UpdateSubresource(m_bloomConstants.Get(), 0, nullptr, &constants, 0, 0);
+		
+		m_context->PSSetShaderResources(0, 1, &none);
+		m_context->OMSetRenderTargets(1, &target, nullptr);
+		m_context->PSSetShaderResources(0, 1, &source);
+		D3D11_VIEWPORT viewport = { 0.f, 0.f, float(targetSize.x), float(targetSize.y), 0.f, 1.f };
+		m_context->RSSetViewports(1, &viewport);
+		BlendingFactor dst = additive ? BlendOne : BlendZero;
+		m_context->OMSetBlendState(getBlendState(BlendOne, dst, false, true), nullptr, 0xffffffff);
+		drawFullscreen(shader);
+	};
+	
+	pass(m_bloomViews[0].Get(), m_bloomSizes[0], m_sceneResolvedView.Get(), m_sceneSize,
+	     m_bloomPrefilterPixelShader.Get(), false);
+	for(size_t i = 1; i < BloomLevels; i++) {
+		pass(m_bloomViews[i].Get(), m_bloomSizes[i], m_bloomResources[i - 1].Get(), m_bloomSizes[i - 1],
+		     m_bloomDownsamplePixelShader.Get(), false);
+	}
+	for(size_t i = BloomLevels - 1; i > 0; i--) {
+		pass(m_bloomViews[i - 1].Get(), m_bloomSizes[i - 1], m_bloomResources[i].Get(), m_bloomSizes[i],
+		     m_bloomUpsamplePixelShader.Get(), true);
+	}
+	
+	if(apply) {
+		pass(m_sceneResolvedTargetView.Get(), m_sceneSize, m_bloomResources[0].Get(), m_bloomSizes[0],
+		     m_bloomCompositePixelShader.Get(), true);
+	}
+	
+	m_context->PSSetShaderResources(0, 1, &none);
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	m_currentViews[0] = nullptr;
+	m_currentSamplers[0] = sampler;
 	
 }
 
@@ -1162,7 +1285,7 @@ void D3D11Renderer::beginScene() {
 	           std::max<s32>(s32(float(m_size.y) * scale + 0.5f), 1));
 	UINT samples = m_upscaler ? 1 : m_msaaSamples;
 	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded() || bool(m_aoView) != m_ambientOcclusion
-	    || samples != m_sceneSamples)
+	    || bool(m_bloomViews[0]) != m_bloom || samples != m_sceneSamples)
 	   && !createSceneTargets(size)) {
 		return;
 	}
@@ -1206,6 +1329,10 @@ void D3D11Renderer::endScene() {
 		renderAmbientOcclusion(m_sceneDebugView != 4);
 	}
 	
+	if(m_bloom) {
+		renderBloom(m_sceneDebugView != 5);
+	}
+	
 	ID3D11ShaderResourceView * upscaled = runUpscaler();
 	
 	// Upscale the scene to the window
@@ -1230,6 +1357,8 @@ void D3D11Renderer::endScene() {
 	} else if(m_sceneDebugView == 3 && m_debugObjectMotionPixelShader && m_objectMotionResource) {
 		view = m_objectMotionResource.Get();
 		shader = m_debugObjectMotionPixelShader.Get();
+	} else if(m_sceneDebugView == 5 && m_bloomResources[0]) {
+		view = m_bloomResources[0].Get();
 	} else if(m_sceneDebugView == 4 && m_debugAOPixelShader && m_aoResource) {
 		view = m_aoResource.Get();
 		shader = m_debugAOPixelShader.Get();
