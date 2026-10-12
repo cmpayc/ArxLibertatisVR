@@ -21,6 +21,8 @@
 #define ARX_GRAPHICS_D3D11_D3D11RENDERER_H
 
 #include <memory>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "graphics/d3d11/D3D11ComPtr.h"
@@ -33,6 +35,7 @@
 #include "platform/Platform.h"
 
 class D3D11TextureStage;
+class D3D11Upscaler;
 
 /*!
  * Direct3D 11 renderer backend.
@@ -118,6 +121,9 @@ public:
 	void setSceneScale(float scale) override;
 	void beginScene() override;
 	void endScene() override;
+	bool supportsUpscaler(std::string_view name) const override;
+	std::string getUpscalerError(std::string_view name) const override;
+	void setUpscaler(std::string_view name, std::string_view preset) override;
 	
 	D3D11TextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
@@ -176,6 +182,12 @@ private:
 	
 	//! Generate motion vectors and normalized depth for the scene
 	void renderSceneMotion();
+	
+	//! Create the requested upscaler if that was not tried yet
+	void updateUpscaler();
+	
+	//! Run the upscaler on the scene, returns the upscaled image or nullptr
+	ID3D11ShaderResourceView * runUpscaler();
 	
 	//! Draw a full-screen triangle with the given pixel shader
 	void drawFullscreen(ID3D11PixelShader * shader);
@@ -244,8 +256,8 @@ private:
 	ComPtr<ID3D11ShaderResourceView> m_linearDepthResource;
 	
 	// Scene camera tracking
-	glm::mat4x4 m_sceneViewProjection;
-	glm::mat4x4 m_previousViewProjection;
+	glm::mat4x4 m_sceneProjection;
+	glm::mat4x4 m_previousProjection;
 	glm::mat4x4 m_sceneView;
 	glm::mat4x4 m_previousView;
 	bool m_hasPreviousScene;
@@ -259,6 +271,16 @@ private:
 	Vec2f m_jitter;
 	
 	int m_sceneDebugView;
+	
+	// Temporal upscaler
+	std::string m_upscalerName;
+	std::string m_upscalerPreset;
+	bool m_upscalerCreated;
+	bool m_dlssFailed; //!< nvngx_dlss.dll was found but DLSS could not be initialized
+	std::unique_ptr<D3D11Upscaler> m_upscaler;
+	ComPtr<ID3D11Texture2D> m_upscaledTarget;
+	ComPtr<ID3D11ShaderResourceView> m_upscaledView;
+	LONGLONG m_lastUpscaleTime;
 	
 	ComPtr<ID3D11VertexShader> m_vertexShaders[VertexTypeCount];
 	ComPtr<ID3D11InputLayout> m_inputLayouts[VertexTypeCount];

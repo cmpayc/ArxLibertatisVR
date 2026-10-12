@@ -73,6 +73,7 @@ option(INSTALL_SCRIPTS "Install the data install script" ON)
 option(USE_OPENAL "Build the OpenAL audio backend" ON)
 option(USE_OPENGL "Build the OpenGL renderer backend" ON)
 option(USE_D3D11 "Build the Direct3D 11 renderer backend (Windows only)" ON)
+option(USE_DLSS "Build NVIDIA DLSS support for the Direct3D 11 renderer (needs the DLSS SDK)" ON)
 option(USE_WINHTTP "Use the native WinHTTP API instead of CURL on Windows" ON)
 option(USE_NATIVE_FS "Use the native filesystem backend directly instead of boost" ON)
 set(default_USE_X11 OFF)
@@ -1308,6 +1309,19 @@ if(USE_D3D11 AND WIN32 AND ARX_HAVE_SDL2)
 	# The Direct3D headers define macros such as 'interface' that break other code in the unity build
 	set_source_files_properties(${GRAPHICS_D3D11_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
 	list(APPEND ARX_LIBRARIES d3d11 dxgi d3dcompiler)
+	if(USE_DLSS AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+		# NVIDIA DLSS SDK (https://github.com/NVIDIA/DLSS), nvngx_dlss.dll is loaded at runtime
+		find_path(DLSS_INCLUDE_DIR nvsdk_ngx.h PATH_SUFFIXES include)
+		find_library(DLSS_LIBRARY nvsdk_ngx_d PATH_SUFFIXES lib/x64)
+		if(DLSS_INCLUDE_DIR AND DLSS_LIBRARY)
+			set(ARX_HAVE_DLSS 1)
+			set(GRAPHICS_DLSS_SOURCES src/graphics/d3d11/D3D11DLSS.cpp)
+			list(APPEND GRAPHICS_SOURCES ${GRAPHICS_DLSS_SOURCES})
+			set_source_files_properties(${GRAPHICS_DLSS_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
+			include_directories(SYSTEM ${DLSS_INCLUDE_DIR})
+			list(APPEND ARX_LIBRARIES ${DLSS_LIBRARY})
+		endif()
+	endif()
 endif()
 
 # Windowing / input
@@ -1987,6 +2001,7 @@ print_configuration("Renderer"
 	ARX_HAVE_EPOXY "OpenGL ES (libepoxy)"
 	ARX_HAVE_GLEW  "OpenGL (GLEW)"
 	ARX_HAVE_D3D11 "Direct3D 11"
+	ARX_HAVE_DLSS  "DLSS"
 )
 print_configuration("Audio features"
 	ARX_HAVE_OPENAL_EFX  "EFX"

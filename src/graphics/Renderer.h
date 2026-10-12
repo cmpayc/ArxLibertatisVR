@@ -22,6 +22,8 @@
 
 #include <stddef.h>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "graphics/Color.h"
@@ -400,6 +402,27 @@ public:
 	
 	//! Upscale the 3D scene to the window, following draw calls render at the window resolution
 	virtual void endScene() { }
+	
+	//! \return true if the named temporal upscaler (e.g. "dlss") is built into this renderer
+	[[nodiscard]] virtual bool supportsUpscaler(std::string_view name) const { ARX_UNUSED(name); return false; }
+	
+	/*!
+	 * Check if a supported upscaler can actually be used.
+	 * \return an empty string if the upscaler is available, otherwise a short reason
+	 */
+	[[nodiscard]] virtual std::string getUpscalerError(std::string_view name) const {
+		ARX_UNUSED(name);
+		return "not supported";
+	}
+	
+	/*!
+	 * Select the temporal upscaler for the 3D scene.
+	 * \param name "off" or an upscaler supported by \ref supportsUpscaler()
+	 * \param preset upscaler-specific quality preset
+	 */
+	virtual void setUpscaler(std::string_view name, std::string_view preset) {
+		ARX_UNUSED(name), ARX_UNUSED(preset);
+	}
 	
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }

@@ -224,6 +224,11 @@ bool addSearchRoot(std::vector<path> & result, const path & dir, bool filter) {
 	if(is_regular_file(configFile)) {
 		std::string data = fs::read(configFile);
 		for(std::string_view line : util::splitIgnoreEmpty(data, '\n')) {
+			// The file may have Windows line endings
+			line = util::trimRight(line, "\r");
+			if(line.empty()) {
+				continue;
+			}
 			path datadir = dir / line;
 			if(addSearchPath(result, datadir, filter)) {
 				LogDebug("got data dir from data.dirs file in dir: " << datadir);

@@ -2038,6 +2038,7 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	renderer.SetFogColor(g_fogColor);
 	
 	renderer.setSceneScale(config.video.renderScale);
+	renderer.setUpscaler(config.video.upscaler, config.video.dlssPreset);
 	
 	ComputePortalVertexBuffer();
 	std::unique_ptr<VertexBuffer<SMY_VERTEX3>> vb3 = renderer.createVertexBuffer3(4000, Renderer::Stream);

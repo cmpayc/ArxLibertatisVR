@@ -909,9 +909,17 @@ public:
 	RenderOptionsMenuPage()
 		: MenuPage(Page_OptionsRender)
 		, m_alphaCutoutAntialiasingCycleText(nullptr)
+		, m_renderScaleCycleText(nullptr)
+		, m_upscalerCycleText(nullptr)
+		, m_dlssPresetCycleText(nullptr)
+		, m_dlssAvailable(false)
 	{ }
 	
 	CycleTextWidget * m_alphaCutoutAntialiasingCycleText;
+	CycleTextWidget * m_renderScaleCycleText;
+	CycleTextWidget * m_upscalerCycleText;
+	CycleTextWidget * m_dlssPresetCycleText;
+	bool m_dlssAvailable;
 	
 	void init() override {
 		
@@ -921,7 +929,7 @@ public:
 		{
 			std::string_view label = getLocalised("system_menus_options_video_renderer");
 			auto slider = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
-			slider->valueChanged = [](int pos, std::string_view /* string */) {
+			slider->valueChanged = [this](int pos, std::string_view /* string */) {
 				switch(pos) {
 					case 0:  config.video.renderer = "auto"; break;
 					case 1:  config.video.renderer = "OpenGL";  break;
@@ -930,6 +938,7 @@ public:
 					#endif
 					default: arx_unreachable();
 				}
+				setUpscalerState();
 			};
 			slider->addEntry("Auto-Select");
 			slider->selectLast();
@@ -1026,8 +1035,72 @@ public:
 					cb->selectLast();
 				}
 			}
+			m_renderScaleCycleText = cb.get();
 			addCenter(std::move(cb));
 		}
+		
+		if(GRenderer->supportsUpscaler("dlss")) {
+			std::string_view label = getLocalised("system_menus_options_video_upscaler", "Upscaler");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [this](int pos, std::string_view /* string */) {
+				switch(pos) {
+					case 0: config.video.upscaler = "off"; break;
+					case 1: config.video.upscaler = "dlss"; break;
+					default: arx_unreachable();
+				}
+				GRenderer->setUpscaler(config.video.upscaler, config.video.dlssPreset);
+				setUpscalerState();
+			};
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off", "Off"));
+			cb->selectLast();
+			std::string error = GRenderer->getUpscalerError("dlss");
+			m_dlssAvailable = error.empty();
+			if(m_dlssAvailable) {
+				cb->addEntry("DLSS");
+				if(config.video.upscaler == "dlss") {
+					cb->selectLast();
+				}
+			} else {
+				// Show why DLSS can't be used, the row is disabled in setUpscalerState()
+				cb->addEntry("DLSS: " + error);
+				cb->selectLast();
+			}
+			m_upscalerCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		if(GRenderer->supportsUpscaler("dlss")) {
+			// DLSS render presets: J and K use the DLSS 4 transformer model,
+			// L and M the DLSS 4.5 second generation transformer model
+			struct Preset {
+				std::string_view value;
+				std::string_view name;
+			};
+			static constexpr Preset presets[] = {
+				{ "", "Default" },
+				{ "J", "J (DLSS 4)" },
+				{ "K", "K (DLSS 4)" },
+				{ "L", "L (DLSS 4.5)" },
+				{ "M", "M (DLSS 4.5)" },
+			};
+			std::string_view label = getLocalised("system_menus_options_video_dlss_preset", "DLSS preset");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				arx_assert(pos >= 0 && size_t(pos) < std::size(presets));
+				config.video.dlssPreset = presets[pos].value;
+				GRenderer->setUpscaler(config.video.upscaler, config.video.dlssPreset);
+			};
+			for(const Preset & preset : presets) {
+				cb->addEntry(preset.name);
+				if(preset.value == config.video.dlssPreset || preset.value.empty()) {
+					cb->selectLast();
+				}
+			}
+			m_dlssPresetCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		setUpscalerState();
 		
 		{
 			std::string_view label = getLocalised("system_menus_options_video_texture_filter_anisotropic");
@@ -1088,6 +1161,23 @@ public:
 	}
 	
 private:
+	
+	// Scene scaling and upscalers are only available with the Direct3D 11 renderer
+	void setUpscalerState() {
+		
+		bool direct3D = (config.video.renderer == "Direct3D 11");
+		
+		if(m_renderScaleCycleText) {
+			m_renderScaleCycleText->setEnabled(direct3D);
+		}
+		if(m_upscalerCycleText) {
+			m_upscalerCycleText->setEnabled(direct3D && m_dlssAvailable);
+		}
+		if(m_dlssPresetCycleText) {
+			m_dlssPresetCycleText->setEnabled(direct3D && m_dlssAvailable && config.video.upscaler == "dlss");
+		}
+		
+	}
 	
 	void setAlphaCutoutAntialisingState() {
 		

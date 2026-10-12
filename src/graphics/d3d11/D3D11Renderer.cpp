@@ -29,6 +29,8 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "Configure.h"
+
 #include "core/Application.h"
 #include "core/Config.h"
 #include "gui/Credits.h"
@@ -36,6 +38,7 @@
 #include "graphics/d3d11/D3D11Shaders.h"
 #include "graphics/d3d11/D3D11Texture.h"
 #include "graphics/d3d11/D3D11TextureStage.h"
+#include "graphics/d3d11/D3D11Upscaler.h"
 #include "graphics/d3d11/D3D11VertexBuffer.h"
 #include "graphics/image/Image.h"
 #include "io/log/Logger.h"
@@ -138,8 +141,8 @@ D3D11Renderer::D3D11Renderer()
 	, m_sceneSize(0)
 	, m_sceneSamples(1)
 	, m_sceneLodBias(0.f)
-	, m_sceneViewProjection(1.f)
-	, m_previousViewProjection(1.f)
+	, m_sceneProjection(1.f)
+	, m_previousProjection(1.f)
 	, m_previousView(1.f)
 	, m_hasPreviousScene(false)
 	, m_sceneRenderedLastFrame(false)
@@ -149,6 +152,9 @@ D3D11Renderer::D3D11Renderer()
 	, m_jitterIndex(0)
 	, m_jitter(0.f)
 	, m_sceneDebugView(0)
+	, m_upscalerCreated(false)
+	, m_dlssFailed(false)
+	, m_lastUpscaleTime(0)
 	, m_maximumAnisotropy(1.f)
 	, m_maximumSupportedAnisotropy(1.f)
 	, m_wireframe(false)
@@ -636,6 +642,10 @@ void D3D11Renderer::releaseSizeDependentResources() {
 	m_depthView.Reset();
 	m_depthTarget.Reset();
 	
+	unbindTextureView(m_upscaledView.Get());
+	m_upscaledView.Reset();
+	m_upscaledTarget.Reset();
+	
 	releaseSceneTargets();
 	
 	invalidateCachedState();
@@ -646,7 +656,7 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 	
 	releaseSceneTargets();
 	
-	m_sceneSamples = m_msaaSamples;
+	m_sceneSamples = m_upscaler ? 1 : m_msaaSamples;
 	
 	D3D11_TEXTURE2D_DESC desc = {};
 	desc.Width = UINT(size.x);
@@ -785,7 +795,7 @@ static float halton(u32 index, u32 base) {
 void D3D11Renderer::updateSceneCamera() {
 	
 	m_sceneView = m_view;
-	m_sceneViewProjection = m_projection * m_view;
+	m_sceneProjection = m_projection;
 	
 	if(!m_hasPreviousScene || !m_sceneRenderedLastFrame) {
 		m_resetHistory = true;
@@ -840,7 +850,10 @@ void D3D11Renderer::renderSceneMotion() {
 	MotionConstants constants;
 	glm::mat4x4 reprojection(1.f);
 	if(!m_resetHistory) {
-		reprojection = m_previousViewProjection * glm::inverse(m_sceneViewProjection);
+		// World coordinates are large (thousands of units) - single precision is not enough to cancel them out
+		// and results in sub-pixel noise in the motion vectors. Compute the relative camera motion first.
+		glm::dmat4 relative = glm::dmat4(m_previousView) * glm::inverse(glm::dmat4(m_sceneView));
+		reprojection = glm::mat4x4(glm::dmat4(m_previousProjection) * relative * glm::inverse(glm::dmat4(m_sceneProjection)));
 	}
 	std::memcpy(constants.reprojection, &reprojection, sizeof(constants.reprojection));
 	constants.targetSize[0] = float(m_sceneSize.x);
@@ -931,14 +944,22 @@ void D3D11Renderer::setSceneScale(float scale) {
 
 void D3D11Renderer::beginScene() {
 	
-	if(m_inScene || !sceneEnabled() || !m_colorView) {
+	if(m_inScene || !m_colorView) {
+		return;
+	}
+	
+	updateUpscaler();
+	
+	if(!sceneEnabled()) {
 		return;
 	}
 	
 	float scale = std::min(m_sceneScale, 1.f);
 	Vec2i size(std::max<s32>(s32(float(m_size.x) * scale + 0.5f), 1),
 	           std::max<s32>(s32(float(m_size.y) * scale + 0.5f), 1));
-	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded()) && !createSceneTargets(size)) {
+	UINT samples = m_upscaler ? 1 : m_msaaSamples;
+	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded() || samples != m_sceneSamples)
+	   && !createSceneTargets(size)) {
 		return;
 	}
 	
@@ -970,6 +991,8 @@ void D3D11Renderer::endScene() {
 	
 	renderSceneMotion();
 	
+	ID3D11ShaderResourceView * upscaled = runUpscaler();
+	
 	// Upscale the scene to the window
 	
 	ID3D11RenderTargetView * colorView = m_colorView.Get();
@@ -981,7 +1004,7 @@ void D3D11Renderer::endScene() {
 	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
 	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
 	
-	ID3D11ShaderResourceView * view = m_sceneResolvedView.Get();
+	ID3D11ShaderResourceView * view = upscaled ? upscaled : m_sceneResolvedView.Get();
 	ID3D11PixelShader * shader = m_blitPixelShader.Get();
 	if(m_sceneDebugView == 1 && m_debugDepthPixelShader && m_linearDepthResource) {
 		view = m_linearDepthResource.Get();
@@ -1001,7 +1024,7 @@ void D3D11Renderer::endScene() {
 	m_context->ClearDepthStencilView(m_depthView.Get(), D3D11_CLEAR_DEPTH, 1.f, 0);
 	
 	// Remember the camera for the motion vectors of the next frame
-	m_previousViewProjection = m_sceneViewProjection;
+	m_previousProjection = m_sceneProjection;
 	m_previousView = m_sceneView;
 	m_hasPreviousScene = true;
 	m_resetHistory = false;
@@ -1010,6 +1033,151 @@ void D3D11Renderer::endScene() {
 	m_currentViews[0] = view;
 	m_currentSamplers[0] = sampler;
 	
+}
+
+bool D3D11Renderer::supportsUpscaler(std::string_view name) const {
+	
+	#if ARX_HAVE_DLSS
+	if(name == "dlss") {
+		return true;
+	}
+	#endif
+	
+	ARX_UNUSED(name);
+	return false;
+}
+
+std::string D3D11Renderer::getUpscalerError(std::string_view name) const {
+	
+	if(!supportsUpscaler(name)) {
+		return "not supported";
+	}
+	
+	#if ARX_HAVE_DLSS
+	if(name == "dlss") {
+		if(!d3d11::findDLSSLibrary(config.video.upscalerPath)) {
+			return "nvngx_dlss.dll not found";
+		}
+		if(m_dlssFailed) {
+			return "GPU not supported";
+		}
+	}
+	#endif
+	
+	return std::string();
+}
+
+void D3D11Renderer::setUpscaler(std::string_view name, std::string_view preset) {
+	
+	if(name == m_upscalerName && preset == m_upscalerPreset) {
+		return;
+	}
+	
+	m_upscalerName = name;
+	m_upscalerPreset = preset;
+	
+	m_upscaler.reset();
+	m_upscalerCreated = false;
+	m_jitterEnabled = false;
+	
+	if(!m_inScene) {
+		releaseSceneTargets();
+	}
+	
+}
+
+void D3D11Renderer::updateUpscaler() {
+	
+	if(m_upscalerCreated) {
+		return;
+	}
+	m_upscalerCreated = true;
+	
+	if(m_upscalerName.empty() || m_upscalerName == "off") {
+		return;
+	}
+	
+	#if ARX_HAVE_DLSS
+	if(m_upscalerName == "dlss") {
+		if(!d3d11::findDLSSLibrary(config.video.upscalerPath)) {
+			// nvngx_dlss.dll is not distributed with Arx Libertatis
+			LogWarning << "DLSS not available: nvngx_dlss.dll not found - copy it from the NVIDIA DLSS SDK"
+			           << " or another game next to arx.exe";
+		} else {
+			m_upscaler = d3d11::createDLSSUpscaler(m_device.Get(), m_upscalerPreset, config.video.upscalerPath);
+			m_dlssFailed = !m_upscaler;
+		}
+	}
+	#endif
+	
+	if(!m_upscaler) {
+		LogWarning << "Upscaler \"" << m_upscalerName << "\" not available, using bilinear scaling";
+	}
+	
+	// Temporal upscalers need sub-pixel jitter and a scene without MSAA
+	m_jitterEnabled = (m_upscaler != nullptr);
+	
+}
+
+ID3D11ShaderResourceView * D3D11Renderer::runUpscaler() {
+	
+	if(!m_upscaler || !m_motionTarget || !m_linearDepthTarget) {
+		return nullptr;
+	}
+	
+	if(!m_upscaledTarget) {
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = UINT(m_size.x);
+		desc.Height = UINT(m_size.y);
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = ColorFormat;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_upscaledTarget))
+		   || FAILED(m_device->CreateShaderResourceView(m_upscaledTarget.Get(), nullptr, &m_upscaledView))) {
+			LogError << "Failed to create " << m_size.x << "x" << m_size.y << " Direct3D 11 upscaler output";
+			m_upscaledTarget.Reset();
+			m_upscaledView.Reset();
+			return nullptr;
+		}
+	}
+	
+	// The upscaler reads the scene textures and writes the output
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	ID3D11ShaderResourceView * none[TextureStageCount] = { };
+	m_context->PSSetShaderResources(0, TextureStageCount, none);
+	for(UINT i = 0; i < TextureStageCount; i++) {
+		m_currentViews[i] = nullptr;
+	}
+	
+	LARGE_INTEGER now, frequency;
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&frequency);
+	float frameTime = 1000.f / 60.f;
+	if(m_lastUpscaleTime != 0) {
+		frameTime = float(double(now.QuadPart - m_lastUpscaleTime) * 1000.0 / double(frequency.QuadPart));
+	}
+	m_lastUpscaleTime = now.QuadPart;
+	
+	D3D11Upscaler::Inputs inputs;
+	inputs.color = m_sceneResolved.Get();
+	inputs.depth = m_linearDepthTarget.Get();
+	inputs.motion = m_motionTarget.Get();
+	inputs.output = m_upscaledTarget.Get();
+	inputs.renderSize = m_sceneSize;
+	inputs.outputSize = m_size;
+	inputs.jitter = m_jitter;
+	inputs.reset = m_resetHistory;
+	inputs.frameTime = frameTime;
+	
+	bool success = m_upscaler->evaluate(m_context.Get(), inputs);
+	
+	// The upscaler changes the device state
+	invalidateCachedState();
+	
+	return success ? m_upscaledView.Get() : nullptr;
 }
 
 void D3D11Renderer::reinit() {
@@ -1711,9 +1879,11 @@ void D3D11Renderer::flushState(VertexType type) {
 		TestNone,
 	};
 	
-	bool useSS = m_hasMSAA && m_pixelShaderSampleShading
+	// The scene has no MSAA when using a temporal upscaler
+	bool hasMSAA = m_hasMSAA && !(m_inScene && m_sceneSamples <= 1);
+	bool useSS = hasMSAA && m_pixelShaderSampleShading
 	             && config.video.alphaCutoutAntialiasing == int(CrispAlphaCutoutAA);
-	bool useA2C = m_hasMSAA && config.video.alphaCutoutAntialiasing == int(FuzzyAlphaCutoutAA);
+	bool useA2C = hasMSAA && config.video.alphaCutoutAntialiasing == int(FuzzyAlphaCutoutAA);
 	
 	/* When rendering alpha cutouts with alpha blending enabled we still
 	 * need to 'discard' transparent texels, as blending might not use the src alpha!

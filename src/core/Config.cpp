@@ -70,6 +70,9 @@ constexpr const std::string_view
 	realtimeOverride,
 	bufferUpload,
 	extensionOverride,
+	upscaler = "off",
+	dlssPreset = "K",
+	upscalerPath,
 	thumbnailSize = BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_WIDTH) "x"
 	                BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_HEIGHT);
 
@@ -222,6 +225,9 @@ constexpr const std::string_view
 	antialiasing = "antialiasing",
 	maxAnisotropicFiltering = "max_anisotropic_filtering",
 	renderScale = "render_scale",
+	upscaler = "upscaler",
+	dlssPreset = "dlss_preset",
+	upscalerPath = "upscaler_path",
 	colorkeyAntialiasing = "colorkey_antialiasing",
 	alphaCutoutAntialiasing = "alpha_cutout_antialiasing",
 	bufferSize = "buffer_size",
@@ -482,6 +488,9 @@ bool Config::save() {
 	writer.writeKey(Key::antialiasing, video.antialiasing);
 	writer.writeKey(Key::maxAnisotropicFiltering, video.maxAnisotropicFiltering);
 	writer.writeKey(Key::renderScale, video.renderScale);
+	writer.writeKey(Key::upscaler, video.upscaler);
+	writer.writeKey(Key::dlssPreset, video.dlssPreset);
+	writer.writeKey(Key::upscalerPath, video.upscalerPath);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
 	writer.writeKey(Key::alphaCutoutAntialiasing, video.alphaCutoutAntialiasing);
 	writer.writeKey(Key::bufferSize, video.bufferSize);
@@ -617,6 +626,9 @@ bool Config::init(const fs::path & file) {
 	video.maxAnisotropicFiltering = std::max(anisoFiltering, 1);
 	float renderScale = reader.getKey(Section::Video, Key::renderScale, Default::renderScale);
 	video.renderScale = glm::clamp(renderScale, 0.25f, 1.f);
+	video.upscaler = reader.getKey(Section::Video, Key::upscaler, Default::upscaler);
+	video.dlssPreset = reader.getKey(Section::Video, Key::dlssPreset, Default::dlssPreset);
+	video.upscalerPath = reader.getKey(Section::Video, Key::upscalerPath, Default::upscalerPath);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);
 	int alphaCutoutAA = reader.getKey(Section::Video, Key::alphaCutoutAntialiasing, Default::alphaCutoutAntialiasing);
 	video.alphaCutoutAntialiasing = glm::clamp(alphaCutoutAA, 0, 2);

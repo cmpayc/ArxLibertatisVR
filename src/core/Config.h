@@ -141,6 +141,9 @@ public:
 		bool antialiasing;
 		int maxAnisotropicFiltering;
 		float renderScale;
+		std::string upscaler;
+		std::string dlssPreset;
+		std::string upscalerPath;
 		bool colorkeyAntialiasing;
 		int alphaCutoutAntialiasing;
 		
