@@ -408,11 +408,12 @@ public:
 	
 	/*!
 	 * Check if a supported upscaler can actually be used.
-	 * \return an empty string if the upscaler is available, otherwise a short reason
+	 * \return an empty string if the upscaler is available, otherwise the reason as an identifier:
+	 *         "dll_missing" if a required library was not found or "unsupported"
 	 */
 	[[nodiscard]] virtual std::string getUpscalerError(std::string_view name) const {
 		ARX_UNUSED(name);
-		return "not supported";
+		return "unsupported";
 	}
 	
 	/*!

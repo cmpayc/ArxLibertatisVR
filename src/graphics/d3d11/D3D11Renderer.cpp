@@ -1085,16 +1085,16 @@ bool D3D11Renderer::supportsUpscaler(std::string_view name) const {
 std::string D3D11Renderer::getUpscalerError(std::string_view name) const {
 	
 	if(!supportsUpscaler(name)) {
-		return "not supported";
+		return "unsupported";
 	}
 	
 	#if ARX_HAVE_DLSS
 	if(name == "dlss") {
 		if(!d3d11::findDLSSLibrary(config.video.upscalerPath)) {
-			return "nvngx_dlss.dll not found";
+			return "dll_missing";
 		}
 		if(m_dlssFailed) {
-			return "GPU not supported";
+			return "unsupported";
 		}
 	}
 	#endif

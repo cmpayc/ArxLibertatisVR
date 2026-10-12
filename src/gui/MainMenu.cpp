@@ -1022,7 +1022,7 @@ public:
 		}
 		
 		if(GRenderer->supportsSceneScale()) {
-			std::string_view label = getLocalised("system_menus_options_video_render_scale", "Render scale");
+			std::string_view label = getLocalised("system_menus_options_video_render_scale");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
 			cb->valueChanged = [](int /* pos */, std::string_view string) {
 				float scale = float(util::toInt(string.substr(0, string.size() - 1)).value_or(100)) / 100.f;
@@ -1040,7 +1040,7 @@ public:
 		}
 		
 		if(GRenderer->supportsUpscaler("dlss")) {
-			std::string_view label = getLocalised("system_menus_options_video_upscaler", "Upscaler");
+			std::string_view label = getLocalised("system_menus_options_video_upscaler");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
 			cb->valueChanged = [this](int pos, std::string_view /* string */) {
 				switch(pos) {
@@ -1051,7 +1051,7 @@ public:
 				GRenderer->setUpscaler(config.video.upscaler, config.video.dlssPreset);
 				setUpscalerState();
 			};
-			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off", "Off"));
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
 			cb->selectLast();
 			std::string error = GRenderer->getUpscalerError("dlss");
 			m_dlssAvailable = error.empty();
@@ -1062,7 +1062,8 @@ public:
 				}
 			} else {
 				// Show why DLSS can't be used, the row is disabled in setUpscalerState()
-				cb->addEntry("DLSS: " + error);
+				std::string reason = "system_menus_options_video_upscaler_" + error;
+				cb->addEntry("DLSS: " + std::string(getLocalised(reason)));
 				cb->selectLast();
 			}
 			m_upscalerCycleText = cb.get();
@@ -1077,13 +1078,13 @@ public:
 				std::string_view name;
 			};
 			static constexpr Preset presets[] = {
-				{ "", "Default" },
+				{ "", "" }, // localised
 				{ "J", "J (DLSS 4)" },
 				{ "K", "K (DLSS 4)" },
 				{ "L", "L (DLSS 4.5)" },
 				{ "M", "M (DLSS 4.5)" },
 			};
-			std::string_view label = getLocalised("system_menus_options_video_dlss_preset", "DLSS preset");
+			std::string_view label = getLocalised("system_menus_options_video_dlss_preset");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
 			cb->valueChanged = [](int pos, std::string_view /* string */) {
 				arx_assert(pos >= 0 && size_t(pos) < std::size(presets));
@@ -1091,7 +1092,11 @@ public:
 				GRenderer->setUpscaler(config.video.upscaler, config.video.dlssPreset);
 			};
 			for(const Preset & preset : presets) {
-				cb->addEntry(preset.name);
+				if(preset.value.empty()) {
+					cb->addEntry(getLocalised("system_menus_options_video_dlss_preset_default"));
+				} else {
+					cb->addEntry(preset.name);
+				}
 				if(preset.value == config.video.dlssPreset || preset.value.empty()) {
 					cb->selectLast();
 				}
