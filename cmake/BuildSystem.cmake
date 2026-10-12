@@ -73,9 +73,20 @@ function(enable_unity_build UB_SUFFIX SOURCE_VARIABLE_NAME)
 	set(currentIdx 1)
 	foreach(source_file IN LISTS files)
 		
+		get_source_file_property(separate_unit "${source_file}" ARX_SEPARATE_UNIT)
+		
 		if(source_file MATCHES "\\.(rc|mm|manifest|c)$")
 			
 			# .rc, .mm, .manifest and .c files need to be compiled separately
+			
+		elseif(separate_unit)
+			
+			# Sources that include headers which pollute the global namespace
+			get_short_filename(relative_file "${source_file}")
+			if(NOT ARX_HAVE_RELATIVE_FILE)
+				set_property(SOURCE "${source_file}" APPEND PROPERTY COMPILE_DEFINITIONS
+				             "ARX_FILE=\"${relative_file}\"")
+			endif()
 			
 		else()
 			

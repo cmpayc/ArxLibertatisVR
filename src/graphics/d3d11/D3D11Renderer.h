@@ -1,0 +1,250 @@
+/*
+ * Copyright 2026 Arx Libertatis VR contributors <kazakov.s.fl@gmail.com>
+ *
+ * This file is part of Arx Libertatis.
+ *
+ * Arx Libertatis is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Arx Libertatis is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Arx Libertatis.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef ARX_GRAPHICS_D3D11_D3D11RENDERER_H
+#define ARX_GRAPHICS_D3D11_D3D11RENDERER_H
+
+#include <memory>
+#include <unordered_map>
+
+#include "graphics/d3d11/D3D11ComPtr.h"
+
+#include <boost/intrusive/list.hpp>
+
+#include "graphics/Renderer.h"
+#include "graphics/d3d11/D3D11Texture.h"
+#include "math/Rectangle.h"
+#include "platform/Platform.h"
+
+class D3D11TextureStage;
+
+/*!
+ * Direct3D 11 renderer backend.
+ *
+ * Emulates the fixed-function pipeline used by the OpenGL backend with a small set
+ * of shaders. All rendering goes to an offscreen color + depth target that is
+ * resolved / copied to the swap chain back buffer in \ref present().
+ */
+class D3D11Renderer final : public Renderer {
+
+public:
+	
+	template <class T>
+	using ComPtr = d3d11::ComPtr<T>;
+	
+	enum VertexType {
+		VertexTL,
+		VertexWorld,
+		VertexWorld3,
+		VertexTypeCount
+	};
+	
+	D3D11Renderer();
+	~D3D11Renderer() override;
+	
+	/*!
+	 * Create the device and swap chain for the given window.
+	 * Must be called before \ref initialize().
+	 */
+	bool create(HWND window, int maxMSAALevel);
+	
+	void initialize() override;
+	
+	void beforeResize(bool wasOrIsFullscreen) override;
+	void afterResize() override;
+	
+	// Matrices
+	void SetViewMatrix(const glm::mat4x4 & matView) override;
+	void SetProjectionMatrix(const glm::mat4x4 & matProj) override;
+	
+	// Texture management
+	void ReleaseAllTextures() override;
+	void RestoreAllTextures() override;
+	void reloadColorKeyTextures() override;
+	
+	// Factory
+	Texture * createTexture() override;
+	
+	// Viewport
+	void SetViewport(const Rect & viewport) override;
+	
+	void SetScissor(const Rect & rect) override;
+	
+	// Render Target
+	void Clear(BufferFlags bufferFlags, Color clearColor = Color(), float clearDepth = 1.f,
+	           size_t nrects = 0, Rect * rect = 0) override;
+	
+	// Fog
+	void SetFogColor(Color color) override;
+	void SetFogParams(float fogStart, float fogEnd) override;
+	
+	// Rasterizer
+	void SetAntialiasing(bool enable) override;
+	void SetFillMode(FillMode mode) override;
+	
+	float getMaxAnisotropy() const { return m_maximumAnisotropy; }
+	float getMaxSupportedAnisotropy() const override { return m_maximumSupportedAnisotropy; }
+	void setMaxAnisotropy(float value) override;
+	
+	AlphaCutoutAntialising getMaxSupportedAlphaCutoutAntialiasing() const override;
+	
+	std::unique_ptr<VertexBuffer<TexturedVertex>> createVertexBufferTL(size_t capacity, BufferUsage usage) override;
+	std::unique_ptr<VertexBuffer<SMY_VERTEX>> createVertexBuffer(size_t capacity, BufferUsage usage) override;
+	std::unique_ptr<VertexBuffer<SMY_VERTEX3>> createVertexBuffer3(size_t capacity, BufferUsage usage) override;
+	
+	void drawIndexed(Primitive primitive, const TexturedVertex * vertices, size_t nvertices,
+	                 unsigned short * indices, size_t nindices) override;
+	
+	bool getSnapshot(Image & image) override;
+	bool getSnapshot(Image & image, size_t width, size_t height) override;
+	
+	D3D11TextureStage * GetTextureStage(size_t textureStage) {
+		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
+	}
+	
+	UINT msaaSamples() const { return m_msaaSamples; }
+	
+	void setVSync(int vsync) { m_vsync = vsync; }
+	void present();
+	
+	ID3D11Device * device() const { return m_device.Get(); }
+	ID3D11DeviceContext * context() const { return m_context.Get(); }
+	
+	//! Draw count vertices starting at offset from a vertex buffer.
+	void drawBuffer(VertexType type, Primitive primitive, ID3D11Buffer * buffer, UINT stride,
+	                size_t count, size_t offset);
+	
+	//! Draw indexed vertices from a vertex buffer, indices are relative to baseVertex.
+	void drawBufferIndexed(VertexType type, Primitive primitive, ID3D11Buffer * buffer, UINT stride,
+	                       size_t baseVertex, const unsigned short * indices, size_t nindices);
+	
+	//! Remove all references to a texture that is being destroyed.
+	void onTextureDestroyed(D3D11Texture * texture);
+	
+	//! Unbind a texture view that is about to be released.
+	void unbindTextureView(ID3D11ShaderResourceView * view);
+	
+private:
+	
+	struct RingBuffer {
+		
+		ComPtr<ID3D11Buffer> buffer;
+		size_t size = 0;
+		size_t pos = 0;
+		
+		//! Upload data and return the byte offset, or size_t(-1) on failure.
+		size_t upload(ID3D11DeviceContext * context, const void * data, size_t bytes, size_t alignment);
+		
+	};
+	
+	bool createSizeDependentResources();
+	void releaseSizeDependentResources();
+	bool compileShaders();
+	
+	void reinit();
+	void shutdown();
+	
+	void flushState(VertexType type);
+	void bindVertexBuffer(VertexType type, ID3D11Buffer * buffer, UINT stride, UINT offset);
+	void setPrimitive(Primitive primitive);
+	bool drawFan(size_t count, size_t baseVertex);
+	bool uploadIndices(const unsigned short * indices, size_t nindices, Primitive primitive, UINT & start,
+	                   size_t & count);
+	void invalidateCachedState();
+	
+	ID3D11RasterizerState * getRasterizerState(bool cull, unsigned depthOffset, bool wireframe, bool scissor);
+	ID3D11BlendState * getBlendState(BlendingFactor src, BlendingFactor dst, bool alphaToCoverage,
+	                                 bool colorWrite);
+	ID3D11DepthStencilState * getDepthState(bool test, bool write);
+	
+	HWND m_window;
+	
+	ComPtr<ID3D11Device> m_device;
+	ComPtr<ID3D11DeviceContext> m_context;
+	ComPtr<IDXGISwapChain1> m_swapChain;
+	D3D_FEATURE_LEVEL m_featureLevel;
+	bool m_flipModel;
+	bool m_allowTearing;
+	int m_vsync;
+	
+	Vec2i m_size;
+	UINT m_msaaSamples;
+	ComPtr<ID3D11Texture2D> m_colorTarget;
+	ComPtr<ID3D11RenderTargetView> m_colorView;
+	ComPtr<ID3D11Texture2D> m_depthTarget;
+	ComPtr<ID3D11DepthStencilView> m_depthView;
+	
+	ComPtr<ID3D11VertexShader> m_vertexShaders[VertexTypeCount];
+	ComPtr<ID3D11InputLayout> m_inputLayouts[VertexTypeCount];
+	ComPtr<ID3D11PixelShader> m_pixelShader;
+	ComPtr<ID3D11PixelShader> m_pixelShaderSampleShading;
+	ComPtr<ID3D11VertexShader> m_clearVertexShader;
+	ComPtr<ID3D11PixelShader> m_clearPixelShader;
+	ComPtr<ID3D11Buffer> m_vsConstants;
+	ComPtr<ID3D11Buffer> m_psConstants;
+	ComPtr<ID3D11Buffer> m_clearConstants;
+	
+	RingBuffer m_vertexRing;
+	RingBuffer m_indexRing;
+	std::vector<unsigned short> m_indexScratch;
+	
+	std::unordered_map<u32, ComPtr<ID3D11RasterizerState>> m_rasterizerStates;
+	std::unordered_map<u32, ComPtr<ID3D11BlendState>> m_blendStates;
+	std::unordered_map<u32, ComPtr<ID3D11DepthStencilState>> m_depthStates;
+	
+	typedef boost::intrusive::list<D3D11Texture, boost::intrusive::constant_time_size<false>> TextureList;
+	TextureList m_textures;
+	
+	float m_maximumAnisotropy;
+	float m_maximumSupportedAnisotropy;
+	
+	Rect m_viewport;
+	Rect m_scissor;
+	bool m_wireframe;
+	bool m_hasMSAA;
+	
+	glm::mat4x4 m_projection;
+	glm::mat4x4 m_view;
+	
+	Color4f m_fogColor;
+	float m_fogStart;
+	float m_fogEnd;
+	
+	// Cached device state
+	bool m_stateValid;
+	VertexType m_currentVertexType;
+	ID3D11Buffer * m_currentVertexBuffer;
+	UINT m_currentVertexOffset;
+	D3D11_PRIMITIVE_TOPOLOGY m_currentTopology;
+	ID3D11RasterizerState * m_currentRasterizer;
+	ID3D11BlendState * m_currentBlend;
+	ID3D11DepthStencilState * m_currentDepth;
+	ID3D11PixelShader * m_currentPixelShader;
+	ID3D11ShaderResourceView * m_currentViews[3];
+	ID3D11SamplerState * m_currentSamplers[3];
+	float m_vsConstantsData[16];
+	bool m_vsConstantsValid;
+	unsigned char m_psConstantsData[96];
+	bool m_psConstantsValid;
+	
+	friend class D3D11TextureStage;
+	
+};
+
+#endif // ARX_GRAPHICS_D3D11_D3D11RENDERER_H

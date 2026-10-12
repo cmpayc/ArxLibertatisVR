@@ -328,6 +328,9 @@ public:
 	void addListener(Listener * listener);
 	void removeListener(Listener * listener);
 	
+	//! Move all listeners to another renderer, used when falling back to a different backend.
+	void transferListeners(Renderer & renderer);
+	
 	// Matrices
 	virtual void SetViewMatrix(const glm::mat4x4 & matView) = 0;
 	virtual void SetProjectionMatrix(const glm::mat4x4 & matProj) = 0;

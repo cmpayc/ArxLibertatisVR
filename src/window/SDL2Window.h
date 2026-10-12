@@ -75,6 +75,7 @@ public:
 private:
 	
 	int createWindowAndGLContext(const char * profile);
+	int createWindowAndD3D11Device();
 	
 	void changeMode(DisplayMode mode, bool fullscreen);
 	void updateSize(bool force = false);
@@ -85,6 +86,7 @@ private:
 	
 	SDL_Window * m_window;
 	SDL_GLContext m_glcontext;
+	Renderer * m_d3d11; //!< Set if m_renderer is the Direct3D 11 renderer
 	
 	SDL2InputBackend * m_input;
 	

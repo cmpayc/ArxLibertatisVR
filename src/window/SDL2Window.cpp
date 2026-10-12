@@ -52,6 +52,9 @@
 #include "gui/Credits.h"
 #include "graphics/opengl/GLDebug.h"
 #include "graphics/opengl/OpenGLRenderer.h"
+#if ARX_HAVE_D3D11
+#include "graphics/d3d11/D3D11Window.h"
+#endif
 #include "input/SDL2InputBackend.h"
 #include "io/log/Logger.h"
 #include "math/Rectangle.h"
@@ -74,6 +77,7 @@ SDL2Window * SDL2Window::s_mainWindow = nullptr;
 SDL2Window::SDL2Window()
 	: m_window(nullptr)
 	, m_glcontext(nullptr)
+	, m_d3d11(nullptr)
 	, m_input(nullptr)
 	, m_minimizeOnFocusLost(AlwaysEnabled)
 	, m_allowScreensaver(AlwaysDisabled)
@@ -82,6 +86,13 @@ SDL2Window::SDL2Window()
 	, m_sdlVersion(0)
 	, m_sdlSubsystem(ARX_SDL_SYSWM_UNKNOWN)
 {
+	#if ARX_HAVE_D3D11
+	if(config.video.renderer == "Direct3D 11") {
+		m_d3d11 = d3d11::createRenderer();
+		m_renderer = m_d3d11;
+		return;
+	}
+	#endif
 	m_renderer = new OpenGLRenderer;
 }
 
@@ -358,6 +369,40 @@ int SDL2Window::createWindowAndGLContext(const char * profile) {
 	
 }
 
+int SDL2Window::createWindowAndD3D11Device() {
+	
+	#if ARX_HAVE_D3D11
+	
+	arx_assert(m_d3d11);
+	
+	int x = SDL_WINDOWPOS_UNDEFINED, y = SDL_WINDOWPOS_UNDEFINED;
+	Uint32 windowFlags = getSDLFlagsForMode(m_mode.resolution, m_fullscreen);
+	windowFlags |= SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN;
+	
+	m_window = SDL_CreateWindow(m_title.c_str(), x, y, m_mode.resolution.x, m_mode.resolution.y, windowFlags);
+	if(!m_window) {
+		LogError << "Could not create Direct3D 11 window: " << SDL_GetError();
+		return 0;
+	}
+	
+	int samples = 0;
+	SDL_SysWMinfo info;
+	SDL_VERSION(&info.version);
+	if(!SDL_GetWindowWMInfo(m_window, &info) || info.subsystem != SDL_SYSWM_WINDOWS
+	   || (samples = d3d11::createDevice(*m_d3d11, info.info.win.window, m_maxMSAALevel)) == 0) {
+		SDL_DestroyWindow(m_window);
+		m_window = nullptr;
+		return 0;
+	}
+	
+	return samples;
+	
+	#else
+	return 0;
+	#endif
+	
+}
+
 bool SDL2Window::initialize() {
 	
 	arx_assert(!m_displayModes.empty());
@@ -379,6 +424,20 @@ bool SDL2Window::initialize() {
 	gldebug::Mode debugMode = gldebug::mode();
 	
 	int samples = 0;
+	
+	if(m_d3d11) {
+		samples = createWindowAndD3D11Device();
+		if(samples == 0) {
+			LogWarning << "Direct3D 11 initialization failed, falling back to OpenGL";
+			Renderer * renderer = new OpenGLRenderer;
+			m_renderer->transferListeners(*renderer);
+			delete m_renderer;
+			m_renderer = renderer;
+			m_d3d11 = nullptr;
+			autoRenderer = true;
+		}
+	}
+	
 	for(int api = 0; api < 2 && samples == 0; api++) {
 		bool first = (api == 0);
 		
@@ -531,16 +590,20 @@ bool SDL2Window::initialize() {
 			}
 		}
 		
-		int red = 0, green = 0, blue = 0, alpha = 0, depth = 0, doublebuffer = 0;
-		SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &red);
-		SDL_GL_GetAttribute(SDL_GL_GREEN_SIZE, &green);
-		SDL_GL_GetAttribute(SDL_GL_BLUE_SIZE, &blue);
-		SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &alpha);
-		SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &depth);
-		SDL_GL_GetAttribute(SDL_GL_DOUBLEBUFFER, &doublebuffer);
-		LogInfo << "Window: " << windowSystem << " r:" << red << " g:" << green << " b:" << blue
-		        << " a:" << alpha << " depth:" << depth << " aa:" << samples << "x"
-		        << " doublebuffer:" << doublebuffer;
+		if(m_d3d11) {
+			LogInfo << "Window: " << windowSystem << " Direct3D 11 aa:" << samples << "x";
+		} else {
+			int red = 0, green = 0, blue = 0, alpha = 0, depth = 0, doublebuffer = 0;
+			SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &red);
+			SDL_GL_GetAttribute(SDL_GL_GREEN_SIZE, &green);
+			SDL_GL_GetAttribute(SDL_GL_BLUE_SIZE, &blue);
+			SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &alpha);
+			SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &depth);
+			SDL_GL_GetAttribute(SDL_GL_DOUBLEBUFFER, &doublebuffer);
+			LogInfo << "Window: " << windowSystem << " r:" << red << " g:" << green << " b:" << blue
+			        << " a:" << alpha << " depth:" << depth << " aa:" << samples << "x"
+			        << " doublebuffer:" << doublebuffer;
+		}
 	}
 	
 	// Use the executable icon for the window
@@ -597,6 +660,13 @@ void SDL2Window::setTitle(const std::string & title) {
 }
 
 bool SDL2Window::setVSync(int vsync) {
+	#if ARX_HAVE_D3D11
+	if(m_d3d11) {
+		d3d11::setVSync(*m_d3d11, vsync);
+		m_vsync = vsync;
+		return true;
+	}
+	#endif
 	if(m_window && SDL_GL_SetSwapInterval(vsync) != 0) {
 		if(vsync != 0 && vsync != 1) {
 			return setVSync(1);
@@ -839,6 +909,12 @@ void SDL2Window::processEvents(bool waitForEvent) {
 
 void SDL2Window::showFrame() {
 	ARX_PROFILE_FUNC();
+	#if ARX_HAVE_D3D11
+	if(m_d3d11) {
+		d3d11::present(*m_d3d11);
+		return;
+	}
+	#endif
 	SDL_GL_SwapWindow(m_window);
 }
 
