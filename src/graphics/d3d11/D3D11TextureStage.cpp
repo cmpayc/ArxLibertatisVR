@@ -89,8 +89,11 @@ ID3D11SamplerState * D3D11TextureStage::getSampler(const D3D11Texture * texture)
 		anisotropy = unsigned(m_renderer->getMaxAnisotropy());
 	}
 	
+	// Sharper textures when the 3D scene is rendered at a lower resolution
+	float lodBias = m_lodBias + m_renderer->sceneLodBias();
+	
 	u32 biasBits;
-	std::memcpy(&biasBits, &m_lodBias, sizeof(biasBits));
+	std::memcpy(&biasBits, &lodBias, sizeof(biasBits));
 	
 	u64 key = u64(wrapMode) | (u64(getMinFilter()) << 2) | (u64(getMagFilter()) << 3)
 	          | (u64(mipmaps) << 4) | (u64(anisotropy) << 8) | (u64(biasBits) << 32);
@@ -119,7 +122,7 @@ ID3D11SamplerState * D3D11TextureStage::getSampler(const D3D11Texture * texture)
 		desc.MaxAnisotropy = 1;
 	}
 	desc.AddressU = desc.AddressV = desc.AddressW = arxToD3DWrapMode[wrapMode];
-	desc.MipLODBias = glm::clamp(m_lodBias, -16.f, 15.99f);
+	desc.MipLODBias = glm::clamp(lodBias, -16.f, 15.99f);
 	desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
 	desc.MinLOD = 0.f;
 	desc.MaxLOD = mipmaps ? D3D11_FLOAT32_MAX : 0.f;

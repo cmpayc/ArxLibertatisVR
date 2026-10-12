@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <sstream>
@@ -48,6 +49,12 @@ namespace {
 
 struct VSConstants {
 	float transform[16];
+	float jitter[4];
+};
+
+struct MotionConstants {
+	float reprojection[16];
+	float targetSize[4];
 };
 
 struct PSConstants {
@@ -129,6 +136,19 @@ D3D11Renderer::D3D11Renderer()
 	, m_sceneScale(1.f)
 	, m_inScene(false)
 	, m_sceneSize(0)
+	, m_sceneSamples(1)
+	, m_sceneLodBias(0.f)
+	, m_sceneViewProjection(1.f)
+	, m_previousViewProjection(1.f)
+	, m_previousView(1.f)
+	, m_hasPreviousScene(false)
+	, m_sceneRenderedLastFrame(false)
+	, m_sceneRenderedThisFrame(false)
+	, m_resetHistory(true)
+	, m_jitterEnabled(false)
+	, m_jitterIndex(0)
+	, m_jitter(0.f)
+	, m_sceneDebugView(0)
 	, m_maximumAnisotropy(1.f)
 	, m_maximumSupportedAnisotropy(1.f)
 	, m_wireframe(false)
@@ -173,6 +193,15 @@ D3D11Renderer::~D3D11Renderer() {
 bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	
 	m_window = window;
+	
+	// Debug view for the scene: 1 = depth, 2 = motion vectors
+	{
+		char value[16];
+		DWORD length = GetEnvironmentVariableA("ARX_SCENE_DEBUG", value, sizeof(value));
+		if(length > 0 && length < sizeof(value)) {
+			m_sceneDebugView = std::atoi(value);
+		}
+	}
 	
 	UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 	
@@ -291,6 +320,10 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		}
 		bufferDesc.ByteWidth = sizeof(ClearConstants);
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_clearConstants))) {
+			return false;
+		}
+		bufferDesc.ByteWidth = sizeof(MotionConstants);
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_motionConstants))) {
 			return false;
 		}
 	}
@@ -447,6 +480,31 @@ bool D3D11Renderer::compileShaders() {
 		}
 	}
 	
+	{
+		struct PixelShaderInfo {
+			const char * entry;
+			const D3D_SHADER_MACRO * defines;
+			ComPtr<ID3D11PixelShader> * shader;
+		};
+		const D3D_SHADER_MACRO msaaDefines[] = { { "MSAA_DEPTH", "1" }, { nullptr, nullptr } };
+		const PixelShaderInfo shaders[] = {
+			{ "psMotion", nullptr, std::addressof(m_motionPixelShader) },
+			{ "psMotion", msaaDefines, std::addressof(m_motionPixelShaderMS) },
+			{ "psDebugDepth", nullptr, std::addressof(m_debugDepthPixelShader) },
+			{ "psDebugMotion", nullptr, std::addressof(m_debugMotionPixelShader) },
+		};
+		for(const PixelShaderInfo & info : shaders) {
+			if(m_featureLevel < D3D_FEATURE_LEVEL_10_1) {
+				break;
+			}
+			ComPtr<ID3DBlob> code = compileShader(info.entry, "ps_4_1", info.defines);
+			if(!code || FAILED(m_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(),
+			                                               nullptr, &*info.shader))) {
+				LogWarning << "Failed to create Direct3D 11 shader " << info.entry;
+			}
+		}
+	}
+	
 	return true;
 }
 
@@ -588,16 +646,18 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 	
 	releaseSceneTargets();
 	
+	m_sceneSamples = m_msaaSamples;
+	
 	D3D11_TEXTURE2D_DESC desc = {};
 	desc.Width = UINT(size.x);
 	desc.Height = UINT(size.y);
 	desc.MipLevels = 1;
 	desc.ArraySize = 1;
-	desc.SampleDesc.Count = m_msaaSamples;
+	desc.SampleDesc.Count = m_sceneSamples;
 	desc.Usage = D3D11_USAGE_DEFAULT;
 	
 	desc.Format = ColorFormat;
-	desc.BindFlags = D3D11_BIND_RENDER_TARGET | (m_msaaSamples > 1 ? 0 : D3D11_BIND_SHADER_RESOURCE);
+	desc.BindFlags = D3D11_BIND_RENDER_TARGET | (m_sceneSamples > 1 ? 0 : D3D11_BIND_SHADER_RESOURCE);
 	if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneColorTarget))
 	   || FAILED(m_device->CreateRenderTargetView(m_sceneColorTarget.Get(), nullptr, &m_sceneColorView))) {
 		LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 scene color target";
@@ -605,17 +665,31 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		return false;
 	}
 	
-	desc.Format = DepthFormat;
-	desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-	if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneDepthTarget))
-	   || FAILED(m_device->CreateDepthStencilView(m_sceneDepthTarget.Get(), nullptr, &m_sceneDepthView))) {
-		LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 scene depth target";
-		releaseSceneTargets();
-		return false;
+	// The scene depth is read by the motion vector pass
+	{
+		desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+		desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+		D3D11_DEPTH_STENCIL_VIEW_DESC depthDesc = {};
+		depthDesc.Format = DepthFormat;
+		depthDesc.ViewDimension = (m_sceneSamples > 1) ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
+		D3D11_SHADER_RESOURCE_VIEW_DESC resourceDesc = {};
+		resourceDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+		resourceDesc.ViewDimension = (m_sceneSamples > 1) ? D3D11_SRV_DIMENSION_TEXTURE2DMS
+		                                                  : D3D11_SRV_DIMENSION_TEXTURE2D;
+		resourceDesc.Texture2D.MipLevels = 1;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneDepthTarget))
+		   || FAILED(m_device->CreateDepthStencilView(m_sceneDepthTarget.Get(), &depthDesc, &m_sceneDepthView))
+		   || FAILED(m_device->CreateShaderResourceView(m_sceneDepthTarget.Get(), &resourceDesc,
+		                                                &m_sceneDepthResource))) {
+			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 scene depth target";
+			releaseSceneTargets();
+			return false;
+		}
 	}
 	
-	if(m_msaaSamples > 1) {
-		desc.SampleDesc.Count = 1;
+	desc.SampleDesc.Count = 1;
+	
+	if(m_sceneSamples > 1) {
 		desc.Format = ColorFormat;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_sceneResolved))) {
@@ -633,7 +707,29 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		return false;
 	}
 	
+	// Upscaler inputs, only allocated while something uses them
+	if(upscalerInputsNeeded()) {
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_motionTarget))
+		   || FAILED(m_device->CreateRenderTargetView(m_motionTarget.Get(), nullptr, &m_motionView))
+		   || FAILED(m_device->CreateShaderResourceView(m_motionTarget.Get(), nullptr, &m_motionResource))) {
+			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 motion vector target";
+			releaseSceneTargets();
+			return false;
+		}
+		desc.Format = DXGI_FORMAT_R32_FLOAT;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_linearDepthTarget))
+		   || FAILED(m_device->CreateRenderTargetView(m_linearDepthTarget.Get(), nullptr, &m_linearDepthView))
+		   || FAILED(m_device->CreateShaderResourceView(m_linearDepthTarget.Get(), nullptr, &m_linearDepthResource))) {
+			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 depth target";
+			releaseSceneTargets();
+			return false;
+		}
+	}
+	
 	m_sceneSize = size;
+	m_resetHistory = true;
 	
 	return true;
 }
@@ -646,14 +742,132 @@ void D3D11Renderer::releaseSceneTargets() {
 	}
 	
 	unbindTextureView(m_sceneResolvedView.Get());
+	unbindTextureView(m_sceneDepthResource.Get());
+	unbindTextureView(m_motionResource.Get());
+	unbindTextureView(m_linearDepthResource.Get());
 	
 	m_sceneResolvedView.Reset();
 	m_sceneResolved.Reset();
 	m_sceneColorView.Reset();
 	m_sceneColorTarget.Reset();
+	m_sceneDepthResource.Reset();
 	m_sceneDepthView.Reset();
 	m_sceneDepthTarget.Reset();
+	m_motionResource.Reset();
+	m_motionView.Reset();
+	m_motionTarget.Reset();
+	m_linearDepthResource.Reset();
+	m_linearDepthView.Reset();
+	m_linearDepthTarget.Reset();
 	m_sceneSize = Vec2i(0);
+	
+}
+
+bool D3D11Renderer::sceneEnabled() const {
+	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled;
+}
+
+bool D3D11Renderer::upscalerInputsNeeded() const {
+	return m_sceneDebugView != 0 || m_jitterEnabled;
+}
+
+static float halton(u32 index, u32 base) {
+	float f = 1.f;
+	float result = 0.f;
+	while(index > 0) {
+		f /= float(base);
+		result += f * float(index % base);
+		index /= base;
+	}
+	return result;
+}
+
+void D3D11Renderer::updateSceneCamera() {
+	
+	m_sceneView = m_view;
+	m_sceneViewProjection = m_projection * m_view;
+	
+	if(!m_hasPreviousScene || !m_sceneRenderedLastFrame) {
+		m_resetHistory = true;
+	} else {
+		// Detect camera cuts - the view matrix maps the forward direction of the camera to +z
+		glm::mat4x4 previous = glm::inverse(m_previousView);
+		glm::mat4x4 current = glm::inverse(m_sceneView);
+		Vec3f previousPosition(previous[3]);
+		Vec3f currentPosition(current[3]);
+		Vec3f previousForward = glm::normalize(Vec3f(previous[2]));
+		Vec3f currentForward = glm::normalize(Vec3f(current[2]));
+		if(glm::distance(previousPosition, currentPosition) > 200.f
+		   || glm::dot(previousForward, currentForward) < 0.7f) {
+			m_resetHistory = true;
+		}
+	}
+	
+	Vec2f scale = Vec2f(m_sceneSize) / Vec2f(m_size);
+	
+	if(m_jitterEnabled) {
+		// Halton(2, 3) sequence with enough phases to cover each window pixel
+		u32 phases = u32(std::ceil(8.f / (scale.x * scale.y)));
+		m_jitterIndex = (m_jitterIndex + 1) % std::max(phases, u32(1));
+		m_jitter = Vec2f(halton(m_jitterIndex + 1, 2) - 0.5f, halton(m_jitterIndex + 1, 3) - 0.5f);
+	} else {
+		m_jitter = Vec2f(0.f);
+	}
+	
+	// Use the texture detail of the output resolution
+	m_sceneLodBias = (scale.x < 1.f) ? std::log2(scale.x) : 0.f;
+	
+}
+
+void D3D11Renderer::drawFullscreen(ID3D11PixelShader * shader) {
+	
+	m_context->IASetInputLayout(nullptr);
+	m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	m_currentTopology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	m_context->VSSetShader(m_blitVertexShader.Get(), nullptr, 0);
+	m_context->PSSetShader(shader, nullptr, 0);
+	m_context->Draw(3, 0);
+	
+}
+
+void D3D11Renderer::renderSceneMotion() {
+	
+	ID3D11PixelShader * shader = (m_sceneSamples > 1) ? m_motionPixelShaderMS.Get() : m_motionPixelShader.Get();
+	if(!shader || !m_motionView || !m_linearDepthView) {
+		return;
+	}
+	
+	MotionConstants constants;
+	glm::mat4x4 reprojection(1.f);
+	if(!m_resetHistory) {
+		reprojection = m_previousViewProjection * glm::inverse(m_sceneViewProjection);
+	}
+	std::memcpy(constants.reprojection, &reprojection, sizeof(constants.reprojection));
+	constants.targetSize[0] = float(m_sceneSize.x);
+	constants.targetSize[1] = float(m_sceneSize.y);
+	constants.targetSize[2] = 1.f / float(m_sceneSize.x);
+	constants.targetSize[3] = 1.f / float(m_sceneSize.y);
+	m_context->UpdateSubresource(m_motionConstants.Get(), 0, nullptr, &constants, 0, 0);
+	
+	ID3D11RenderTargetView * views[] = { m_motionView.Get(), m_linearDepthView.Get() };
+	m_context->OMSetRenderTargets(UINT(std::size(views)), views, nullptr);
+	
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
+	m_context->RSSetViewports(1, &viewport);
+	m_context->RSSetState(getRasterizerState(false, 0, false, false));
+	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
+	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
+	
+	ID3D11Buffer * buffer = m_motionConstants.Get();
+	m_context->PSSetConstantBuffers(2, 1, &buffer);
+	ID3D11ShaderResourceView * depth = m_sceneDepthResource.Get();
+	m_context->PSSetShaderResources(1, 1, &depth);
+	
+	drawFullscreen(shader);
+	
+	ID3D11ShaderResourceView * none = nullptr;
+	m_context->PSSetShaderResources(1, 1, &none);
+	m_currentViews[1] = nullptr;
 	
 }
 
@@ -717,20 +931,27 @@ void D3D11Renderer::setSceneScale(float scale) {
 
 void D3D11Renderer::beginScene() {
 	
-	if(m_inScene || m_sceneScale >= 1.f || !m_colorView) {
+	if(m_inScene || !sceneEnabled() || !m_colorView) {
 		return;
 	}
 	
-	Vec2i size(std::max<s32>(s32(float(m_size.x) * m_sceneScale + 0.5f), 1),
-	           std::max<s32>(s32(float(m_size.y) * m_sceneScale + 0.5f), 1));
-	if(size != m_sceneSize && !createSceneTargets(size)) {
+	float scale = std::min(m_sceneScale, 1.f);
+	Vec2i size(std::max<s32>(s32(float(m_size.x) * scale + 0.5f), 1),
+	           std::max<s32>(s32(float(m_size.y) * scale + 0.5f), 1));
+	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded()) && !createSceneTargets(size)) {
 		return;
 	}
 	
-	// The scene texture is about to become a render target
+	// The scene textures are about to become render targets
 	unbindTextureView(m_sceneResolvedView.Get());
+	unbindTextureView(m_sceneDepthResource.Get());
+	unbindTextureView(m_motionResource.Get());
+	unbindTextureView(m_linearDepthResource.Get());
+	
+	updateSceneCamera();
 	
 	m_inScene = true;
+	m_sceneRenderedThisFrame = true;
 	invalidateCachedState();
 	
 }
@@ -743,9 +964,11 @@ void D3D11Renderer::endScene() {
 	
 	m_inScene = false;
 	
-	if(m_msaaSamples > 1) {
+	if(m_sceneSamples > 1) {
 		m_context->ResolveSubresource(m_sceneResolved.Get(), 0, m_sceneColorTarget.Get(), 0, ColorFormat);
 	}
+	
+	renderSceneMotion();
 	
 	// Upscale the scene to the window
 	
@@ -758,20 +981,30 @@ void D3D11Renderer::endScene() {
 	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
 	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
 	
-	m_context->IASetInputLayout(nullptr);
-	m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	m_context->VSSetShader(m_blitVertexShader.Get(), nullptr, 0);
-	m_context->PSSetShader(m_blitPixelShader.Get(), nullptr, 0);
-	
 	ID3D11ShaderResourceView * view = m_sceneResolvedView.Get();
+	ID3D11PixelShader * shader = m_blitPixelShader.Get();
+	if(m_sceneDebugView == 1 && m_debugDepthPixelShader && m_linearDepthResource) {
+		view = m_linearDepthResource.Get();
+		shader = m_debugDepthPixelShader.Get();
+	} else if(m_sceneDebugView == 2 && m_debugMotionPixelShader && m_motionResource) {
+		view = m_motionResource.Get();
+		shader = m_debugMotionPixelShader.Get();
+	}
+	
 	m_context->PSSetShaderResources(0, 1, &view);
 	ID3D11SamplerState * sampler = m_blitSampler.Get();
 	m_context->PSSetSamplers(0, 1, &sampler);
 	
-	m_context->Draw(3, 0);
+	drawFullscreen(shader);
 	
 	// The interface is drawn on top of the scene, with its own depth
 	m_context->ClearDepthStencilView(m_depthView.Get(), D3D11_CLEAR_DEPTH, 1.f, 0);
+	
+	// Remember the camera for the motion vectors of the next frame
+	m_previousViewProjection = m_sceneViewProjection;
+	m_previousView = m_sceneView;
+	m_hasPreviousScene = true;
+	m_resetHistory = false;
 	
 	invalidateCachedState();
 	m_currentViews[0] = view;
@@ -1294,6 +1527,9 @@ void D3D11Renderer::present() {
 		}
 	}
 	
+	m_sceneRenderedLastFrame = m_sceneRenderedThisFrame;
+	m_sceneRenderedThisFrame = false;
+	
 	UINT interval = (m_vsync != 0) ? 1 : 0;
 	UINT flags = (interval == 0 && m_allowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
 	
@@ -1452,9 +1688,14 @@ void D3D11Renderer::flushState(VertexType type) {
 		} else {
 			transform = m_projection * m_view;
 		}
-		static_assert(sizeof(transform) == sizeof(m_vsConstantsData), "unexpected matrix size");
-		if(!m_vsConstantsValid || std::memcmp(m_vsConstantsData, &transform, sizeof(transform)) != 0) {
-			std::memcpy(m_vsConstantsData, &transform, sizeof(transform));
+		VSConstants constants;
+		std::memcpy(constants.transform, &transform, sizeof(constants.transform));
+		constants.jitter[0] = m_inScene ? 2.f * m_jitter.x / float(m_sceneSize.x) : 0.f;
+		constants.jitter[1] = m_inScene ? -2.f * m_jitter.y / float(m_sceneSize.y) : 0.f;
+		constants.jitter[2] = constants.jitter[3] = 0.f;
+		static_assert(sizeof(constants) == sizeof(m_vsConstantsData), "unexpected constant buffer size");
+		if(!m_vsConstantsValid || std::memcmp(m_vsConstantsData, &constants, sizeof(constants)) != 0) {
+			std::memcpy(m_vsConstantsData, &constants, sizeof(constants));
 			m_context->UpdateSubresource(m_vsConstants.Get(), 0, nullptr, m_vsConstantsData, 0, 0);
 			m_vsConstantsValid = true;
 		}

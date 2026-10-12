@@ -145,6 +145,9 @@ public:
 	//! Unbind a texture view that is about to be released.
 	void unbindTextureView(ID3D11ShaderResourceView * view);
 	
+	//! Mipmap LOD bias to add while rendering the 3D scene at a lower resolution
+	float sceneLodBias() const { return m_inScene ? m_sceneLodBias : 0.f; }
+	
 private:
 	
 	struct RingBuffer {
@@ -161,6 +164,21 @@ private:
 	bool createSizeDependentResources();
 	bool createSceneTargets(const Vec2i & size);
 	void releaseSceneTargets();
+	
+	//! \return true if the 3D scene is rendered to separate targets
+	bool sceneEnabled() const;
+	
+	//! \return true if motion vectors and depth are needed by the upscaler or a debug view
+	bool upscalerInputsNeeded() const;
+	
+	//! Track the scene camera and detect camera cuts
+	void updateSceneCamera();
+	
+	//! Generate motion vectors and normalized depth for the scene
+	void renderSceneMotion();
+	
+	//! Draw a full-screen triangle with the given pixel shader
+	void drawFullscreen(ID3D11PixelShader * shader);
 	
 	//! Render target size divided by the window size
 	Vec2f targetScale() const;
@@ -213,6 +231,34 @@ private:
 	ComPtr<ID3D11DepthStencilView> m_sceneDepthView;
 	ComPtr<ID3D11Texture2D> m_sceneResolved;
 	ComPtr<ID3D11ShaderResourceView> m_sceneResolvedView;
+	ComPtr<ID3D11ShaderResourceView> m_sceneDepthResource;
+	UINT m_sceneSamples;
+	float m_sceneLodBias;
+	
+	// Upscaler inputs: motion vectors in pixels (current to previous frame) and depth in [0, 1]
+	ComPtr<ID3D11Texture2D> m_motionTarget;
+	ComPtr<ID3D11RenderTargetView> m_motionView;
+	ComPtr<ID3D11ShaderResourceView> m_motionResource;
+	ComPtr<ID3D11Texture2D> m_linearDepthTarget;
+	ComPtr<ID3D11RenderTargetView> m_linearDepthView;
+	ComPtr<ID3D11ShaderResourceView> m_linearDepthResource;
+	
+	// Scene camera tracking
+	glm::mat4x4 m_sceneViewProjection;
+	glm::mat4x4 m_previousViewProjection;
+	glm::mat4x4 m_sceneView;
+	glm::mat4x4 m_previousView;
+	bool m_hasPreviousScene;
+	bool m_sceneRenderedLastFrame;
+	bool m_sceneRenderedThisFrame;
+	bool m_resetHistory;
+	
+	// Sub-pixel jitter for temporal upscalers, in pixels
+	bool m_jitterEnabled;
+	u32 m_jitterIndex;
+	Vec2f m_jitter;
+	
+	int m_sceneDebugView;
 	
 	ComPtr<ID3D11VertexShader> m_vertexShaders[VertexTypeCount];
 	ComPtr<ID3D11InputLayout> m_inputLayouts[VertexTypeCount];
@@ -223,6 +269,11 @@ private:
 	ComPtr<ID3D11VertexShader> m_blitVertexShader;
 	ComPtr<ID3D11PixelShader> m_blitPixelShader;
 	ComPtr<ID3D11SamplerState> m_blitSampler;
+	ComPtr<ID3D11PixelShader> m_motionPixelShader;
+	ComPtr<ID3D11PixelShader> m_motionPixelShaderMS;
+	ComPtr<ID3D11PixelShader> m_debugDepthPixelShader;
+	ComPtr<ID3D11PixelShader> m_debugMotionPixelShader;
+	ComPtr<ID3D11Buffer> m_motionConstants;
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;
 	ComPtr<ID3D11Buffer> m_clearConstants;
@@ -265,7 +316,7 @@ private:
 	ID3D11PixelShader * m_currentPixelShader;
 	ID3D11ShaderResourceView * m_currentViews[3];
 	ID3D11SamplerState * m_currentSamplers[3];
-	float m_vsConstantsData[16];
+	float m_vsConstantsData[20];
 	bool m_vsConstantsValid;
 	unsigned char m_psConstantsData[96];
 	bool m_psConstantsValid;

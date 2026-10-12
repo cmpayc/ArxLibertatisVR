@@ -34,6 +34,7 @@ static const char d3d11ShaderSource[] = R"HLSL(
 
 cbuffer VSConstants : register(b0) {
 	float4x4 transform;
+	float4 jitter; // xy = sub-pixel offset in normalized device coordinates
 };
 
 cbuffer PSConstants : register(b0) {
@@ -80,7 +81,7 @@ struct PSInput {
 
 VSOutput makeOutput(float4 clip, float4 color, float2 uv0, float2 uv1, float2 uv2) {
 	VSOutput o;
-	o.position = float4(clip.xy, (clip.z + clip.w) * 0.5, clip.w);
+	o.position = float4(clip.xy + jitter.xy * clip.w, (clip.z + clip.w) * 0.5, clip.w);
 	o.color = color;
 	o.uv0 = uv0;
 	o.uv1 = uv1;
@@ -193,6 +194,61 @@ BlitOutput vsBlit(uint id : SV_VertexID) {
 
 float4 psBlit(BlitOutput input) : SV_Target {
 	return texture0.Sample(sampler0, input.uv);
+}
+
+cbuffer MotionConstants : register(b2) {
+	float4x4 reprojection; // current clip space to previous clip space
+	float4 targetSize; // xy = size, zw = 1 / size
+};
+
+#ifdef MSAA_DEPTH
+Texture2DMS<float> sceneDepth : register(t1);
+#else
+Texture2D<float> sceneDepth : register(t1);
+#endif
+
+struct MotionOutput {
+	float2 motion : SV_Target0;
+	float depth : SV_Target1;
+};
+
+/*
+ * Camera motion vectors reconstructed from the depth buffer.
+ * Depth values are in the OpenGL window range, which maps the projection's [0, 1] depth to [0.5, 1].
+ */
+MotionOutput psMotion(float4 position : SV_Position) {
+	
+	int2 pixel = int2(position.xy);
+	#ifdef MSAA_DEPTH
+	float depth = sceneDepth.Load(pixel, 0);
+	#else
+	float depth = sceneDepth.Load(int3(pixel, 0));
+	#endif
+	
+	float z = depth * 2 - 1;
+	float2 uv = position.xy * targetSize.zw;
+	float2 ndc = float2(uv.x * 2 - 1, 1 - uv.y * 2);
+	
+	float4 previous = mul(reprojection, float4(ndc, z, 1));
+	float2 previousNdc = previous.xy / previous.w;
+	float2 previousUV = float2(previousNdc.x * 0.5 + 0.5, 0.5 - previousNdc.y * 0.5);
+	
+	MotionOutput o;
+	o.motion = (previousUV - uv) * targetSize.xy;
+	o.depth = saturate(z);
+	return o;
+}
+
+float4 psDebugDepth(BlitOutput input) : SV_Target {
+	// Approximate view distance for a projection with the near plane at 1
+	float z = texture0.Sample(sampler0, input.uv).r;
+	float distance = 1 / max(1 - z, 0.000001);
+	return float4((1 - saturate(distance / 3000)).xxx, 1);
+}
+
+float4 psDebugMotion(BlitOutput input) : SV_Target {
+	float2 motion = texture0.Sample(sampler0, input.uv).rg;
+	return float4(saturate(abs(motion) * 0.1), saturate(length(motion) * 0.02), 1);
 }
 
 )HLSL";
