@@ -148,6 +148,7 @@ public:
 		float ambientOcclusion; //!< Strength in [0, 1], 0 = off
 		float bloom; //!< Strength in [0, 1], 0 = off
 		float normalMaps; //!< Strength in [0, 1], 0 = off
+		float parallaxMapping; //!< Depth in [0, 1], 0 = off
 		std::string colorGrading; //!< "off", "natural", "warm" or "cinematic"
 		bool pixelLighting;
 		bool colorkeyAntialiasing;

@@ -135,6 +135,7 @@ constexpr const float
 	ambientOcclusion = 0.5f,
 	bloom = 0.5f,
 	normalMaps = 0.5f,
+	parallaxMapping = 0.5f,
 	hudScale = 0.5f,
 	bookScale = 1.f,
 	cursorScale = 0.5f,
@@ -235,6 +236,7 @@ constexpr const std::string_view
 	ambientOcclusion = "ambient_occlusion",
 	bloom = "bloom",
 	normalMaps = "normal_maps",
+	parallaxMapping = "parallax_mapping",
 	upscaler = "upscaler",
 	colorGrading = "color_grading",
 	dlssPreset = "dlss_preset",
@@ -507,6 +509,7 @@ bool Config::save() {
 	writer.writeKey(Key::ambientOcclusion, video.ambientOcclusion);
 	writer.writeKey(Key::bloom, video.bloom);
 	writer.writeKey(Key::normalMaps, video.normalMaps);
+	writer.writeKey(Key::parallaxMapping, video.parallaxMapping);
 	writer.writeKey(Key::colorGrading, video.colorGrading);
 	writer.writeKey(Key::pixelLighting, video.pixelLighting);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
@@ -655,6 +658,8 @@ bool Config::init(const fs::path & file) {
 	video.bloom = glm::clamp(bloom, 0.f, 1.f);
 	float normalMaps = reader.getKey(Section::Video, Key::normalMaps, Default::normalMaps);
 	video.normalMaps = glm::clamp(normalMaps, 0.f, 1.f);
+	float parallaxMapping = reader.getKey(Section::Video, Key::parallaxMapping, Default::parallaxMapping);
+	video.parallaxMapping = glm::clamp(parallaxMapping, 0.f, 1.f);
 	video.colorGrading = reader.getKey(Section::Video, Key::colorGrading, Default::colorGrading);
 	video.pixelLighting = reader.getKey(Section::Video, Key::pixelLighting, Default::pixelLighting);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);

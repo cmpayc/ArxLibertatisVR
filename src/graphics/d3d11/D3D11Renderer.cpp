@@ -53,6 +53,7 @@ namespace {
 struct VSConstants {
 	float transform[16];
 	float jitter[4];
+	float camera[4]; // World position of the camera
 };
 
 struct MotionConstants {
@@ -64,6 +65,7 @@ struct PSConstants {
 	s32 stages[3][4];
 	float fogColor[4];
 	float fogParams[4];
+	float relief[4]; // x = normal map slope scale, y = parallax depth, both 0 without a relief map
 };
 
 struct ClearConstants {
@@ -128,9 +130,11 @@ const size_t MaxPixelLights = 128;
 // Normal map slope at full strength, the generated slope is the brightness change per texel
 const float NormalMapSlopeScale = 6.f;
 
+// Parallax depth at full strength, relative to the texture size
+const float ParallaxDepthScale = 0.05f;
+
 struct LightConstants {
 	s32 count[4];
-	float normalMap[4]; // x = slope scale, 0 = no normal maps
 	// Per light: position + fall start, color * intensity + fall end
 	float lights[MaxPixelLights * 2][4];
 };
@@ -259,6 +263,7 @@ D3D11Renderer::D3D11Renderer()
 	, m_pixelLighting(false)
 	, m_pixelLightCount(0)
 	, m_normalMapStrength(0.f)
+	, m_parallaxStrength(0.f)
 	, m_pixelLightsWarned(false)
 	, m_snapshotTime(0)
 { }
@@ -1063,16 +1068,31 @@ void D3D11Renderer::setAmbientOcclusion(float strength) {
 }
 
 void D3D11Renderer::setNormalMaps(float strength) {
-	
-	bool wasEnabled = normalMapsEnabled();
+
+	bool wasEnabled = reliefMapsEnabled();
 	m_normalMapStrength = glm::clamp(strength, 0.f, 1.f);
-	bool enabled = normalMapsEnabled();
-	
+	updateReliefMaps(wasEnabled);
+
+}
+
+void D3D11Renderer::setParallaxMapping(float strength) {
+
+	bool wasEnabled = reliefMapsEnabled();
+	m_parallaxStrength = glm::clamp(strength, 0.f, 1.f);
+	updateReliefMaps(wasEnabled);
+
+}
+
+void D3D11Renderer::updateReliefMaps(bool wasEnabled) {
+
+	m_stateValid = false;
+
+	bool enabled = reliefMapsEnabled();
 	if(enabled == wasEnabled) {
 		return;
 	}
-	
-	// Generate the normal maps for the loaded textures, or free them
+
+	// Generate the relief maps for the loaded textures, or free them
 	for(D3D11Texture & texture : m_textures) {
 		if(enabled) {
 			texture.updateNormalMap();
@@ -1095,7 +1115,7 @@ void D3D11Renderer::generateNormalMap(ID3D11ShaderResourceView * color, const Ve
 	desc.Height = UINT(size.y);
 	desc.MipLevels = 0;
 	desc.ArraySize = 1;
-	desc.Format = DXGI_FORMAT_R8G8_UNORM;
+	desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 	desc.SampleDesc.Count = 1;
 	desc.Usage = D3D11_USAGE_DEFAULT;
 	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
@@ -1687,7 +1707,6 @@ void D3D11Renderer::setPixelLights(const PixelLight * lights, size_t count) {
 	LightConstants constants = {};
 	constants.count[0] = s32(count);
 	constants.count[1] = debugView ? 1 : 0;
-	constants.normalMap[0] = normalMapsEnabled() ? m_normalMapStrength * NormalMapSlopeScale : 0.f;
 	for(size_t i = 0; i < count; i++) {
 		const PixelLight & light = lights[i];
 		float * a = constants.lights[i * 2];
@@ -2539,6 +2558,12 @@ void D3D11Renderer::flushState(VertexType type) {
 		constants.jitter[0] = m_inScene ? 2.f * m_jitter.x / float(m_sceneSize.x) : 0.f;
 		constants.jitter[1] = m_inScene ? -2.f * m_jitter.y / float(m_sceneSize.y) : 0.f;
 		constants.jitter[2] = constants.jitter[3] = 0.f;
+		// The view matrix is a rotation and translation
+		Vec3f camera = -(glm::transpose(glm::mat3(m_view)) * Vec3f(m_view[3]));
+		constants.camera[0] = camera.x;
+		constants.camera[1] = camera.y;
+		constants.camera[2] = camera.z;
+		constants.camera[3] = 0.f;
 		static_assert(sizeof(constants) == sizeof(m_vsConstantsData), "unexpected constant buffer size");
 		if(!m_vsConstantsValid || std::memcmp(m_vsConstantsData, &constants, sizeof(constants)) != 0) {
 			std::memcpy(m_vsConstantsData, &constants, sizeof(constants));
@@ -2647,10 +2672,10 @@ void D3D11Renderer::flushState(VertexType type) {
 		constants.stages[i][1] = s32(stage->getAlphaOp());
 		constants.stages[i][2] = texture ? 1 : 0;
 		
-		// Normal map of the main texture for per-pixel lighting
+		// Relief map of the main texture for normal mapping and parallax mapping of world geometry
 		if(i == 0) {
 			ID3D11ShaderResourceView * normalView = nullptr;
-			if(texture && type == VertexWorld && m_pixelLightCount > 0 && normalMapsEnabled()) {
+			if(texture && type == VertexWorld && reliefMapsEnabled()) {
 				normalView = texture->normalView();
 			}
 			if(force || normalView != m_currentNormalView) {
@@ -2658,6 +2683,10 @@ void D3D11Renderer::flushState(VertexType type) {
 				m_currentNormalView = normalView;
 			}
 			constants.stages[0][3] = normalView ? 1 : 0;
+			if(normalView) {
+				constants.relief[0] = m_normalMapStrength * NormalMapSlopeScale;
+				constants.relief[1] = m_parallaxStrength * ParallaxDepthScale;
+			}
 		}
 		
 	}

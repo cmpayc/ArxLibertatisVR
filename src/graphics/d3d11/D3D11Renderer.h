@@ -137,11 +137,15 @@ public:
 	void setPixelLights(const PixelLight * lights, size_t count) override;
 	bool supportsNormalMaps() const override { return true; }
 	void setNormalMaps(float strength) override;
+	bool supportsParallaxMapping() const override { return true; }
+	void setParallaxMapping(float strength) override;
 	
-	//! \return true if normal maps are generated for textures and used for per-pixel lighting
-	bool normalMapsEnabled() const { return m_normalMapStrength > 0.f && m_normalMapPixelShader; }
+	//! \return true if relief maps are generated for textures, for normal maps or parallax mapping
+	bool reliefMapsEnabled() const {
+		return (m_normalMapStrength > 0.f || m_parallaxStrength > 0.f) && m_normalMapPixelShader;
+	}
 	
-	//! Generate the normal map (brightness slope) for a texture with mipmaps
+	//! Generate the relief map (brightness slope and height) for a texture with mipmaps
 	void generateNormalMap(ID3D11ShaderResourceView * color, const Vec2i & size, ComPtr<ID3D11Texture2D> & texture,
 	                       ComPtr<ID3D11ShaderResourceView> & view);
 	
@@ -188,6 +192,8 @@ private:
 	};
 	
 	bool createSizeDependentResources();
+	//! Generate or free the relief maps of the loaded textures after a setting changed
+	void updateReliefMaps(bool wasEnabled);
 	bool createSceneTargets(const Vec2i & size);
 	void releaseSceneTargets();
 	
@@ -415,7 +421,7 @@ private:
 	ID3D11SamplerState * m_currentSamplers[3];
 	ID3D11ShaderResourceView * m_currentNormalView;
 	static constexpr UINT NormalMapSlot = 3;
-	float m_vsConstantsData[20];
+	float m_vsConstantsData[24];
 	bool m_vsConstantsValid;
 	unsigned char m_psConstantsData[96];
 	bool m_psConstantsValid;
@@ -424,6 +430,7 @@ private:
 	bool m_pixelLighting;
 	size_t m_pixelLightCount; //!< Number of lights in m_lightConstants
 	float m_normalMapStrength;
+	float m_parallaxStrength;
 	ComPtr<ID3D11PixelShader> m_normalMapPixelShader;
 	bool m_pixelLightsWarned;
 	

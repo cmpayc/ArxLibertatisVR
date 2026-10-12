@@ -35,12 +35,14 @@ static const char d3d11ShaderSource[] = R"HLSL(
 cbuffer VSConstants : register(b0) {
 	float4x4 transform;
 	float4 jitter; // xy = sub-pixel offset in normalized device coordinates
+	float4 camera; // World position of the camera
 };
 
 cbuffer PSConstants : register(b0) {
 	int4 stages[3]; // x = color op, y = alpha op, z = has texture
 	float4 fogColor;
 	float4 fogParams; // x = start, y = end, z = enabled, w = alpha reference (< 0: no test)
+	float4 reliefParams; // x = normal map slope scale, y = parallax depth relative to the texture size
 };
 
 cbuffer ClearConstants : register(b1) {
@@ -51,14 +53,13 @@ cbuffer ClearConstants : register(b1) {
 // Dynamic lights for per-pixel lighting of world geometry, see ApplyTileLights()
 cbuffer LightConstants : register(b6) {
 	int4 lightCount;
-	float4 normalMapParams; // x = slope scale, 0 = no normal maps
 	float4 lights[256]; // Per light: position + fall start, color * intensity + fall end
 };
 
 Texture2D texture0 : register(t0);
 Texture2D texture1 : register(t1);
 Texture2D texture2 : register(t2);
-Texture2D<float2> normalMap : register(t3); // Slope of the stage 0 texture, see psNormalMap
+Texture2D reliefMap : register(t3); // Slope and height of the stage 0 texture, see psNormalMap
 SamplerState sampler0 : register(s0);
 SamplerState sampler1 : register(s1);
 SamplerState sampler2 : register(s2);
@@ -80,6 +81,7 @@ struct VSOutput {
 	float4 prevClip : TEXCOORD5; // Clip position in the previous frame, w <= 0 if unknown
 	float3 world : TEXCOORD6;    // World position for per-pixel lighting
 	float3 normal : TEXCOORD7;   // World normal for per-pixel lighting, zero if not lit
+	float3 view : TEXCOORD8;     // From the world position to the camera
 };
 
 struct PSInput {
@@ -93,6 +95,7 @@ struct PSInput {
 	float4 prevClip : TEXCOORD5;
 	INTERPOLATION float3 world : TEXCOORD6;
 	INTERPOLATION float3 normal : TEXCOORD7;
+	float3 view : TEXCOORD8;
 };
 
 struct PSOutput {
@@ -113,6 +116,7 @@ VSOutput makeOutput(float4 clip, float4 prevClip, float4 color, float2 uv0, floa
 	o.prevClip = prevClip;
 	o.world = float3(0, 0, 0);
 	o.normal = float3(0, 0, 0);
+	o.view = float3(0, 0, 0);
 	return o;
 }
 
@@ -128,8 +132,13 @@ VSOutput vsWorld(float3 position : POSITION, float4 color : COLOR, float2 uv : T
 	                        float2(0, 0));
 	o.world = position;
 	o.normal = normal;
+	o.view = camera.xyz - position;
 	return o;
 }
+
+// Distance range where the parallax mapping fades out
+static const float ParallaxFadeStart = 1200;
+static const float ParallaxFadeEnd = 2000;
 
 // Same falloff as ApplyTileLights(), evaluated per pixel
 float3 pixelLighting(float3 position, float3 normal) {
@@ -202,22 +211,73 @@ PSOutput psMain(PSInput input
 	float2 dx2 = ddx(input.uv2), dy2 = ddy(input.uv2);
 	float3 worldDx = ddx(input.world), worldDy = ddy(input.world);
 	
-	// The vertex color holds the static lighting, add the dynamic lights
+	// The vertex color holds the static lighting
 	float normalLength = dot(input.normal, input.normal);
+	float3 normal = input.normal * rsqrt(max(normalLength, 1e-20));
+	bool relief = normalLength > 0.01 && stages[0].w != 0;
+	
+	// Tangent frame from the screen-space derivatives (Christian Schüler, "Normal Mapping Without Precomputed
+	// Tangents"): the world-space gradients of the texture coordinates, multiplied by det
+	float3 dp2perp = cross(worldDy, normal);
+	float3 dp1perp = cross(normal, worldDx);
+	float3 gradU = dp2perp * dx0.x + dp1perp * dy0.x;
+	float3 gradV = dp2perp * dx0.y + dp1perp * dy0.y;
+	
+	// Parallax occlusion mapping: march the view ray through the height field below the surface, with the
+	// average height at the surface
+	float2 uv0 = input.uv0;
+	[branch] if(relief && reliefParams.y > 0) {
+		float det = dot(worldDx, dp2perp);
+		float viewDistance = length(input.view);
+		float3 view = input.view / max(viewDistance, 0.0001);
+		float cosView = dot(view, normal);
+		float fade = saturate((ParallaxFadeEnd - viewDistance) / (ParallaxFadeEnd - ParallaxFadeStart));
+		float uvPerWorld = sqrt(length(gradU) * length(gradV)) / max(abs(det), 1e-20);
+		[branch] if(cosView > 0.05 && fade > 0 && abs(det) > 1e-20 && uvPerWorld > 0) {
+			// Texture coordinate change from the surface to the full depth along the view ray
+			float depth = reliefParams.y * fade / uvPerWorld;
+			float2 offset = -float2(dot(gradU, view), dot(gradV, view)) / det * (depth / max(cosView, 0.2));
+			int steps = int(lerp(32, 8, cosView));
+			float stepSize = 1.0 / steps;
+			float2 uv = uv0 - offset * 0.5;
+			float2 delta = offset * stepSize;
+			float layer = 0;
+			float surface = 1 - reliefMap.SampleGrad(sampler0, uv, dx0, dy0).b;
+			float2 previousUV = uv;
+			[loop] for(int i = 0; i < steps && layer < surface; i++) {
+				previousUV = uv;
+				uv += delta;
+				layer += stepSize;
+				surface = 1 - reliefMap.SampleGrad(sampler0, uv, dx0, dy0).b;
+			}
+			// Refine the intersection between the last two steps with a binary search
+			float2 startUV = previousUV;
+			float startLayer = layer - stepSize;
+			float2 endUV = uv;
+			float endLayer = layer;
+			[unroll] for(int j = 0; j < 5; j++) {
+				float2 middleUV = (startUV + endUV) * 0.5;
+				float middleLayer = (startLayer + endLayer) * 0.5;
+				if(middleLayer < 1 - reliefMap.SampleGrad(sampler0, middleUV, dx0, dy0).b) {
+					startUV = middleUV;
+					startLayer = middleLayer;
+				} else {
+					endUV = middleUV;
+					endLayer = middleLayer;
+				}
+			}
+			uv0 = (startUV + endUV) * 0.5;
+		}
+	}
+	
+	// Add the dynamic lights
 	float3 dynamicLight = float3(0, 0, 0);
 	[branch] if(lightCount.x > 0 && normalLength > 0.01) {
-		float3 normal = input.normal * rsqrt(normalLength);
-		[branch] if(normalMapParams.x > 0 && stages[0].w != 0) {
-			// Tangent frame from the screen-space derivatives (Christian Schüler, "Normal Mapping Without
-			// Precomputed Tangents")
-			float3 dp2perp = cross(worldDy, normal);
-			float3 dp1perp = cross(normal, worldDx);
-			float3 tangent = dp2perp * dx0.x + dp1perp * dy0.x;
-			float3 bitangent = dp2perp * dx0.y + dp1perp * dy0.y;
-			float scale = rsqrt(max(max(dot(tangent, tangent), dot(bitangent, bitangent)), 1e-20));
+		[branch] if(relief && reliefParams.x > 0) {
+			float scale = rsqrt(max(max(dot(gradU, gradU), dot(gradV, gradV)), 1e-20));
 			// Height grows with the brightness, the surface normal leans against the slope
-			float2 slope = (normalMap.SampleGrad(sampler0, input.uv0, dx0, dy0) * 2 - 1) * normalMapParams.x;
-			float3 bumped = normalize(normal - (tangent * slope.x + bitangent * slope.y) * scale);
+			float2 slope = (reliefMap.SampleGrad(sampler0, uv0, dx0, dy0).rg * 2 - 1) * reliefParams.x;
+			float3 bumped = normalize(normal - (gradU * slope.x + gradV * slope.y) * scale);
 			if(all(isfinite(bumped))) {
 				normal = bumped;
 			}
@@ -227,7 +287,7 @@ PSOutput psMain(PSInput input
 	}
 	
 	[branch] if(stages[0].z != 0) {
-		color = combine(stages[0], color, texture0.SampleGrad(sampler0, input.uv0, dx0, dy0));
+		color = combine(stages[0], color, texture0.SampleGrad(sampler0, uv0, dx0, dy0));
 	}
 	[branch] if(stages[1].z != 0) {
 		color = combine(stages[1], color, texture1.SampleGrad(sampler1, input.uv1, dx1, dy1));
@@ -572,15 +632,37 @@ float4 psColorGrading(BlitOutput input) : SV_Target {
 	return float4(saturate(color), 1);
 }
 
+// Brightness of a texture mip level with bilinear filtering and clamping at the edges
+float coarseBrightness(float2 uv, int level) {
+	uint width, height, levels;
+	texture0.GetDimensions(level, width, height, levels);
+	float2 p = uv * float2(width, height) - 0.5;
+	int2 base = int2(floor(p));
+	float2 f = p - base;
+	int2 last = int2(width, height) - 1;
+	float h[2][2];
+	[unroll] for(int y = 0; y < 2; y++) {
+		[unroll] for(int x = 0; x < 2; x++) {
+			int2 texel = clamp(base + int2(x, y), 0, last);
+			h[y][x] = dot(texture0.Load(int3(texel, level)).rgb, float3(0.2126, 0.7152, 0.0722));
+		}
+	}
+	return lerp(lerp(h[0][0], h[0][1], f.x), lerp(h[1][0], h[1][1], f.x), f.y);
+}
+
 /*
- * Normal map generation: the brightness of a texture is used as height, the Sobel filter of it gives the slope
- * (height change per texel in u and v), stored scaled into [0, 1]. Most textures are not seamless, so the samples
- * are clamped to the edge instead of wrapping: comparing opposite edges would put a ridge around the border.
+ * Relief map generation: the brightness of a texture is used as height.
+ *  - rg: the Sobel filter of the height gives the slope (height change per texel in u and v), scaled into [0, 1].
+ *    Most textures are not seamless, so the samples are clamped to the edge instead of wrapping: comparing
+ *    opposite edges would put a ridge around the border.
+ *  - b: the height for parallax mapping, from a mip level of about 64 texels so that it follows the large shapes
+ *    (stones and joints) instead of the fine detail, relative to the average brightness of the texture (its last
+ *    mip level) with 0.5 at the average.
  */
-float2 psNormalMap(float4 position : SV_Position) : SV_Target {
+float4 psNormalMap(float4 position : SV_Position) : SV_Target {
 	
-	uint width, height;
-	texture0.GetDimensions(width, height);
+	uint width, height, levels;
+	texture0.GetDimensions(0, width, height, levels);
 	int2 size = int2(width, height);
 	int2 pixel = int2(position.xy);
 	
@@ -594,13 +676,18 @@ float2 psNormalMap(float4 position : SV_Position) : SV_Target {
 	
 	float du = (h[0][2] + 2 * h[1][2] + h[2][2]) - (h[0][0] + 2 * h[1][0] + h[2][0]);
 	float dv = (h[2][0] + 2 * h[2][1] + h[2][2]) - (h[0][0] + 2 * h[0][1] + h[0][2]);
-
+	
 	// Flatten the outermost texels so that filtering across the border (wrap) blends equal slopes
 	if(any(pixel == 0 || pixel == size - 1)) {
 		du = dv = 0;
 	}
-
-	return saturate(float2(du, dv) * 0.125 + 0.5);
+	
+	int level = clamp(int(log2(float(max(width, height)))) - 6, 0, int(levels) - 1);
+	float coarse = coarseBrightness((float2(pixel) + 0.5) / float2(size), level);
+	float average = dot(texture0.Load(int3(0, 0, levels - 1)).rgb, float3(0.2126, 0.7152, 0.0722));
+	float relativeHeight = 0.5 + (coarse - average) * 2;
+	
+	return saturate(float4(du * 0.125 + 0.5, dv * 0.125 + 0.5, relativeHeight, 1));
 }
 
 )HLSL";

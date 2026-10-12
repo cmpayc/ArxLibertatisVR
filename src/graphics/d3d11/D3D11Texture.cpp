@@ -191,7 +191,7 @@ void D3D11Texture::upload() {
 void D3D11Texture::updateNormalMap() {
 	
 	// Only textures for the 3D scene have mipmaps
-	if(m_normalView || !m_view || !m_textureMipmaps || !m_renderer->normalMapsEnabled()) {
+	if(m_normalView || !m_view || !m_textureMipmaps || !m_renderer->reliefMapsEnabled()) {
 		return;
 	}
 	

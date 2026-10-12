@@ -918,6 +918,7 @@ public:
 		, m_colorGradingCycleText(nullptr)
 		, m_pixelLightingCheckbox(nullptr)
 		, m_normalMapsCycleText(nullptr)
+		, m_parallaxMappingCycleText(nullptr)
 		, m_dlssAvailable(false)
 		, m_fsrAvailable(false)
 		, m_anyUpscalerAvailable(false)
@@ -933,6 +934,7 @@ public:
 	CycleTextWidget * m_colorGradingCycleText;
 	CheckboxWidget * m_pixelLightingCheckbox;
 	CycleTextWidget * m_normalMapsCycleText;
+	CycleTextWidget * m_parallaxMappingCycleText;
 	bool m_dlssAvailable;
 	bool m_fsrAvailable;
 	bool m_anyUpscalerAvailable;
@@ -1204,6 +1206,8 @@ public:
 		
 		m_normalMapsCycleText = addEffectStrength(getLocalised("system_menus_options_video_normal_maps"),
 		                                          &config.video.normalMaps, &Renderer::setNormalMaps);
+		m_parallaxMappingCycleText = addEffectStrength(getLocalised("system_menus_options_video_parallax_mapping"),
+		                                               &config.video.parallaxMapping, &Renderer::setParallaxMapping);
 		
 		setUpscalerState();
 		
@@ -1325,6 +1329,9 @@ private:
 		}
 		if(m_normalMapsCycleText) {
 			m_normalMapsCycleText->setEnabled(direct3D);
+		}
+		if(m_parallaxMappingCycleText) {
+			m_parallaxMappingCycleText->setEnabled(direct3D);
 		}
 		if(m_pixelLightingCheckbox) {
 			m_pixelLightingCheckbox->setEnabled(direct3D);

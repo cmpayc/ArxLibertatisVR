@@ -473,6 +473,12 @@ public:
 	//! Set the strength of the normal maps generated from the textures in [0, 1], 0 disables them
 	virtual void setNormalMaps(float strength) { ARX_UNUSED(strength); }
 	
+	//! \return true if this renderer supports parallax occlusion mapping
+	[[nodiscard]] virtual bool supportsParallaxMapping() const { return false; }
+	
+	//! Set the depth of the parallax occlusion mapping of world geometry in [0, 1], 0 disables it
+	virtual void setParallaxMapping(float strength) { ARX_UNUSED(strength); }
+	
 	//! Set the dynamic lights for per-pixel lighting of world vertices with a non-zero normal
 	virtual void setPixelLights(const PixelLight * lights, size_t count) { ARX_UNUSED(lights), ARX_UNUSED(count); }
 	
