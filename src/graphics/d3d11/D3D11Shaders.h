@@ -51,12 +51,14 @@ cbuffer ClearConstants : register(b1) {
 // Dynamic lights for per-pixel lighting of world geometry, see ApplyTileLights()
 cbuffer LightConstants : register(b6) {
 	int4 lightCount;
+	float4 normalMapParams; // x = slope scale, 0 = no normal maps
 	float4 lights[256]; // Per light: position + fall start, color * intensity + fall end
 };
 
 Texture2D texture0 : register(t0);
 Texture2D texture1 : register(t1);
 Texture2D texture2 : register(t2);
+Texture2D<float2> normalMap : register(t3); // Slope of the stage 0 texture, see psNormalMap
 SamplerState sampler0 : register(s0);
 SamplerState sampler1 : register(s1);
 SamplerState sampler2 : register(s2);
@@ -194,18 +196,35 @@ PSOutput psMain(PSInput input
 	
 	float4 color = input.color;
 	
-	// The vertex color holds the static lighting, add the dynamic lights
-	float normalLength = dot(input.normal, input.normal);
-	float3 dynamicLight = float3(0, 0, 0);
-	[branch] if(lightCount.x > 0 && normalLength > 0.01) {
-		dynamicLight = pixelLighting(input.world, input.normal * rsqrt(normalLength));
-		color.rgb = saturate(color.rgb + dynamicLight);
-	}
-	
 	// Gradients must be computed outside of flow control
 	float2 dx0 = ddx(input.uv0), dy0 = ddy(input.uv0);
 	float2 dx1 = ddx(input.uv1), dy1 = ddy(input.uv1);
 	float2 dx2 = ddx(input.uv2), dy2 = ddy(input.uv2);
+	float3 worldDx = ddx(input.world), worldDy = ddy(input.world);
+	
+	// The vertex color holds the static lighting, add the dynamic lights
+	float normalLength = dot(input.normal, input.normal);
+	float3 dynamicLight = float3(0, 0, 0);
+	[branch] if(lightCount.x > 0 && normalLength > 0.01) {
+		float3 normal = input.normal * rsqrt(normalLength);
+		[branch] if(normalMapParams.x > 0 && stages[0].w != 0) {
+			// Tangent frame from the screen-space derivatives (Christian Schüler, "Normal Mapping Without
+			// Precomputed Tangents")
+			float3 dp2perp = cross(worldDy, normal);
+			float3 dp1perp = cross(normal, worldDx);
+			float3 tangent = dp2perp * dx0.x + dp1perp * dy0.x;
+			float3 bitangent = dp2perp * dx0.y + dp1perp * dy0.y;
+			float scale = rsqrt(max(max(dot(tangent, tangent), dot(bitangent, bitangent)), 1e-20));
+			// Height grows with the brightness, the surface normal leans against the slope
+			float2 slope = (normalMap.SampleGrad(sampler0, input.uv0, dx0, dy0) * 2 - 1) * normalMapParams.x;
+			float3 bumped = normalize(normal - (tangent * slope.x + bitangent * slope.y) * scale);
+			if(all(isfinite(bumped))) {
+				normal = bumped;
+			}
+		}
+		dynamicLight = pixelLighting(input.world, normal);
+		color.rgb = saturate(color.rgb + dynamicLight);
+	}
 	
 	[branch] if(stages[0].z != 0) {
 		color = combine(stages[0], color, texture0.SampleGrad(sampler0, input.uv0, dx0, dy0));
@@ -551,6 +570,37 @@ float4 psColorGrading(BlitOutput input) : SV_Target {
 	color *= 1 - gradeParams.z * vignette;
 	
 	return float4(saturate(color), 1);
+}
+
+/*
+ * Normal map generation: the brightness of a texture is used as height, the Sobel filter of it gives the slope
+ * (height change per texel in u and v), stored scaled into [0, 1]. Most textures are not seamless, so the samples
+ * are clamped to the edge instead of wrapping: comparing opposite edges would put a ridge around the border.
+ */
+float2 psNormalMap(float4 position : SV_Position) : SV_Target {
+	
+	uint width, height;
+	texture0.GetDimensions(width, height);
+	int2 size = int2(width, height);
+	int2 pixel = int2(position.xy);
+	
+	float h[3][3];
+	[unroll] for(int y = 0; y < 3; y++) {
+		[unroll] for(int x = 0; x < 3; x++) {
+			int2 p = clamp(pixel + int2(x - 1, y - 1), 0, size - 1);
+			h[y][x] = dot(texture0.Load(int3(p, 0)).rgb, float3(0.2126, 0.7152, 0.0722));
+		}
+	}
+	
+	float du = (h[0][2] + 2 * h[1][2] + h[2][2]) - (h[0][0] + 2 * h[1][0] + h[2][0]);
+	float dv = (h[2][0] + 2 * h[2][1] + h[2][2]) - (h[0][0] + 2 * h[0][1] + h[0][2]);
+
+	// Flatten the outermost texels so that filtering across the border (wrap) blends equal slopes
+	if(any(pixel == 0 || pixel == size - 1)) {
+		du = dv = 0;
+	}
+
+	return saturate(float2(du, dv) * 0.125 + 0.5);
 }
 
 )HLSL";

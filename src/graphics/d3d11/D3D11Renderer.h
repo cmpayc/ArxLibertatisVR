@@ -135,6 +135,15 @@ public:
 	void setPixelLighting(bool enabled) override;
 	bool usesPixelLighting() const override { return m_pixelLighting; }
 	void setPixelLights(const PixelLight * lights, size_t count) override;
+	bool supportsNormalMaps() const override { return true; }
+	void setNormalMaps(float strength) override;
+	
+	//! \return true if normal maps are generated for textures and used for per-pixel lighting
+	bool normalMapsEnabled() const { return m_normalMapStrength > 0.f && m_normalMapPixelShader; }
+	
+	//! Generate the normal map (brightness slope) for a texture with mipmaps
+	void generateNormalMap(ID3D11ShaderResourceView * color, const Vec2i & size, ComPtr<ID3D11Texture2D> & texture,
+	                       ComPtr<ID3D11ShaderResourceView> & view);
 	
 	D3D11TextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<D3D11TextureStage *>(Renderer::GetTextureStage(textureStage));
@@ -404,6 +413,8 @@ private:
 	ID3D11PixelShader * m_currentPixelShader;
 	ID3D11ShaderResourceView * m_currentViews[3];
 	ID3D11SamplerState * m_currentSamplers[3];
+	ID3D11ShaderResourceView * m_currentNormalView;
+	static constexpr UINT NormalMapSlot = 3;
 	float m_vsConstantsData[20];
 	bool m_vsConstantsValid;
 	unsigned char m_psConstantsData[96];
@@ -412,6 +423,8 @@ private:
 	// Per-pixel lighting of world geometry
 	bool m_pixelLighting;
 	size_t m_pixelLightCount; //!< Number of lights in m_lightConstants
+	float m_normalMapStrength;
+	ComPtr<ID3D11PixelShader> m_normalMapPixelShader;
 	bool m_pixelLightsWarned;
 	
 	// Debug snapshot, see ARX_D3D11_SNAPSHOT

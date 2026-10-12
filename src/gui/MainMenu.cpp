@@ -917,6 +917,7 @@ public:
 		, m_bloomCycleText(nullptr)
 		, m_colorGradingCycleText(nullptr)
 		, m_pixelLightingCheckbox(nullptr)
+		, m_normalMapsCycleText(nullptr)
 		, m_dlssAvailable(false)
 		, m_fsrAvailable(false)
 		, m_anyUpscalerAvailable(false)
@@ -931,6 +932,7 @@ public:
 	CycleTextWidget * m_bloomCycleText;
 	CycleTextWidget * m_colorGradingCycleText;
 	CheckboxWidget * m_pixelLightingCheckbox;
+	CycleTextWidget * m_normalMapsCycleText;
 	bool m_dlssAvailable;
 	bool m_fsrAvailable;
 	bool m_anyUpscalerAvailable;
@@ -1200,6 +1202,9 @@ public:
 			addCenter(std::move(cb));
 		}
 		
+		m_normalMapsCycleText = addEffectStrength(getLocalised("system_menus_options_video_normal_maps"),
+		                                          &config.video.normalMaps, &Renderer::setNormalMaps);
+		
 		setUpscalerState();
 		
 		{
@@ -1317,6 +1322,9 @@ private:
 		}
 		if(m_ambientOcclusionCycleText) {
 			m_ambientOcclusionCycleText->setEnabled(direct3D);
+		}
+		if(m_normalMapsCycleText) {
+			m_normalMapsCycleText->setEnabled(direct3D);
 		}
 		if(m_pixelLightingCheckbox) {
 			m_pixelLightingCheckbox->setEnabled(direct3D);

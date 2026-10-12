@@ -2047,6 +2047,7 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	renderer.setUpscalerSharpness(config.video.fsrSharpness);
 	renderer.setAmbientOcclusion(config.video.ambientOcclusion);
 	renderer.setBloom(config.video.bloom);
+	renderer.setNormalMaps(config.video.normalMaps);
 	renderer.setColorGrading(config.video.colorGrading);
 	renderer.setPixelLighting(config.video.pixelLighting);
 	

@@ -44,6 +44,15 @@ public:
 	
 	ID3D11ShaderResourceView * view() const { return m_view.Get(); }
 	
+	//! Slope of the texture brightness for normal mapping, nullptr if not generated
+	ID3D11ShaderResourceView * normalView() const { return m_normalView.Get(); }
+	
+	//! Generate the normal map if the texture can be used for normal mapping and does not have one yet
+	void updateNormalMap();
+	
+	//! Release the normal map
+	void releaseNormalMap();
+	
 	//! NPOT textures are always clamped to match the OpenGL backend.
 	bool isNPOT() const { return m_isNPOT; }
 	
@@ -53,6 +62,8 @@ private:
 	
 	d3d11::ComPtr<ID3D11Texture2D> m_texture;
 	d3d11::ComPtr<ID3D11ShaderResourceView> m_view;
+	d3d11::ComPtr<ID3D11Texture2D> m_normalTexture;
+	d3d11::ComPtr<ID3D11ShaderResourceView> m_normalView;
 	Vec2i m_textureSize;
 	bool m_textureMipmaps;
 	

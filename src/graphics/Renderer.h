@@ -467,6 +467,12 @@ public:
 	 */
 	[[nodiscard]] virtual bool usesPixelLighting() const { return false; }
 	
+	//! \return true if this renderer supports normal maps for per-pixel lighting
+	[[nodiscard]] virtual bool supportsNormalMaps() const { return false; }
+	
+	//! Set the strength of the normal maps generated from the textures in [0, 1], 0 disables them
+	virtual void setNormalMaps(float strength) { ARX_UNUSED(strength); }
+	
 	//! Set the dynamic lights for per-pixel lighting of world vertices with a non-zero normal
 	virtual void setPixelLights(const PixelLight * lights, size_t count) { ARX_UNUSED(lights), ARX_UNUSED(count); }
 	

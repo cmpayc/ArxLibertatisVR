@@ -182,10 +182,32 @@ void D3D11Texture::upload() {
 		m_renderer->context()->GenerateMips(m_view.Get());
 	}
 	
+	// The contents changed
+	releaseNormalMap();
+	updateNormalMap();
+	
+}
+
+void D3D11Texture::updateNormalMap() {
+	
+	// Only textures for the 3D scene have mipmaps
+	if(m_normalView || !m_view || !m_textureMipmaps || !m_renderer->normalMapsEnabled()) {
+		return;
+	}
+	
+	m_renderer->generateNormalMap(m_view.Get(), m_textureSize, m_normalTexture, m_normalView);
+	
+}
+
+void D3D11Texture::releaseNormalMap() {
+	m_renderer->unbindTextureView(m_normalView.Get());
+	m_normalView.Reset();
+	m_normalTexture.Reset();
 }
 
 void D3D11Texture::destroy() {
 	
+	releaseNormalMap();
 	m_renderer->unbindTextureView(m_view.Get());
 	m_view.Reset();
 	m_texture.Reset();

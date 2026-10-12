@@ -125,8 +125,12 @@ const float BloomKnee = 0.2f;
 
 const size_t MaxPixelLights = 128;
 
+// Normal map slope at full strength, the generated slope is the brightness change per texel
+const float NormalMapSlopeScale = 6.f;
+
 struct LightConstants {
 	s32 count[4];
+	float normalMap[4]; // x = slope scale, 0 = no normal maps
 	// Per light: position + fall start, color * intensity + fall end
 	float lights[MaxPixelLights * 2][4];
 };
@@ -247,12 +251,14 @@ D3D11Renderer::D3D11Renderer()
 	, m_currentPixelShader(nullptr)
 	, m_currentViews()
 	, m_currentSamplers()
+	, m_currentNormalView(nullptr)
 	, m_vsConstantsData()
 	, m_vsConstantsValid(false)
 	, m_psConstantsData()
 	, m_psConstantsValid(false)
 	, m_pixelLighting(false)
 	, m_pixelLightCount(0)
+	, m_normalMapStrength(0.f)
 	, m_pixelLightsWarned(false)
 	, m_snapshotTime(0)
 { }
@@ -667,6 +673,7 @@ bool D3D11Renderer::compileShaders() {
 			{ "psBloomUpsample", nullptr, std::addressof(m_bloomUpsamplePixelShader) },
 			{ "psBloomComposite", nullptr, std::addressof(m_bloomCompositePixelShader) },
 			{ "psColorGrading", nullptr, std::addressof(m_gradingPixelShader) },
+			{ "psNormalMap", nullptr, std::addressof(m_normalMapPixelShader) },
 		};
 		for(const PixelShaderInfo & info : shaders) {
 			if(m_featureLevel < D3D_FEATURE_LEVEL_10_1) {
@@ -1052,6 +1059,82 @@ void D3D11Renderer::setAmbientOcclusion(float strength) {
 	if(!m_inScene) {
 		releaseSceneTargets();
 	}
+	
+}
+
+void D3D11Renderer::setNormalMaps(float strength) {
+	
+	bool wasEnabled = normalMapsEnabled();
+	m_normalMapStrength = glm::clamp(strength, 0.f, 1.f);
+	bool enabled = normalMapsEnabled();
+	
+	if(enabled == wasEnabled) {
+		return;
+	}
+	
+	// Generate the normal maps for the loaded textures, or free them
+	for(D3D11Texture & texture : m_textures) {
+		if(enabled) {
+			texture.updateNormalMap();
+		} else {
+			texture.releaseNormalMap();
+		}
+	}
+	
+}
+
+void D3D11Renderer::generateNormalMap(ID3D11ShaderResourceView * color, const Vec2i & size,
+                                      ComPtr<ID3D11Texture2D> & texture, ComPtr<ID3D11ShaderResourceView> & view) {
+	
+	if(!m_normalMapPixelShader || !color || size.x <= 0 || size.y <= 0) {
+		return;
+	}
+	
+	D3D11_TEXTURE2D_DESC desc = { };
+	desc.Width = UINT(size.x);
+	desc.Height = UINT(size.y);
+	desc.MipLevels = 0;
+	desc.ArraySize = 1;
+	desc.Format = DXGI_FORMAT_R8G8_UNORM;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+	desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+	
+	ComPtr<ID3D11RenderTargetView> target;
+	D3D11_RENDER_TARGET_VIEW_DESC targetDesc = { };
+	targetDesc.Format = desc.Format;
+	targetDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+	targetDesc.Texture2D.MipSlice = 0;
+	if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &texture))
+	   || FAILED(m_device->CreateRenderTargetView(texture.Get(), &targetDesc, &target))
+	   || FAILED(m_device->CreateShaderResourceView(texture.Get(), nullptr, &view))) {
+		LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 normal map";
+		texture.Reset();
+		view.Reset();
+		return;
+	}
+	
+	ID3D11ShaderResourceView * none = nullptr;
+	m_context->PSSetShaderResources(0, 1, &none);
+	ID3D11RenderTargetView * targets[] = { target.Get() };
+	m_context->OMSetRenderTargets(1, targets, nullptr);
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(size.x), float(size.y), 0.f, 1.f };
+	m_context->RSSetViewports(1, &viewport);
+	m_context->RSSetState(getRasterizerState(false, 0, false, false));
+	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
+	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
+	m_context->PSSetShaderResources(0, 1, &color);
+	
+	drawFullscreen(m_normalMapPixelShader.Get());
+	
+	m_context->PSSetShaderResources(0, 1, &none);
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	m_context->GenerateMips(view.Get());
+	
+	// Restore the render targets and state for the next draw
+	m_currentViews[0] = nullptr;
+	invalidateCachedState();
 	
 }
 
@@ -1604,6 +1687,7 @@ void D3D11Renderer::setPixelLights(const PixelLight * lights, size_t count) {
 	LightConstants constants = {};
 	constants.count[0] = s32(count);
 	constants.count[1] = debugView ? 1 : 0;
+	constants.normalMap[0] = normalMapsEnabled() ? m_normalMapStrength * NormalMapSlopeScale : 0.f;
 	for(size_t i = 0; i < count; i++) {
 		const PixelLight & light = lights[i];
 		float * a = constants.lights[i * 2];
@@ -1842,6 +1926,11 @@ void D3D11Renderer::unbindTextureView(ID3D11ShaderResourceView * view) {
 			m_context->PSSetShaderResources(i, 1, &none);
 			m_currentViews[i] = nullptr;
 		}
+	}
+	if(m_currentNormalView == view) {
+		ID3D11ShaderResourceView * none = nullptr;
+		m_context->PSSetShaderResources(NormalMapSlot, 1, &none);
+		m_currentNormalView = nullptr;
 	}
 	
 }
@@ -2557,6 +2646,19 @@ void D3D11Renderer::flushState(VertexType type) {
 		constants.stages[i][0] = s32(stage->getColorOp());
 		constants.stages[i][1] = s32(stage->getAlphaOp());
 		constants.stages[i][2] = texture ? 1 : 0;
+		
+		// Normal map of the main texture for per-pixel lighting
+		if(i == 0) {
+			ID3D11ShaderResourceView * normalView = nullptr;
+			if(texture && type == VertexWorld && m_pixelLightCount > 0 && normalMapsEnabled()) {
+				normalView = texture->normalView();
+			}
+			if(force || normalView != m_currentNormalView) {
+				m_context->PSSetShaderResources(NormalMapSlot, 1, &normalView);
+				m_currentNormalView = normalView;
+			}
+			constants.stages[0][3] = normalView ? 1 : 0;
+		}
 		
 	}
 	
