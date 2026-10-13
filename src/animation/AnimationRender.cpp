@@ -50,11 +50,13 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include <utility>
 
 #include "animation/Animation.h"
+#include "animation/MeshSmoothing.h"
 
 #include "core/Application.h"
 #include "core/GameTime.h"
 #include "core/Core.h"
 
+#include "game/Camera.h"
 #include "game/Damage.h"
 #include "game/Equipment.h"
 #include "game/EntityManager.h"
@@ -463,7 +465,8 @@ static bool Cedric_IO_Visible(const Vec3f & pos) {
 }
 
 /* Object dynamic lighting */
-static void Cedric_ApplyLighting(ShaderLight lights[], size_t lightsCount, EERIE_3DOBJ * eobj, Skeleton * obj, const ColorMod & colorMod) {
+static void Cedric_ApplyLighting(ShaderLight lights[], size_t lightsCount, EERIE_3DOBJ * eobj, Skeleton * obj,
+                                 const ColorMod & colorMod, bool smoothNormals) {
 	
 	ARX_PROFILE_FUNC();
 	
@@ -477,7 +480,8 @@ static void Cedric_ApplyLighting(ShaderLight lights[], size_t lightsCount, EERIE
 		/* Get light value for each vertex */
 		for(VertexId vertex : eobj->m_boneVertices[group]) {
 			const Vec3f & position = eobj->vertexWorldPositions[vertex].v;
-			Vec3f normal = quat * eobj->vertexlist[vertex].norm;
+			Vec3f normal = smoothNormals ? meshSmoothingNormal(*eobj, vertex.handleData())
+			                             : quat * eobj->vertexlist[vertex].norm;
 			eobj->vertexColors[vertex] = ApplyLight(lights, lightsCount, position, normal, colorMod);
 		}
 	}
@@ -997,7 +1001,8 @@ static void AddAnimatedObjectHalo(const HaloInfo & haloInfo, const VertexId * pa
 }
 
 static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
-                                const Vec3f & pos, float invisibility) {
+                                const Vec3f & pos, float invisibility, int segments,
+                                const MeshLighting * lighting) {
 	
 	ARX_PROFILE_FUNC();
 	
@@ -1058,26 +1063,44 @@ static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
 		
 		TexturedVertex * tvList = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
 		
+		TexturedVertex corners[3];
 		for(size_t n = 0; n < 3; n++) {
-			tvList[n].p = Vec3f(eobj->vertexClipPositions[face.vid[n]]);
-			tvList[n].w = eobj->vertexClipPositions[face.vid[n]].w;
-			tvList[n].prevP = previousClipPosition(eobj, face.vid[n]);
-			tvList[n].uv = Vec2f(face.u[n], face.v[n]);
-			tvList[n].color = eobj->vertexColors[face.vid[n]];
+			corners[n].p = Vec3f(eobj->vertexClipPositions[face.vid[n]]);
+			corners[n].w = eobj->vertexClipPositions[face.vid[n]].w;
+			corners[n].prevP = previousClipPosition(eobj, face.vid[n]);
+			corners[n].uv = Vec2f(face.u[n], face.v[n]);
+			corners[n].color = eobj->vertexColors[face.vid[n]];
 		}
 		
 		if((face.facetype & POLY_TRANS) || invisibility > 0.f) {
-			tvList[0].color = tvList[1].color = tvList[2].color = Color::gray(fTransp).toRGB();
+			corners[0].color = corners[1].color = corners[2].color = Color::gray(fTransp).toRGB();
+		}
+		
+		TexturedVertex smoothed[MeshSmoothingMaxSegments * MeshSmoothingMaxSegments * 3];
+		size_t triangles = 1;
+		const TexturedVertex * vertices = corners;
+		if(segments > 1) {
+			bool fixedColor = (face.facetype & POLY_TRANS) || invisibility > 0.f;
+			triangles = smoothFace(*eobj, i, corners, segments, fixedColor ? nullptr : lighting, smoothed);
+			vertices = smoothed;
+		}
+		
+		std::copy(vertices, vertices + 3, tvList);
+		for(size_t t = 1; t < triangles; t++) {
+			tvList = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
+			std::copy(vertices + t * 3, vertices + t * 3 + 3, tvList);
 		}
 		
 		if(haloInfo.size) {
-			AddAnimatedObjectHalo(haloInfo, face.vid, invisibility, eobj, io, tvList);
+			AddAnimatedObjectHalo(haloInfo, face.vid, invisibility, eobj, io, corners);
 		}
 		
 		if(glow) {
-			TexturedVertex * tv2 = PushVertexInTable(TexSpecialColor.m_modelBatch[BatchBucket_Opaque]);
-			std::copy(tvList, tvList + 3, tv2);
-			tv2[0].color = tv2[1].color = tv2[2].color = glowColor;
+			for(size_t t = 0; t < triangles; t++) {
+				TexturedVertex * tv2 = PushVertexInTable(TexSpecialColor.m_modelBatch[BatchBucket_Opaque]);
+				std::copy(vertices + t * 3, vertices + t * 3 + 3, tv2);
+				tv2[0].color = tv2[1].color = tv2[2].color = glowColor;
+			}
 		}
 		
 	}
@@ -1107,9 +1130,23 @@ static void Cedric_AnimateDrawEntityRender(EERIE_3DOBJ * eobj, const Vec3f & pos
 	size_t lightsCount;
 	UpdateLlights(lights, lightsCount, tv, false);
 	
-	Cedric_ApplyLighting(lights, lightsCount, eobj, obj, colorMod);
+	// Characters are drawn with curved triangles and smooth shading
+	Entity * character = io;
+	if(!io && IN_BOOK_DRAW && eobj == entities.player()->obj) {
+		character = entities.player();
+	}
+	bool smooth = meshSmoothingEnabled() && character
+	              && (character == entities.player() || (character->ioflags & IO_NPC));
+	int segments = 1;
+	if(smooth) {
+		updateMeshSmoothing(*eobj);
+		segments = meshSmoothingSegments(IN_BOOK_DRAW ? 0.f : glm::distance(pos, g_camera->m_pos));
+	}
 	
-	Cedric_RenderObject(eobj, obj, io, pos, invisibility);
+	Cedric_ApplyLighting(lights, lightsCount, eobj, obj, colorMod, smooth);
+	
+	MeshLighting lighting = { lights, lightsCount, &colorMod };
+	Cedric_RenderObject(eobj, obj, io, pos, invisibility, segments, &lighting);
 	
 	// Now we can render Linked Objects
 	for(const EERIE_LINKED & link : eobj->linked) {

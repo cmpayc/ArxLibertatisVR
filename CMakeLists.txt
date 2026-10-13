@@ -911,6 +911,7 @@ set(AI_SOURCES
 set(ANIMATION_SOURCES
 	src/animation/Animation.cpp
 	src/animation/AnimationRender.cpp
+	src/animation/MeshSmoothing.cpp
 	src/animation/Skeleton.cpp
 )
 

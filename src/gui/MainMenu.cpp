@@ -1209,6 +1209,20 @@ public:
 		m_parallaxMappingCycleText = addEffectStrength(getLocalised("system_menus_options_video_parallax_mapping"),
 		                                               &config.video.parallaxMapping, &Renderer::setParallaxMapping);
 		
+		{
+			std::string_view label = getLocalised("system_menus_options_video_model_smoothing");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				config.video.modelSmoothing = pos;
+			};
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_low"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_med"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_high"));
+			cb->setValue(config.video.modelSmoothing);
+			addCenter(std::move(cb));
+		}
+		
 		setUpscalerState();
 		
 		{

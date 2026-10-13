@@ -83,6 +83,7 @@ constexpr const int
 	vsync = -1,
 	fpsLimit = -1,
 	maxAnisotropicFiltering = 9001,
+	modelSmoothing = 2,
 	alphaCutoutAntialiasing = 2,
 	cinematicWidescreenMode = CinematicFadeEdges,
 	hudScaleFilter = UIFilterBilinear,
@@ -237,6 +238,7 @@ constexpr const std::string_view
 	bloom = "bloom",
 	normalMaps = "normal_maps",
 	parallaxMapping = "parallax_mapping",
+	modelSmoothing = "model_smoothing",
 	upscaler = "upscaler",
 	colorGrading = "color_grading",
 	dlssPreset = "dlss_preset",
@@ -510,6 +512,7 @@ bool Config::save() {
 	writer.writeKey(Key::bloom, video.bloom);
 	writer.writeKey(Key::normalMaps, video.normalMaps);
 	writer.writeKey(Key::parallaxMapping, video.parallaxMapping);
+	writer.writeKey(Key::modelSmoothing, video.modelSmoothing);
 	writer.writeKey(Key::colorGrading, video.colorGrading);
 	writer.writeKey(Key::pixelLighting, video.pixelLighting);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
@@ -660,6 +663,8 @@ bool Config::init(const fs::path & file) {
 	video.normalMaps = glm::clamp(normalMaps, 0.f, 1.f);
 	float parallaxMapping = reader.getKey(Section::Video, Key::parallaxMapping, Default::parallaxMapping);
 	video.parallaxMapping = glm::clamp(parallaxMapping, 0.f, 1.f);
+	int modelSmoothing = reader.getKey(Section::Video, Key::modelSmoothing, Default::modelSmoothing);
+	video.modelSmoothing = glm::clamp(modelSmoothing, 0, 3);
 	video.colorGrading = reader.getKey(Section::Video, Key::colorGrading, Default::colorGrading);
 	video.pixelLighting = reader.getKey(Section::Video, Key::pixelLighting, Default::pixelLighting);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);
