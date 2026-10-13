@@ -58,8 +58,10 @@ public:
 		float strength = 0.f;
 		float exponent = 1.f; //!< Larger for sharper highlights
 		float metallic = 0.f; //!< How much the texture color tints the highlights
-		float reflectivity = 0.f; //!< Strength of the screen-space reflections, only water reflects for now
+		float reflectivity = 0.f; //!< Strength of the screen-space reflections, only water and ice reflect for now
 		float glow = 0.f; //!< Glowing, flowing lava
+		float ice = 0.f; //!< Deep, cold and sparkling ice on the bright, bluish parts of the texture
+		float crystal = 0.f; //!< Like ice, but clear and on the whole texture
 	};
 	const Specular & specular() const { return m_specular; }
 	

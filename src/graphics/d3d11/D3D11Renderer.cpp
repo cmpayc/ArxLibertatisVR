@@ -72,7 +72,7 @@ struct PSConstants {
 	float relief[4]; // x = normal map slope scale, y = parallax depth, z = cavity darkening of models, both 0 without a relief map
 	float specular[4]; // x = highlight strength, y = exponent, z = metallic, all 0 without highlights
 	float surface[4]; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
-	float effect[4]; // x = time in seconds (repeating), y = lava glow, 0 for other surfaces
+	float effect[4]; // x = time in seconds (repeating), y = lava glow, z = ice, w = crystal, 0 for other surfaces
 };
 
 // The lava animation repeats after this time, the frequencies of its waves are multiples of 0.1
@@ -3048,6 +3048,13 @@ void D3D11Renderer::flushState(VertexType type) {
 			if(texture && (type == VertexWorld || type == VertexTL) && m_drawingScene && texture->specular().glow > 0.f) {
 				constants.effect[0] = m_effectTime;
 				constants.effect[1] = texture->specular().glow;
+			}
+			// Ice looks deep, cold and sparkles in the 3D scene, crystals and gems (also items) look clear and deep
+			if(texture && type == VertexWorld && m_drawingScene) {
+				constants.effect[2] = texture->specular().ice;
+			}
+			if(texture && (type == VertexWorld || type == VertexTL) && m_drawingScene) {
+				constants.effect[3] = texture->specular().crystal;
 			}
 			// Water is drawn without normals, with an animated texture
 			if(type == VertexWorld3 && m_waterSurface) {

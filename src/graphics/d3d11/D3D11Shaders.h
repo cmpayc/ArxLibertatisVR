@@ -418,6 +418,43 @@ PSOutput psMain(PSInput input
 		color = combine(stages[2], color, texture2.SampleGrad(sampler2, input.uv2, dx2, dy2));
 	}
 	
+	// Ice: its icy (bluish, not brown earth) parts look deep and cold, with cold light at grazing angles and twinkling
+	// frost, and reflect the scene (see the surface output)
+	float iceMask = 0;
+	// Crystals and gems get the same look on the whole texture, clear instead of blue
+	bool crystal = effectParams.w > 0;
+	[branch] if((effectParams.z > 0 || crystal) && stages[0].z != 0) {
+		iceMask = crystal ? effectParams.w : smoothstep(-0.08, 0.02, texel0.b - texel0.r) * effectParams.z;
+		float3 view = input.view / max(length(input.view), 0.0001);
+		float cosView = saturate(dot(view, flatNormal));
+		// How much light the surface gets, from its color and its texture
+		float3 luma = float3(0.299, 0.587, 0.114);
+		float lighting = clamp(dot(color.rgb, luma) / max(dot(texel0.rgb, luma), 0.05), 0, 2);
+		// A deeper layer of the ice seen through the surface, shifted with the view like the parallax mapping
+		float det = dot(worldDx, dp2perp);
+		float uvPerWorld = sqrt(length(gradU) * length(gradV)) / max(abs(det), 1e-20);
+		[branch] if(abs(det) > 1e-20 && uvPerWorld > 0 && iceMask > 0) {
+			float depth = 0.08 / uvPerWorld;
+			float2 offset = -float2(dot(gradU, view), dot(gradV, view)) / det * (depth / max(cosView, 0.25));
+			float3 inner = texture0.SampleGrad(sampler0, uv0 + offset, dx0, dy0).rgb;
+			float3 deep = inner * (crystal ? float3(0.7, 0.75, 0.8) : float3(0.35, 0.52, 0.7)) * min(lighting, 1);
+			color.rgb = lerp(color.rgb, deep, 0.4 * iceMask);
+		}
+		// Cold tint
+		color.rgb = lerp(color.rgb, color.rgb * float3(0.75, 0.88, 1), (crystal ? 0.15 : 0.6) * iceMask);
+		// Cold light at grazing angles, where ice reflects most
+		float fresnel = pow(1 - cosView, 4);
+		color.rgb += float3(0.35, 0.5, 0.65) * (fresnel * 0.08 * iceMask * saturate(lighting));
+		// Frost twinkles as the view moves, close by only
+		float3 cell = floor(input.world * 0.5 + view * 6);
+		float hash = frac(sin(dot(cell, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+		float fade = saturate(1 - length(input.view) / 800);
+		color.rgb += step(0.997, hash) * (0.25 * iceMask * fade * saturate(lighting * 2));
+		color.rgb = saturate(color.rgb);
+		// The earth between the ice is not shiny
+		specular *= lerp(0.3, 1, iceMask);
+	}
+
 	// Metals tint the highlights with their color, darker parts of other surfaces are less shiny
 	[branch] if(any(specular > 0)) {
 		float luminance = dot(texel0.rgb, float3(0.299, 0.587, 0.114));
@@ -466,6 +503,10 @@ PSOutput psMain(PSInput input
 	// Normal and reflectivity for the screen-space reflections: opaque draws always replace them, blended draws
 	// only for reflective surfaces like water
 	float reflectivity = (normalLength > 0.01) ? surfaceParams.x : 0;
+	// Only the icy parts of ice textures reflect
+	if(effectParams.z > 0 || effectParams.w > 0) {
+		reflectivity *= iceMask;
+	}
 	o.surface = float4(encodeNormal(normal), reflectivity, (surfaceParams.y == 0 || reflectivity > 0) ? 1 : 0);
 	return o;
 }
