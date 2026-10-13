@@ -68,7 +68,7 @@ struct PSConstants {
 	s32 stages[3][4];
 	float fogColor[4];
 	float fogParams[4];
-	float relief[4]; // x = normal map slope scale, y = parallax depth, both 0 without a relief map
+	float relief[4]; // x = normal map slope scale, y = parallax depth, z = cavity darkening of models, both 0 without a relief map
 	float specular[4]; // x = highlight strength, y = exponent, z = metallic, all 0 without highlights
 	float surface[4]; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
 };
@@ -3001,10 +3001,12 @@ void D3D11Renderer::flushState(VertexType type) {
 		constants.stages[i][1] = s32(stage->getAlphaOp());
 		constants.stages[i][2] = texture ? 1 : 0;
 		
-		// Relief map of the main texture for normal mapping and parallax mapping of world geometry
+		// Relief map of the main texture for normal mapping and parallax mapping of world geometry, and for
+		// normal mapping of models
 		if(i == 0) {
 			ID3D11ShaderResourceView * normalView = nullptr;
-			if(texture && type == VertexWorld && reliefMapsEnabled()) {
+			bool model = (type == VertexTL && m_modelTessellation && m_drawingScene);
+			if(texture && (type == VertexWorld || model) && reliefMapsEnabled()) {
 				normalView = texture->normalView();
 			}
 			if(force || normalView != m_currentNormalView) {
@@ -3014,7 +3016,8 @@ void D3D11Renderer::flushState(VertexType type) {
 			constants.stages[0][3] = normalView ? 1 : 0;
 			if(normalView) {
 				constants.relief[0] = m_normalMapStrength * NormalMapSlopeScale;
-				constants.relief[1] = m_parallaxStrength * ParallaxDepthScale;
+				constants.relief[1] = model ? 0.f : m_parallaxStrength * ParallaxDepthScale;
+				constants.relief[2] = model ? m_normalMapStrength : 0.f;
 			}
 			
 			// Highlights from the material of the main texture

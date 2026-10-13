@@ -44,7 +44,7 @@ cbuffer PSConstants : register(b0) {
 	int4 stages[3]; // x = color op, y = alpha op, z = has texture
 	float4 fogColor;
 	float4 fogParams; // x = start, y = end, z = enabled, w = alpha reference (< 0: no test)
-	float4 reliefParams; // x = normal map slope scale, y = parallax depth relative to the texture size
+	float4 reliefParams; // x = normal map slope scale, y = parallax depth relative to the texture size, z = cavity darkening of models
 	float4 specularParams; // x = highlight strength, y = exponent, z = metallic
 	float4 surfaceParams; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
 };
@@ -227,6 +227,28 @@ float4 combine(int4 stage, float4 previous, float4 texel) {
 
 )HLSL"
 R"HLSL(
+// How much light the flat and the bumped surface of a model get from the lights, for adjusting its vertex lighting
+void modelReliefLighting(float3 position, float3 normal, float3 bumped, int count,
+                         out float flatLight, out float bumpedLight) {
+	flatLight = 0;
+	bumpedLight = 0;
+	[loop] for(int i = 0; i < count; i++) {
+		float4 a = lights[i * 2];
+		float4 b = lights[i * 2 + 1];
+		float3 toLight = a.xyz - position;
+		float distance2 = dot(toLight, toLight);
+		if(distance2 >= b.w * b.w) {
+			continue;
+		}
+		float distance = sqrt(distance2);
+		float3 direction = toLight / max(distance, 0.0001);
+		float falloff = (distance <= a.w) ? 1 : saturate((b.w - distance) / max(b.w - a.w, 0.0001));
+		float intensity = dot(b.rgb, float3(0.333, 0.333, 0.333)) * falloff;
+		flatLight += intensity * saturate(dot(normal, direction));
+		bumpedLight += intensity * saturate(dot(bumped, direction));
+	}
+}
+
 // Octahedral encoding of a unit vector into [0, 1]^2
 float2 encodeNormal(float3 n) {
 	n /= abs(n.x) + abs(n.y) + abs(n.z);
@@ -326,6 +348,7 @@ PSOutput psMain(PSInput input
 		}
 	}
 	
+	float3 flatNormal = normal;
 	// Bumped normal for the lighting and the reflections
 	[branch] if(relief && reliefParams.x > 0) {
 		float scale = rsqrt(max(max(dot(gradU, gradU), dot(gradV, gradV)), 1e-20));
@@ -350,6 +373,17 @@ PSOutput psMain(PSInput input
 		color.rgb = saturate(color.rgb + dynamicLight);
 	}
 	
+	// Models are lit per vertex: the relief changes that lighting by how much more or less light the bumped
+	// surface gets than the flat one, and the hollows are darker
+	[branch] if(relief && surfaceParams.w != 0 && reliefParams.x > 0) {
+		float flatLight;
+		float bumpedLight;
+		modelReliefLighting(input.world, flatNormal, normal, lightCount.z, flatLight, bumpedLight);
+		const float ambient = 0.15;
+		color.rgb *= clamp((bumpedLight + ambient) / (flatLight + ambient), 0.6, 1.6);
+		float height = reliefMap.SampleGrad(sampler0, uv0, dx0, dy0).b;
+		color.rgb *= 1 - saturate((0.5 - height) * 2) * 0.5 * reliefParams.z;
+	}
 	float4 texel0 = float4(1, 1, 1, 1);
 	[branch] if(stages[0].z != 0) {
 		texel0 = texture0.SampleGrad(sampler0, uv0, dx0, dy0);
