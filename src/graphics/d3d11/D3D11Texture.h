@@ -53,6 +53,15 @@ public:
 	//! Release the normal map
 	void releaseNormalMap();
 	
+	//! Specular highlights and reflections of the surface, guessed from the material in the file name
+	struct Specular {
+		float strength = 0.f;
+		float exponent = 1.f; //!< Larger for sharper highlights
+		float metallic = 0.f; //!< How much the texture color tints the highlights
+		float reflectivity = 0.f; //!< Strength of the screen-space reflections, only water reflects for now
+	};
+	const Specular & specular() const { return m_specular; }
+	
 	//! NPOT textures are always clamped to match the OpenGL backend.
 	bool isNPOT() const { return m_isNPOT; }
 	
@@ -68,6 +77,8 @@ private:
 	bool m_textureMipmaps;
 	
 	bool m_isNPOT;
+	
+	Specular m_specular;
 	
 };
 

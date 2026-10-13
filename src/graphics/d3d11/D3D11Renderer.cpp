@@ -66,6 +66,15 @@ struct PSConstants {
 	float fogColor[4];
 	float fogParams[4];
 	float relief[4]; // x = normal map slope scale, y = parallax depth, both 0 without a relief map
+	float specular[4]; // x = highlight strength, y = exponent, z = metallic, all 0 without highlights
+	float surface[4]; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces
+};
+
+struct ReflectionConstants {
+	float target[4];     // xy = size, zw = 1 / size
+	float projection[4]; // x = 1 / projection[0][0], y = 1 / projection[1][1], z = near, w = far
+	float view[3][4];    // Rows of the rotation from world space to the view space of the depth reconstruction
+	float params[4];     // x = strength, y = maximum ray length, z = mip levels of the scene copy, w = debug view
 };
 
 struct ClearConstants {
@@ -133,6 +142,15 @@ const float NormalMapSlopeScale = 6.f;
 // Parallax depth at full strength, relative to the texture size
 const float ParallaxDepthScale = 0.05f;
 
+// Highlight strength of the shiniest materials at full strength
+const float SpecularScale = 1.5f;
+
+// Highlights and reflections of water surfaces
+static const D3D11Texture::Specular WaterSpecular = { 1.f, 96.f, 0.f, 1.f };
+
+// Longest reflection ray in world units
+const float ReflectionDistance = 2000.f;
+
 struct LightConstants {
 	s32 count[4];
 	// Per light: position + fall start, color * intensity + fall end
@@ -143,6 +161,7 @@ static_assert(sizeof(VSConstants) % 16 == 0, "constant buffer size must be a mul
 static_assert(sizeof(PSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(ClearConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(AmbientOcclusionConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
+static_assert(sizeof(ReflectionConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(BloomConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(GradingConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(LightConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
@@ -213,6 +232,8 @@ D3D11Renderer::D3D11Renderer()
 	, m_sceneSize(0)
 	, m_ambientOcclusion(false)
 	, m_ambientOcclusionStrength(0.f)
+	, m_reflectionStrength(0.f)
+	, m_reflectionColorLevels(0)
 	, m_bloom(false)
 	, m_bloomStrength(0.f)
 	, m_bloomSizes()
@@ -264,6 +285,8 @@ D3D11Renderer::D3D11Renderer()
 	, m_pixelLightCount(0)
 	, m_normalMapStrength(0.f)
 	, m_parallaxStrength(0.f)
+	, m_specularStrength(0.f)
+	, m_waterSurface(false)
 	, m_pixelLightsWarned(false)
 	, m_snapshotTime(0)
 { }
@@ -288,7 +311,7 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	m_window = window;
 	
 	// Debug view for the scene: 1 = depth, 2 = motion vectors, 3 = per-object motion, 4 = ambient occlusion,
-	// 5 = bloom, 6 = per-pixel dynamic light
+	// 5 = bloom, 6 = per-pixel dynamic light, 7 = reflections
 	{
 		char value[16];
 		DWORD length = GetEnvironmentVariableA("ARX_SCENE_DEBUG", value, sizeof(value));
@@ -488,6 +511,10 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_aoConstants))) {
 			return false;
 		}
+		bufferDesc.ByteWidth = sizeof(ReflectionConstants);
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_reflectionConstants))) {
+			return false;
+		}
 		bufferDesc.ByteWidth = sizeof(BloomConstants);
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_bloomConstants))) {
 			return false;
@@ -673,6 +700,7 @@ bool D3D11Renderer::compileShaders() {
 			{ "psAmbientOcclusionBlur", verticalDefines, std::addressof(m_aoBlurVerticalPixelShader) },
 			{ "psApplyAmbientOcclusion", nullptr, std::addressof(m_aoApplyPixelShader) },
 			{ "psDebugAmbientOcclusion", nullptr, std::addressof(m_debugAOPixelShader) },
+			{ "psReflection", nullptr, std::addressof(m_reflectionPixelShader) },
 			{ "psBloomPrefilter", nullptr, std::addressof(m_bloomPrefilterPixelShader) },
 			{ "psBloomDownsample", nullptr, std::addressof(m_bloomDownsamplePixelShader) },
 			{ "psBloomUpsample", nullptr, std::addressof(m_bloomUpsamplePixelShader) },
@@ -856,6 +884,18 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		return false;
 	}
 	
+	// Surface normal and reflectivity for the screen-space reflections
+	if(m_reflectionStrength > 0.f) {
+		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | (m_sceneSamples > 1 ? 0 : D3D11_BIND_SHADER_RESOURCE);
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_surfaceTarget))
+		   || FAILED(m_device->CreateRenderTargetView(m_surfaceTarget.Get(), nullptr, &m_surfaceView))) {
+			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 surface target";
+			releaseSceneTargets();
+			return false;
+		}
+	}
+	
 	// The scene depth is read by the motion vector pass
 	{
 		desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
@@ -934,6 +974,35 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		}
 	}
 	
+	// Resolved surface target and the scene copy with mipmaps for the screen-space reflections
+	if(m_surfaceTarget) {
+		if(m_sceneSamples > 1) {
+			desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_surfaceResolved))) {
+				LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 surface resolve target";
+				releaseSceneTargets();
+				return false;
+			}
+		} else {
+			m_surfaceResolved = m_surfaceTarget;
+		}
+		D3D11_TEXTURE2D_DESC colorDesc = desc;
+		colorDesc.Format = ColorFormat;
+		colorDesc.MipLevels = 0;
+		colorDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		colorDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+		if(FAILED(m_device->CreateShaderResourceView(m_surfaceResolved.Get(), nullptr, &m_surfaceResource))
+		   || FAILED(m_device->CreateTexture2D(&colorDesc, nullptr, &m_reflectionColor))
+		   || FAILED(m_device->CreateShaderResourceView(m_reflectionColor.Get(), nullptr, &m_reflectionColorResource))) {
+			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 reflection targets";
+			releaseSceneTargets();
+			return false;
+		}
+		m_reflectionColor->GetDesc(&colorDesc);
+		m_reflectionColorLevels = colorDesc.MipLevels;
+	}
+	
 	// Ambient occlusion and the intermediate blur result
 	if(m_ambientOcclusion) {
 		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -988,6 +1057,8 @@ void D3D11Renderer::releaseSceneTargets() {
 	unbindTextureView(m_objectMotionResource.Get());
 	unbindTextureView(m_aoResource.Get());
 	unbindTextureView(m_aoBlurResource.Get());
+	unbindTextureView(m_surfaceResource.Get());
+	unbindTextureView(m_reflectionColorResource.Get());
 	
 	m_aoResource.Reset();
 	m_aoView.Reset();
@@ -995,6 +1066,13 @@ void D3D11Renderer::releaseSceneTargets() {
 	m_aoBlurResource.Reset();
 	m_aoBlurView.Reset();
 	m_aoBlurTarget.Reset();
+	m_surfaceResource.Reset();
+	m_surfaceResolved.Reset();
+	m_surfaceView.Reset();
+	m_surfaceTarget.Reset();
+	m_reflectionColorResource.Reset();
+	m_reflectionColor.Reset();
+	m_reflectionColorLevels = 0;
 	for(size_t i = 0; i < BloomLevels; i++) {
 		unbindTextureView(m_bloomResources[i].Get());
 		m_bloomResources[i].Reset();
@@ -1046,8 +1124,8 @@ void D3D11Renderer::setColorGrading(std::string_view preset) {
 }
 
 bool D3D11Renderer::upscalerInputsNeeded() const {
-	// Ambient occlusion uses the depth written by the motion pass
-	return m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion;
+	// Ambient occlusion and reflections use the depth written by the motion pass
+	return m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion || m_reflectionStrength > 0.f;
 }
 
 void D3D11Renderer::setAmbientOcclusion(float strength) {
@@ -1067,6 +1145,18 @@ void D3D11Renderer::setAmbientOcclusion(float strength) {
 	
 }
 
+void D3D11Renderer::setReflections(float strength) {
+	
+	bool wasEnabled = (m_reflectionStrength > 0.f);
+	m_reflectionStrength = glm::clamp(strength, 0.f, 1.f);
+	m_stateValid = false;
+	
+	if(wasEnabled != (m_reflectionStrength > 0.f) && !m_inScene) {
+		releaseSceneTargets();
+	}
+	
+}
+
 void D3D11Renderer::setNormalMaps(float strength) {
 
 	bool wasEnabled = reliefMapsEnabled();
@@ -1080,6 +1170,13 @@ void D3D11Renderer::setParallaxMapping(float strength) {
 	bool wasEnabled = reliefMapsEnabled();
 	m_parallaxStrength = glm::clamp(strength, 0.f, 1.f);
 	updateReliefMaps(wasEnabled);
+
+}
+
+void D3D11Renderer::setSpecular(float strength) {
+
+	m_specularStrength = glm::clamp(strength, 0.f, 1.f);
+	m_stateValid = false;
 
 }
 
@@ -1301,6 +1398,89 @@ void D3D11Renderer::renderAmbientOcclusion(bool apply) {
 	
 }
 
+void D3D11Renderer::renderReflections() {
+	
+	if(!m_reflectionPixelShader || !m_surfaceResource || !m_reflectionColorResource || !m_linearDepthResource
+	   || !m_sceneResolvedTargetView) {
+		return;
+	}
+	
+	if(m_sceneSamples > 1) {
+		m_context->ResolveSubresource(m_surfaceResolved.Get(), 0, m_surfaceTarget.Get(), 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+	}
+	
+	// The reflections show the scene drawn so far, blurred with the mipmaps for rough surfaces
+	unbindTextureView(m_reflectionColorResource.Get());
+	m_context->CopySubresourceRegion(m_reflectionColor.Get(), 0, 0, 0, 0, m_sceneResolved.Get(), 0, nullptr);
+	m_context->GenerateMips(m_reflectionColorResource.Get());
+	
+	// See renderAmbientOcclusion() for the depth reconstruction
+	float q = m_sceneProjection[2][2];
+	float nearPlane = (q != 0.f) ? -m_sceneProjection[3][2] / q : 1.f;
+	float farPlane = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
+	
+	ReflectionConstants constants = {};
+	constants.target[0] = float(m_sceneSize.x);
+	constants.target[1] = float(m_sceneSize.y);
+	constants.target[2] = 1.f / float(m_sceneSize.x);
+	constants.target[3] = 1.f / float(m_sceneSize.y);
+	constants.projection[0] = 1.f / std::max(std::abs(m_sceneProjection[0][0]), 0.0001f);
+	constants.projection[1] = 1.f / std::max(std::abs(m_sceneProjection[1][1]), 0.0001f);
+	constants.projection[2] = nearPlane;
+	constants.projection[3] = farPlane;
+	// The reconstructed view positions are the view space positions with the signs of the projection
+	const float signs[3] = {
+		glm::sign(m_sceneProjection[0][0]), glm::sign(m_sceneProjection[1][1]), glm::sign(m_sceneProjection[2][3])
+	};
+	for(size_t row = 0; row < 3; row++) {
+		for(size_t column = 0; column < 3; column++) {
+			constants.view[row][column] = signs[row] * m_sceneView[column][row];
+		}
+	}
+	constants.params[0] = m_reflectionStrength;
+	constants.params[1] = ReflectionDistance;
+	constants.params[2] = float(m_reflectionColorLevels);
+	constants.params[3] = (m_sceneDebugView == 7) ? 1.f : 0.f;
+	m_context->UpdateSubresource(m_reflectionConstants.Get(), 0, nullptr, &constants, 0, 0);
+	ID3D11Buffer * buffer = m_reflectionConstants.Get();
+	m_context->PSSetConstantBuffers(7, 1, &buffer);
+	
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
+	m_context->RSSetViewports(1, &viewport);
+	m_context->RSSetState(getRasterizerState(false, 0, false, false));
+	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
+	// The debug view shows only the reflections
+	bool debugView = (m_sceneDebugView == 7);
+	// The shader returns the premultiplied reflection and how much of the scene color it replaces
+	BlendingFactor src = BlendOne;
+	BlendingFactor dst = debugView ? BlendZero : BlendInvSrcAlpha;
+	m_context->OMSetBlendState(getBlendState(src, dst, false, true), nullptr, 0xffffffff);
+	
+	ID3D11RenderTargetView * target = m_sceneResolvedTargetView.Get();
+	if(debugView) {
+		const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+		m_context->ClearRenderTargetView(target, black);
+	}
+	m_context->OMSetRenderTargets(1, &target, nullptr);
+	ID3D11ShaderResourceView * inputs[] = {
+		m_linearDepthResource.Get(), m_surfaceResource.Get(), m_reflectionColorResource.Get()
+	};
+	m_context->PSSetShaderResources(0, UINT(std::size(inputs)), inputs);
+	ID3D11SamplerState * sampler = m_blitSampler.Get();
+	m_context->PSSetSamplers(0, 1, &sampler);
+	
+	drawFullscreen(m_reflectionPixelShader.Get());
+	
+	ID3D11ShaderResourceView * none[std::size(inputs)] = { };
+	m_context->PSSetShaderResources(0, UINT(std::size(none)), none);
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	m_currentViews[0] = nullptr;
+	m_currentViews[1] = nullptr;
+	m_currentViews[2] = nullptr;
+	m_currentSamplers[0] = sampler;
+	
+}
+
 static float halton(u32 index, u32 base) {
 	float f = 1.f;
 	float result = 0.f;
@@ -1444,8 +1624,8 @@ void D3D11Renderer::bindRenderTargets() {
 	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : m_colorView.Get();
 	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : m_depthView.Get();
 	
-	if(m_inScene && m_objectMotionView) {
-		ID3D11RenderTargetView * views[] = { colorView, m_objectMotionView.Get() };
+	if(m_inScene && (m_objectMotionView || m_surfaceView)) {
+		ID3D11RenderTargetView * views[] = { colorView, m_objectMotionView.Get(), m_surfaceView.Get() };
 		m_context->OMSetRenderTargets(UINT(std::size(views)), views, depthView);
 		return;
 	}
@@ -1486,7 +1666,8 @@ void D3D11Renderer::beginScene() {
 	           std::max<s32>(s32(float(m_size.y) * scale + 0.5f), 1));
 	UINT samples = m_upscaler ? 1 : m_msaaSamples;
 	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded() || bool(m_aoView) != m_ambientOcclusion
-	    || bool(m_bloomViews[0]) != m_bloom || samples != m_sceneSamples)
+	    || bool(m_bloomViews[0]) != m_bloom || bool(m_surfaceView) != (m_reflectionStrength > 0.f)
+	    || samples != m_sceneSamples)
 	   && !createSceneTargets(size)) {
 		return;
 	}
@@ -1497,10 +1678,15 @@ void D3D11Renderer::beginScene() {
 	unbindTextureView(m_motionResource.Get());
 	unbindTextureView(m_linearDepthResource.Get());
 	unbindTextureView(m_objectMotionResource.Get());
+	unbindTextureView(m_surfaceResource.Get());
+	unbindTextureView(m_reflectionColorResource.Get());
 	
+	const float none[4] = { 0.f, 0.f, 0.f, 0.f };
 	if(m_objectMotionView) {
-		const float none[4] = { 0.f, 0.f, 0.f, 0.f };
 		m_context->ClearRenderTargetView(m_objectMotionView.Get(), none);
+	}
+	if(m_surfaceView) {
+		m_context->ClearRenderTargetView(m_surfaceView.Get(), none);
 	}
 	
 	updateSceneCamera();
@@ -1528,6 +1714,10 @@ void D3D11Renderer::endScene() {
 	if(m_ambientOcclusion) {
 		// The debug view shows the ambient occlusion without applying it
 		renderAmbientOcclusion(m_sceneDebugView != 4);
+	}
+	
+	if(m_surfaceView) {
+		renderReflections();
 	}
 	
 	if(m_bloom) {
@@ -1696,17 +1886,22 @@ void D3D11Renderer::setPixelLights(const PixelLight * lights, size_t count) {
 		return;
 	}
 	
-	if(count > MaxPixelLights) {
-		if(!m_pixelLightsWarned) {
-			LogWarning << "Too many lights for per-pixel lighting: " << count << " > " << MaxPixelLights;
-			m_pixelLightsWarned = true;
-		}
-		count = MaxPixelLights;
+	// Lights that only add highlights come last and are dropped first
+	size_t diffuseCount = 0;
+	while(diffuseCount < count && !lights[diffuseCount].specularOnly) {
+		diffuseCount++;
 	}
+	if(diffuseCount > MaxPixelLights && !m_pixelLightsWarned) {
+		LogWarning << "Too many lights for per-pixel lighting: " << diffuseCount << " > " << MaxPixelLights;
+		m_pixelLightsWarned = true;
+	}
+	count = std::min(count, MaxPixelLights);
+	diffuseCount = std::min(diffuseCount, count);
 	
 	LightConstants constants = {};
-	constants.count[0] = s32(count);
+	constants.count[0] = s32(diffuseCount);
 	constants.count[1] = debugView ? 1 : 0;
+	constants.count[2] = s32(count);
 	for(size_t i = 0; i < count; i++) {
 		const PixelLight & light = lights[i];
 		float * a = constants.lights[i * 2];
@@ -2454,6 +2649,16 @@ ID3D11BlendState * D3D11Renderer::getBlendState(BlendingFactor src, BlendingFact
 	motion.DestBlend = motion.DestBlendAlpha = D3D11_BLEND_ZERO;
 	motion.BlendOp = motion.BlendOpAlpha = D3D11_BLEND_OP_ADD;
 	motion.RenderTargetWriteMask = (colorWrite && src == BlendOne && dst == BlendZero) ? D3D11_COLOR_WRITE_ENABLE_ALL : 0;
+	// The third target (surface normal and reflectivity) is replaced where its alpha is 1, which the shader sets
+	// for opaque draws and for reflective surfaces like water
+	D3D11_RENDER_TARGET_BLEND_DESC & surface = desc.RenderTarget[2];
+	surface.BlendEnable = TRUE;
+	surface.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+	surface.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+	surface.SrcBlendAlpha = D3D11_BLEND_ONE;
+	surface.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+	surface.BlendOp = surface.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+	surface.RenderTargetWriteMask = colorWrite ? D3D11_COLOR_WRITE_ENABLE_ALL : 0;
 	D3D11_RENDER_TARGET_BLEND_DESC & target = desc.RenderTarget[0];
 	target.BlendEnable = (src != BlendOne || dst != BlendZero) ? TRUE : FALSE;
 	target.SrcBlend = arxToD3DBlendFactor[src];
@@ -2687,6 +2892,26 @@ void D3D11Renderer::flushState(VertexType type) {
 				constants.relief[0] = m_normalMapStrength * NormalMapSlopeScale;
 				constants.relief[1] = m_parallaxStrength * ParallaxDepthScale;
 			}
+			
+			// Highlights from the material of the main texture
+			if(texture && type == VertexWorld && m_specularStrength > 0.f) {
+				const D3D11Texture::Specular & specular = texture->specular();
+				constants.specular[0] = specular.strength * m_specularStrength * SpecularScale;
+				constants.specular[1] = specular.exponent;
+				constants.specular[2] = specular.metallic;
+			}
+			if(texture && type == VertexWorld && m_surfaceView) {
+				constants.surface[0] = texture->specular().reflectivity;
+			}
+			// Water is drawn without normals, with an animated texture
+			if(type == VertexWorld3 && m_waterSurface) {
+				const D3D11Texture::Specular & water = WaterSpecular;
+				constants.specular[0] = water.strength * m_specularStrength * SpecularScale;
+				constants.specular[1] = water.exponent;
+				constants.specular[2] = water.metallic;
+				constants.surface[0] = m_surfaceView ? water.reflectivity : 0.f;
+				constants.surface[2] = 1.f;
+			}
 		}
 		
 	}
@@ -2699,6 +2924,7 @@ void D3D11Renderer::flushState(VertexType type) {
 	constants.fogParams[1] = m_fogEnd;
 	constants.fogParams[2] = m_state.getFog() ? 1.f : 0.f;
 	constants.fogParams[3] = alphaReference;
+	constants.surface[1] = (m_state.getBlendSrc() != BlendOne || m_state.getBlendDst() != BlendZero) ? 1.f : 0.f;
 	
 	static_assert(sizeof(constants) <= sizeof(m_psConstantsData), "constant buffer cache too small");
 	if(!m_psConstantsValid || std::memcmp(m_psConstantsData, &constants, sizeof(constants)) != 0) {

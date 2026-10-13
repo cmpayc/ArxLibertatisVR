@@ -446,13 +446,14 @@ public:
 	//! Select the color grading preset for the 3D scene: "off", "natural", "warm" or "cinematic"
 	virtual void setColorGrading(std::string_view preset) { ARX_UNUSED(preset); }
 	
-	//! A dynamic light for per-pixel lighting, see ApplyTileLights()
+	//! A light for per-pixel lighting, see ApplyTileLights()
 	struct PixelLight {
 		Vec3f position = Vec3f(0.f);
 		float fallStart = 0.f;
 		Color3f color = Color3f::black; //!< In [0, 1]
 		float fallEnd = 0.f;
 		float intensity = 0.f;          //!< Factor for the light color at full strength
+		bool specularOnly = false;      //!< Only adds highlights, the diffuse light is already in the vertex colors
 	};
 	
 	//! \return true if this renderer can light world geometry per pixel
@@ -479,7 +480,25 @@ public:
 	//! Set the depth of the parallax occlusion mapping of world geometry in [0, 1], 0 disables it
 	virtual void setParallaxMapping(float strength) { ARX_UNUSED(strength); }
 	
-	//! Set the dynamic lights for per-pixel lighting of world vertices with a non-zero normal
+	//! \return true if this renderer supports specular highlights on world geometry
+	[[nodiscard]] virtual bool supportsSpecular() const { return false; }
+	
+	//! Set the strength of the specular highlights of world geometry in [0, 1], 0 disables them
+	virtual void setSpecular(float strength) { ARX_UNUSED(strength); }
+	
+	//! \return true if this renderer supports screen-space reflections on world geometry
+	[[nodiscard]] virtual bool supportsReflections() const { return false; }
+	
+	//! Set the strength of the screen-space reflections of world geometry in [0, 1], 0 disables them
+	virtual void setReflections(float strength) { ARX_UNUSED(strength); }
+	
+	//! Mark the following draws as horizontal water surfaces for highlights and reflections, until reset
+	virtual void setWaterSurface(bool water) { ARX_UNUSED(water); }
+	
+	/*!
+	 * Set the lights for per-pixel lighting of world vertices with a non-zero normal.
+	 * Lights that only add highlights must come after all other lights.
+	 */
 	virtual void setPixelLights(const PixelLight * lights, size_t count) { ARX_UNUSED(lights), ARX_UNUSED(count); }
 	
 	void setRenderState(RenderState state) noexcept { m_state = state; }

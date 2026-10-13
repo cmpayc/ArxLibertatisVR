@@ -43,6 +43,8 @@ cbuffer PSConstants : register(b0) {
 	float4 fogColor;
 	float4 fogParams; // x = start, y = end, z = enabled, w = alpha reference (< 0: no test)
 	float4 reliefParams; // x = normal map slope scale, y = parallax depth relative to the texture size
+	float4 specularParams; // x = highlight strength, y = exponent, z = metallic
+	float4 surfaceParams; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces
 };
 
 cbuffer ClearConstants : register(b1) {
@@ -50,9 +52,9 @@ cbuffer ClearConstants : register(b1) {
 	float4 clearDepth;
 };
 
-// Dynamic lights for per-pixel lighting of world geometry, see ApplyTileLights()
+// Lights for per-pixel lighting of world geometry, see ApplyTileLights()
 cbuffer LightConstants : register(b6) {
-	int4 lightCount;
+	int4 lightCount; // x = dynamic lights, y = debug view, z = all lights including the ones only for highlights
 	float4 lights[256]; // Per light: position + fall start, color * intensity + fall end
 };
 
@@ -101,6 +103,7 @@ struct PSInput {
 struct PSOutput {
 	float4 color : SV_Target0;
 	float4 motion : SV_Target1; // xy = previous - current position in NDC, w = 1 if valid
+	float4 surface : SV_Target2; // xy = encoded normal, z = reflectivity, w = 1 to replace the old value
 };
 
 VSOutput makeOutput(float4 clip, float4 prevClip, float4 color, float2 uv0, float2 uv1, float2 uv2) {
@@ -161,9 +164,35 @@ float3 pixelLighting(float3 position, float3 normal) {
 	return sum;
 }
 
+// Blinn-Phong highlights of all lights, with the same falloff as the diffuse light
+float3 specularLighting(float3 position, float3 normal, float3 view, float exponent) {
+	float3 sum = float3(0, 0, 0);
+	[loop] for(int i = 0; i < lightCount.z; i++) {
+		float4 a = lights[i * 2];
+		float4 b = lights[i * 2 + 1];
+		float3 toLight = a.xyz - position;
+		float distance = length(toLight);
+		if(distance >= b.w) {
+			continue;
+		}
+		float3 direction = toLight / max(distance, 0.0001);
+		if(dot(normal, direction) <= 0) {
+			continue;
+		}
+		float falloff = (distance <= a.w) ? 1 : saturate((b.w - distance) / max(b.w - a.w, 0.0001));
+		float cosHalf = saturate(dot(normal, normalize(direction + view)));
+		sum += b.rgb * (pow(cosHalf, exponent) * falloff);
+	}
+	// Sharper highlights are brighter so that they keep about the same energy
+	return sum * ((exponent + 8) / 32);
+}
+
 VSOutput vsWorld3(float3 position : POSITION, float4 color : COLOR, float2 uv0 : TEXCOORD0,
                   float2 uv1 : TEXCOORD1, float2 uv2 : TEXCOORD2) {
-	return makeOutput(mul(transform, float4(position, 1)), float4(0, 0, 0, 0), color, uv0, uv1, uv2);
+	VSOutput o = makeOutput(mul(transform, float4(position, 1)), float4(0, 0, 0, 0), color, uv0, uv1, uv2);
+	o.world = position;
+	o.view = camera.xyz - position;
+	return o;
 }
 
 float3 combineColor(int op, float3 previous, float3 texel) {
@@ -197,6 +226,24 @@ float4 combine(int4 stage, float4 previous, float4 texel) {
 	                       combineAlpha(stage.y, previous.a, texel.a)));
 }
 
+// Octahedral encoding of a unit vector into [0, 1]^2
+float2 encodeNormal(float3 n) {
+	n /= abs(n.x) + abs(n.y) + abs(n.z);
+	float2 e = n.xy;
+	if(n.z < 0) {
+		e = (1 - abs(n.yx)) * float2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
+	}
+	return e * 0.5 + 0.5;
+}
+
+float3 decodeNormal(float2 e) {
+	e = e * 2 - 1;
+	float3 n = float3(e, 1 - abs(e.x) - abs(e.y));
+	float t = saturate(-n.z);
+	n.xy += float2(n.x >= 0 ? -t : t, n.y >= 0 ? -t : t);
+	return normalize(n);
+}
+
 PSOutput psMain(PSInput input
 #ifdef SAMPLE_SHADING
                 , uint sampleIndex : SV_SampleIndex
@@ -214,6 +261,14 @@ PSOutput psMain(PSInput input
 	// The vertex color holds the static lighting
 	float normalLength = dot(input.normal, input.normal);
 	float3 normal = input.normal * rsqrt(max(normalLength, 1e-20));
+	// Water surfaces face up, with ripples from the two animated layers of the water texture
+	bool water = surfaceParams.z != 0;
+	[branch] if(water) {
+		float2 ripple = texture0.SampleGrad(sampler0, input.uv0, dx0, dy0).rg
+		                - texture1.SampleGrad(sampler1, input.uv1, dx1, dy1).rg;
+		normal = normalize(float3(ripple.x * 0.3, -1, ripple.y * 0.3));
+		normalLength = 1;
+	}
 	bool relief = normalLength > 0.01 && stages[0].w != 0;
 	
 	// Tangent frame from the screen-space derivatives (Christian Schüler, "Normal Mapping Without Precomputed
@@ -270,30 +325,49 @@ PSOutput psMain(PSInput input
 		}
 	}
 	
-	// Add the dynamic lights
-	float3 dynamicLight = float3(0, 0, 0);
-	[branch] if(lightCount.x > 0 && normalLength > 0.01) {
-		[branch] if(relief && reliefParams.x > 0) {
-			float scale = rsqrt(max(max(dot(gradU, gradU), dot(gradV, gradV)), 1e-20));
-			// Height grows with the brightness, the surface normal leans against the slope
-			float2 slope = (reliefMap.SampleGrad(sampler0, uv0, dx0, dy0).rg * 2 - 1) * reliefParams.x;
-			float3 bumped = normalize(normal - (gradU * slope.x + gradV * slope.y) * scale);
-			if(all(isfinite(bumped))) {
-				normal = bumped;
-			}
+	// Bumped normal for the lighting and the reflections
+	[branch] if(relief && reliefParams.x > 0) {
+		float scale = rsqrt(max(max(dot(gradU, gradU), dot(gradV, gradV)), 1e-20));
+		// Height grows with the brightness, the surface normal leans against the slope
+		float2 slope = (reliefMap.SampleGrad(sampler0, uv0, dx0, dy0).rg * 2 - 1) * reliefParams.x;
+		float3 bumped = normalize(normal - (gradU * slope.x + gradV * slope.y) * scale);
+		if(all(isfinite(bumped))) {
+			normal = bumped;
 		}
-		dynamicLight = pixelLighting(input.world, normal);
-		color.rgb = saturate(color.rgb + dynamicLight);
 	}
 	
+	// Add the dynamic lights
+	float3 dynamicLight = float3(0, 0, 0);
+	float3 specular = float3(0, 0, 0);
+	bool shiny = specularParams.x > 0 && lightCount.z > 0;
+	[branch] if((lightCount.x > 0 || shiny) && normalLength > 0.01) {
+		[branch] if(lightCount.x > 0 && !water) {
+			dynamicLight = pixelLighting(input.world, normal);
+			color.rgb = saturate(color.rgb + dynamicLight);
+		}
+		[branch] if(shiny) {
+			float3 view = normalize(input.view);
+			specular = specularLighting(input.world, normal, view, specularParams.y) * specularParams.x;
+		}
+	}
+	
+	float4 texel0 = float4(1, 1, 1, 1);
 	[branch] if(stages[0].z != 0) {
-		color = combine(stages[0], color, texture0.SampleGrad(sampler0, uv0, dx0, dy0));
+		texel0 = texture0.SampleGrad(sampler0, uv0, dx0, dy0);
+		color = combine(stages[0], color, texel0);
 	}
 	[branch] if(stages[1].z != 0) {
 		color = combine(stages[1], color, texture1.SampleGrad(sampler1, input.uv1, dx1, dy1));
 	}
 	[branch] if(stages[2].z != 0) {
 		color = combine(stages[2], color, texture2.SampleGrad(sampler2, input.uv2, dx2, dy2));
+	}
+	
+	// Metals tint the highlights with their color, darker parts of other surfaces are less shiny
+	[branch] if(any(specular > 0)) {
+		float luminance = dot(texel0.rgb, float3(0.299, 0.587, 0.114));
+		float3 tint = lerp(saturate(luminance * 2).xxx, texel0.rgb * 1.5, specularParams.z);
+		color.rgb = saturate(color.rgb + specular * tint);
 	}
 	
 	if(fogParams.z != 0) {
@@ -317,6 +391,10 @@ PSOutput psMain(PSInput input
 	if(input.prevClip.w > 0 && input.clip.w > 0) {
 		o.motion = float4(input.prevClip.xy / input.prevClip.w - input.clip.xy / input.clip.w, 0, 1);
 	}
+	// Normal and reflectivity for the screen-space reflections: opaque draws always replace them, blended draws
+	// only for reflective surfaces like water
+	float reflectivity = (normalLength > 0.01) ? surfaceParams.x : 0;
+	o.surface = float4(encodeNormal(normal), reflectivity, (surfaceParams.y == 0 || reflectivity > 0) ? 1 : 0);
 	return o;
 }
 
@@ -529,6 +607,131 @@ float4 psApplyAmbientOcclusion(float4 position : SV_Position) : SV_Target {
 
 float4 psDebugAmbientOcclusion(BlitOutput input) : SV_Target {
 	return float4(texture0.Sample(sampler0, input.uv).rrr, 1);
+}
+
+/*
+ * Screen-space reflections: the reflected view ray of reflective pixels is marched through the scene depth and the
+ * scene color where it hits is blended in, blurrier for rougher surfaces. Positions are reconstructed like for the
+ * ambient occlusion.
+ */
+
+cbuffer ReflectionConstants : register(b7) {
+	float4 ssrTarget;     // xy = size, zw = 1 / size
+	float4 ssrProjection; // x = 1 / projection[0][0], y = 1 / projection[1][1], z = near, w = far
+	float4 ssrView[3];    // Rows of the rotation from world space to the reconstructed view space
+	float4 ssrParams;     // x = strength, y = maximum ray length, z = mip levels of the scene copy, w = debug view
+};
+
+Texture2D<float> ssrDepth : register(t0);
+Texture2D<float4> ssrSurface : register(t1);
+Texture2D<float4> ssrColor : register(t2);
+
+float ssrViewDistance(int2 pixel) {
+	pixel = clamp(pixel, int2(0, 0), int2(ssrTarget.xy) - 1);
+	float depth = ssrDepth.Load(int3(pixel, 0));
+	return ssrProjection.z * ssrProjection.w / (ssrProjection.w - depth * (ssrProjection.w - ssrProjection.z));
+}
+
+float2 ssrProject(float3 position) {
+	float2 ndc = position.xy / (position.z * ssrProjection.xy);
+	return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
+// How far behind the depth buffer a ray may be and still count as a hit
+float ssrThickness(float rayLength, float distance) {
+	return 20 + rayLength * 0.1 + distance * 0.01;
+}
+
+float4 psReflection(float4 position : SV_Position) : SV_Target {
+	
+	int2 pixel = int2(position.xy);
+	float4 surface = ssrSurface.Load(int3(pixel, 0));
+	float reflectivity = surface.z;
+	if(reflectivity <= 0.004 || ssrDepth.Load(int3(pixel, 0)) >= 0.99999) {
+		discard;
+	}
+	
+	float distance = ssrViewDistance(pixel);
+	float2 ndc = (float2(pixel) + 0.5) * ssrTarget.zw * float2(2, -2) + float2(-1, 1);
+	float3 origin = float3(ndc * ssrProjection.xy * distance, distance);
+	float3 view = normalize(origin);
+	
+	float3 worldNormal = decodeNormal(surface.xy);
+	float3 normal = normalize(float3(dot(ssrView[0].xyz, worldNormal), dot(ssrView[1].xyz, worldNormal),
+	                                 dot(ssrView[2].xyz, worldNormal)));
+	float cosView = -dot(view, normal);
+	if(cosView <= 0) {
+		discard;
+	}
+	float3 direction = reflect(view, normal);
+	
+	// Start slightly above the surface and stop in front of the near plane
+	origin += normal * (1 + distance * 0.002);
+	float maxLength = ssrParams.y;
+	if(direction.z < 0) {
+		maxLength = min(maxLength, (origin.z - ssrProjection.z * 2) / -direction.z);
+	}
+	if(maxLength <= 0) {
+		discard;
+	}
+	
+	// The steps grow with the distance, interleaved gradient noise hides the banding
+	const int steps = 32;
+	float noise = frac(52.9829189 * frac(dot(position.xy, float2(0.06711056, 0.00583715))));
+	float previousLength = 0;
+	float hitLength = -1;
+	[loop] for(int i = 1; i <= steps; i++) {
+		float f = (float(i) - noise) / float(steps);
+		float rayLength = f * f * maxLength;
+		float3 p = origin + direction * rayLength;
+		float2 uv = ssrProject(p);
+		if(any(uv < 0) || any(uv > 1)) {
+			break;
+		}
+		float behind = p.z - ssrViewDistance(int2(uv * ssrTarget.xy));
+		if(behind > 0 && behind < ssrThickness(rayLength, p.z)) {
+			hitLength = rayLength;
+			break;
+		}
+		previousLength = rayLength;
+	}
+	if(hitLength < 0) {
+		discard;
+	}
+	
+	// Refine the hit between the last two steps
+	float low = previousLength;
+	float high = hitLength;
+	[unroll] for(int j = 0; j < 5; j++) {
+		float middle = (low + high) * 0.5;
+		float3 p = origin + direction * middle;
+		if(p.z > ssrViewDistance(int2(ssrProject(p) * ssrTarget.xy))) {
+			high = middle;
+		} else {
+			low = middle;
+		}
+	}
+	float2 hit = ssrProject(origin + direction * high);
+	
+	// Fade out near the screen edges, at the end of the ray and for rays coming back to the camera, which
+	// often hit something that is hidden in the depth buffer
+	float2 edge = min(hit, 1 - hit);
+	float fade = saturate(min(edge.x, edge.y) * 10);
+	fade *= 1 - saturate(high / ssrParams.y) * saturate(high / ssrParams.y);
+	fade *= saturate(direction.z * 4 + 1);
+	
+	// Rough surfaces get blurry reflections, more so the further the reflected object is
+	float roughness = 1 - reflectivity;
+	float level = min(roughness * roughness * 2 * saturate(high / 400), ssrParams.z - 1);
+	float3 color = ssrColor.SampleLevel(sampler0, hit, level).rgb;
+	
+	// More reflection at grazing angles (Schlick's approximation of the Fresnel factor)
+	float fresnel = pow(1 - cosView, 5);
+	float alpha = saturate(reflectivity * ssrParams.x * 3 * lerp(0.4, 1, fresnel)) * fade;
+	
+	// The reflection replaces only half as much of the surface color as it adds, so that reflections of darker
+	// surroundings do not make wet surfaces darker
+	return float4(color * alpha, (ssrParams.w != 0) ? 1 : alpha * 0.5);
 }
 
 /*

@@ -958,7 +958,9 @@ static void RenderWaterBatch() {
 	GRenderer->GetTextureStage(2)->setColorOp(TextureStage::OpModulate);
 	GRenderer->GetTextureStage(2)->setAlphaOp(TextureStage::OpDisable);
 	
+	GRenderer->setWaterSurface(true);
 	dynamicVertices.draw(Renderer::TriangleList);
+	GRenderer->setWaterSurface(false);
 	
 	GRenderer->GetTextureStage(1)->setColorOp(TextureStage::OpDisable);
 	GRenderer->GetTextureStage(2)->setColorOp(TextureStage::OpDisable);

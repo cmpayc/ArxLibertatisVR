@@ -19,11 +19,77 @@
 
 #include "graphics/d3d11/D3D11Texture.h"
 
+#include <string_view>
 #include <vector>
 
 #include "graphics/Math.h"
 #include "graphics/d3d11/D3D11Renderer.h"
 #include "io/log/Logger.h"
+
+// Highlights and reflections for the materials named in texture file names, the first matching tag wins
+static const struct {
+	std::string_view tag;
+	D3D11Texture::Specular specular;
+} surfaceMaterials[] = {
+	{ "lava",    { 0.f, 1.f, 0.f, 0.f } },
+	{ "water",   { 1.f, 96.f, 0.f, 1.f } },
+	{ "wet",     { 0.8f, 64.f, 0.f, 0.f } },
+	{ "blood",   { 0.7f, 64.f, 0.3f, 0.f } },
+	{ "mud",     { 0.5f, 48.f, 0.f, 0.f } },
+	{ "glass",   { 1.f, 128.f, 0.f, 0.f } },
+	{ "vitrail", { 1.f, 128.f, 0.f, 0.f } },
+	{ "mirror",  { 1.f, 128.f, 0.f, 0.f } },
+	{ "quartz",  { 1.f, 128.f, 0.f, 0.f } },
+	{ "crystal", { 1.f, 128.f, 0.f, 0.f } },
+	{ "ice",     { 0.9f, 96.f, 0.f, 0.f } },
+	{ "marble",  { 0.6f, 64.f, 0.f, 0.f } },
+	{ "rust",    { 0.3f, 16.f, 1.f, 0.f } },
+	{ "metal",   { 0.9f, 40.f, 1.f, 0.f } },
+	{ "iron",    { 0.8f, 32.f, 1.f, 0.f } },
+	{ "weapon",  { 0.9f, 40.f, 1.f, 0.f } },
+	{ "gold",    { 1.f, 48.f, 1.f, 0.f } },
+	{ "stone",   { 0.6f, 48.f, 0.f, 0.f } },
+	{ "rock",    { 0.5f, 40.f, 0.f, 0.f } },
+	{ "bone",    { 0.4f, 32.f, 0.f, 0.f } },
+	{ "flesh",   { 0.2f, 16.f, 0.f, 0.f } },
+	{ "wood",    { 0.f, 1.f, 0.f, 0.f } },
+	{ "woodl",   { 0.f, 1.f, 0.f, 0.f } },
+	{ "fabric",  { 0.f, 1.f, 0.f, 0.f } },
+	{ "sand",    { 0.f, 1.f, 0.f, 0.f } },
+	{ "soil",    { 0.f, 1.f, 0.f, 0.f } },
+	{ "gravel",  { 0.f, 1.f, 0.f, 0.f } },
+	{ "earth",   { 0.f, 1.f, 0.f, 0.f } },
+	{ "dust",    { 0.f, 1.f, 0.f, 0.f } },
+	{ "straw",   { 0.f, 1.f, 0.f, 0.f } },
+	{ "plant",   { 0.f, 1.f, 0.f, 0.f } },
+	{ "hair",    { 0.f, 1.f, 0.f, 0.f } },
+	{ "fur",     { 0.f, 1.f, 0.f, 0.f } },
+	{ "clothe",  { 0.f, 1.f, 0.f, 0.f } },
+};
+
+// Highlights and reflections of textures without a known material
+static const D3D11Texture::Specular defaultSpecular = { 0.3f, 32.f, 0.f, 0.f };
+
+static D3D11Texture::Specular guessSpecular(std::string_view name) {
+	
+	if(name.empty()) {
+		return D3D11Texture::Specular();
+	}
+	
+	// Only match whole words like "[metal]" or "_wet01", not "ice" in "notice"
+	auto isLetter = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+	for(const auto & material : surfaceMaterials) {
+		for(size_t pos = name.find(material.tag); pos != std::string_view::npos;
+		    pos = name.find(material.tag, pos + 1)) {
+			size_t end = pos + material.tag.size();
+			if((pos == 0 || !isLetter(name[pos - 1])) && (end == name.size() || !isLetter(name[end]))) {
+				return material.specular;
+			}
+		}
+	}
+	
+	return defaultSpecular;
+}
 
 D3D11Texture::D3D11Texture(D3D11Renderer * renderer)
 	: m_renderer(renderer)
@@ -43,6 +109,8 @@ bool D3D11Texture::create() {
 	
 	Vec2i nextPowerOfTwo(GetNextPowerOf2(unsigned(getSize().x)), GetNextPowerOf2(unsigned(getSize().y)));
 	m_isNPOT = (getSize() != nextPowerOfTwo);
+	
+	m_specular = guessSpecular(getFileName().string());
 	
 	return true;
 }

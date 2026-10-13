@@ -138,6 +138,8 @@ constexpr const float
 	bloom = 0.5f,
 	normalMaps = 0.5f,
 	parallaxMapping = 0.5f,
+	specular = 0.5f,
+	reflections = 0.5f,
 	hudScale = 0.5f,
 	bookScale = 1.f,
 	cursorScale = 0.5f,
@@ -239,6 +241,8 @@ constexpr const std::string_view
 	bloom = "bloom",
 	normalMaps = "normal_maps",
 	parallaxMapping = "parallax_mapping",
+	specular = "specular_highlights",
+	reflections = "reflections",
 	characterSmoothing = "character_smoothing",
 	objectSmoothing = "object_smoothing",
 	upscaler = "upscaler",
@@ -514,6 +518,8 @@ bool Config::save() {
 	writer.writeKey(Key::bloom, video.bloom);
 	writer.writeKey(Key::normalMaps, video.normalMaps);
 	writer.writeKey(Key::parallaxMapping, video.parallaxMapping);
+	writer.writeKey(Key::specular, video.specular);
+	writer.writeKey(Key::reflections, video.reflections);
 	writer.writeKey(Key::characterSmoothing, video.characterSmoothing);
 	writer.writeKey(Key::objectSmoothing, video.objectSmoothing);
 	writer.writeKey(Key::colorGrading, video.colorGrading);
@@ -666,6 +672,10 @@ bool Config::init(const fs::path & file) {
 	video.normalMaps = glm::clamp(normalMaps, 0.f, 1.f);
 	float parallaxMapping = reader.getKey(Section::Video, Key::parallaxMapping, Default::parallaxMapping);
 	video.parallaxMapping = glm::clamp(parallaxMapping, 0.f, 1.f);
+	float specular = reader.getKey(Section::Video, Key::specular, Default::specular);
+	video.specular = glm::clamp(specular, 0.f, 1.f);
+	float reflections = reader.getKey(Section::Video, Key::reflections, Default::reflections);
+	video.reflections = glm::clamp(reflections, 0.f, 1.f);
 	int characterSmoothing = reader.getKey(Section::Video, Key::characterSmoothing, Default::characterSmoothing);
 	video.characterSmoothing = glm::clamp(characterSmoothing, 0, 3);
 	int objectSmoothing = reader.getKey(Section::Video, Key::objectSmoothing, Default::objectSmoothing);

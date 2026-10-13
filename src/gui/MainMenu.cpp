@@ -919,6 +919,8 @@ public:
 		, m_pixelLightingCheckbox(nullptr)
 		, m_normalMapsCycleText(nullptr)
 		, m_parallaxMappingCycleText(nullptr)
+		, m_specularCycleText(nullptr)
+		, m_reflectionsCycleText(nullptr)
 		, m_dlssAvailable(false)
 		, m_fsrAvailable(false)
 		, m_anyUpscalerAvailable(false)
@@ -935,6 +937,8 @@ public:
 	CheckboxWidget * m_pixelLightingCheckbox;
 	CycleTextWidget * m_normalMapsCycleText;
 	CycleTextWidget * m_parallaxMappingCycleText;
+	CycleTextWidget * m_specularCycleText;
+	CycleTextWidget * m_reflectionsCycleText;
 	bool m_dlssAvailable;
 	bool m_fsrAvailable;
 	bool m_anyUpscalerAvailable;
@@ -1208,6 +1212,10 @@ public:
 		                                          &config.video.normalMaps, &Renderer::setNormalMaps);
 		m_parallaxMappingCycleText = addEffectStrength(getLocalised("system_menus_options_video_parallax_mapping"),
 		                                               &config.video.parallaxMapping, &Renderer::setParallaxMapping);
+		m_specularCycleText = addEffectStrength(getLocalised("system_menus_options_video_specular"),
+		                                       &config.video.specular, &Renderer::setSpecular);
+		m_reflectionsCycleText = addEffectStrength(getLocalised("system_menus_options_video_reflections"),
+		                                          &config.video.reflections, &Renderer::setReflections);
 		
 		addSmoothingLevel(getLocalised("system_menus_options_video_character_smoothing"),
 		                  &config.video.characterSmoothing);
@@ -1353,6 +1361,12 @@ private:
 		}
 		if(m_parallaxMappingCycleText) {
 			m_parallaxMappingCycleText->setEnabled(direct3D);
+		}
+		if(m_specularCycleText) {
+			m_specularCycleText->setEnabled(direct3D);
+		}
+		if(m_reflectionsCycleText) {
+			m_reflectionsCycleText->setEnabled(direct3D);
 		}
 		if(m_pixelLightingCheckbox) {
 			m_pixelLightingCheckbox->setEnabled(direct3D);

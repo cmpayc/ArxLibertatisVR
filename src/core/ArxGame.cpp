@@ -2049,6 +2049,8 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	renderer.setBloom(config.video.bloom);
 	renderer.setNormalMaps(config.video.normalMaps);
 	renderer.setParallaxMapping(config.video.parallaxMapping);
+	renderer.setSpecular(config.video.specular);
+	renderer.setReflections(config.video.reflections);
 	renderer.setColorGrading(config.video.colorGrading);
 	renderer.setPixelLighting(config.video.pixelLighting);
 	

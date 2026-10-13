@@ -139,6 +139,11 @@ public:
 	void setNormalMaps(float strength) override;
 	bool supportsParallaxMapping() const override { return true; }
 	void setParallaxMapping(float strength) override;
+	bool supportsSpecular() const override { return true; }
+	void setSpecular(float strength) override;
+	bool supportsReflections() const override { return true; }
+	void setReflections(float strength) override;
+	void setWaterSurface(bool water) override { m_waterSurface = water; m_stateValid = false; }
 	
 	//! \return true if relief maps are generated for textures, for normal maps or parallax mapping
 	bool reliefMapsEnabled() const {
@@ -214,6 +219,7 @@ private:
 	 * \param apply multiply the resolved scene with it, false for the debug view
 	 */
 	void renderAmbientOcclusion(bool apply);
+	void renderReflections();
 	
 	/*!
 	 * Blur the bright parts of the scene through the bloom chain
@@ -293,6 +299,17 @@ private:
 	ComPtr<ID3D11RenderTargetView> m_aoBlurView;
 	ComPtr<ID3D11ShaderResourceView> m_aoBlurResource;
 	
+	// Screen-space reflections: surface normal and reflectivity written by the scene shaders, and a copy of
+	// the scene with mipmaps for blurry reflections
+	float m_reflectionStrength;
+	ComPtr<ID3D11Texture2D> m_surfaceTarget;
+	ComPtr<ID3D11RenderTargetView> m_surfaceView;
+	ComPtr<ID3D11Texture2D> m_surfaceResolved;
+	ComPtr<ID3D11ShaderResourceView> m_surfaceResource;
+	ComPtr<ID3D11Texture2D> m_reflectionColor;
+	ComPtr<ID3D11ShaderResourceView> m_reflectionColorResource;
+	UINT m_reflectionColorLevels;
+	
 	// Bloom chain, each level half the size of the previous one
 	static constexpr size_t BloomLevels = 6;
 	bool m_bloom;
@@ -369,6 +386,8 @@ private:
 	ComPtr<ID3D11PixelShader> m_aoBlurVerticalPixelShader;
 	ComPtr<ID3D11PixelShader> m_aoApplyPixelShader;
 	ComPtr<ID3D11PixelShader> m_debugAOPixelShader;
+	ComPtr<ID3D11Buffer> m_reflectionConstants;
+	ComPtr<ID3D11PixelShader> m_reflectionPixelShader;
 	ComPtr<ID3D11Buffer> m_bloomConstants;
 	ComPtr<ID3D11PixelShader> m_bloomPrefilterPixelShader;
 	ComPtr<ID3D11PixelShader> m_bloomDownsamplePixelShader;
@@ -423,7 +442,7 @@ private:
 	static constexpr UINT NormalMapSlot = 3;
 	float m_vsConstantsData[24];
 	bool m_vsConstantsValid;
-	unsigned char m_psConstantsData[96];
+	unsigned char m_psConstantsData[128];
 	bool m_psConstantsValid;
 	
 	// Per-pixel lighting of world geometry
@@ -431,6 +450,8 @@ private:
 	size_t m_pixelLightCount; //!< Number of lights in m_lightConstants
 	float m_normalMapStrength;
 	float m_parallaxStrength;
+	float m_specularStrength;
+	bool m_waterSurface;
 	ComPtr<ID3D11PixelShader> m_normalMapPixelShader;
 	bool m_pixelLightsWarned;
 	

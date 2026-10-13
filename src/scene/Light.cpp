@@ -42,7 +42,10 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 */
 // Copyright (c) 1999-2000 ARKANE Studios SA. All rights reserved
 
+#include <algorithm>
 #include <array>
+#include <utility>
+#include <vector>
 
 #include "scene/Light.h"
 
@@ -50,6 +53,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "core/GameTime.h"
 #include "core/Core.h"
 
+#include "game/Camera.h"
 #include "game/Entity.h"
 #include "game/EntityManager.h"
 #include "game/Inventory.h"
@@ -259,6 +263,10 @@ void PrecalcDynamicLighting(const Vec3f & camPos, float camDepth) {
 	
 }
 
+// Static lights for highlights: at most this many, at most this far from the camera beyond their range
+static const size_t MaxSpecularLights = 48;
+static const float SpecularLightDistance = 1000.f;
+
 void UploadPixelLights() {
 	
 	if(!GRenderer->usesPixelLighting()) {
@@ -282,6 +290,33 @@ void UploadPixelLights() {
 		pixelLight.fallEnd = light.fallend;
 		pixelLight.color = light.rgb255 * (1.f / 255.f);
 		pixelLight.intensity = light.intensity * GLOBAL_LIGHT_FACTOR * 0.5f;
+	}
+	
+	// Static lights are already in the vertex colors but can add highlights to shiny surfaces
+	static std::vector<std::pair<float, const EERIE_LIGHT *>> nearby;
+	nearby.clear();
+	for(const EERIE_LIGHT & light : g_staticLights) {
+		if(!light.m_ignitionStatus || (light.extras & EXTRAS_SEMIDYNAMIC) || light.rgb == Color3f::black) {
+			continue;
+		}
+		float distance = fdist(light.pos, g_camera->m_pos) - light.fallend;
+		if(distance > SpecularLightDistance) {
+			continue;
+		}
+		nearby.emplace_back(distance, &light);
+	}
+	std::sort(nearby.begin(), nearby.end(),
+	          [](const auto & a, const auto & b) { return a.first < b.first; });
+	size_t nearbyCount = std::min(nearby.size(), std::min(MaxSpecularLights, lights.size() - count));
+	for(size_t i = 0; i < nearbyCount; i++) {
+		const EERIE_LIGHT & light = *nearby[i].second;
+		Renderer::PixelLight & pixelLight = lights[count++];
+		pixelLight.position = light.pos;
+		pixelLight.fallStart = light.fallstart;
+		pixelLight.fallEnd = light.fallend;
+		pixelLight.color = light.rgb;
+		pixelLight.intensity = light.intensity * GLOBAL_LIGHT_FACTOR * 0.5f;
+		pixelLight.specularOnly = true;
 	}
 	
 	GRenderer->setPixelLights(lights.data(), count);
