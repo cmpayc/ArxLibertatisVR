@@ -48,6 +48,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include <utility>
 
 #include "core/Core.h"
+#include "graphics/Draw.h"
 #include "graphics/DrawLine.h"
 #include "graphics/font/Font.h"
 #include "gui/Text.h"
@@ -55,8 +56,13 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "gui/widget/ButtonWidget.h"
 #include "input/Input.h"
 
+// Distance scrolled per mouse wheel step
+static const float ScrollStep = 30.f;
+
 MenuPage::MenuPage(MENUSTATE id)
 	: m_rowSpacing(10)
+	, m_scroll(0.f)
+	, m_scrollMax(0.f)
 	, m_id(id)
 	, m_initialized(false)
 	, m_selected(nullptr)
@@ -119,33 +125,25 @@ void MenuPage::addCenter(std::unique_ptr<Widget> widget, bool centerX) {
 	}
 	
 	float height = widget->m_rect.height();
-	float whitespace = (widget->type() == WidgetType_Spacer) ? widget->m_rect.height() : 0.f;
-	for(const Widget & child : m_children.widgets()) {
+	for(const Widget * child : m_centered) {
 		height += RATIO_Y(m_rowSpacing);
-		height += child.m_rect.height();
-		whitespace += RATIO_Y(m_rowSpacing);
-		if(child.type() == WidgetType_Spacer) {
-			whitespace += child.m_rect.height();
-		}
+		height += child->m_rect.height();
 	}
 	
-	float squish = 1.f;
-	if(height > m_content.height() && whitespace > 0.f) {
-		height -= whitespace;
-		squish = std::max(0.f, m_content.height() - height) / whitespace;
-		height += whitespace * squish;
-	}
+	// Rows that do not fit start at the top of the content area and can be scrolled
+	m_scrollMax = std::max(0.f, std::ceil(height - m_content.height()));
+	float y = (m_scrollMax > 0.f) ? m_content.top : std::floor(m_content.center().y - height / 2.f);
+	y -= m_scroll;
 	
-	float y = std::floor(m_content.center().y - height / 2.f);
-	
-	for(Widget & child : m_children.widgets()) {
-		child.setPosition(Vec2f(child.m_rect.left, y));
-		y += child.m_rect.height() * ((child.type() == WidgetType_Spacer) ? squish : 1.f);
-		y += RATIO_Y(m_rowSpacing) * squish;
+	for(Widget * child : m_centered) {
+		child->setPosition(Vec2f(child->m_rect.left, y));
+		y += child->m_rect.height();
+		y += RATIO_Y(m_rowSpacing);
 	}
 	
 	widget->setPosition(Vec2f(x, y));
 	
+	m_centered.push_back(widget.get());
 	m_children.add(std::move(widget));
 	
 }
@@ -168,6 +166,13 @@ void MenuPage::update(Vec2f pos) {
 	m_rect.moveTo(pos);
 	
 	m_children.update();
+	
+	// The mouse wheel scrolls pages that do not fit instead of changing the hovered value
+	bool scrolled = false;
+	if(m_scrollMax > 0.f && GInput->getMouseWheelDir() != 0 && !m_focused) {
+		scrollTo(m_scroll - float(GInput->getMouseWheelDir()) * RATIO_Y(ScrollStep));
+		scrolled = true;
+	}
 	
 	if(m_focused && !m_focused->wantFocus()) {
 		m_focused->unfocus();
@@ -212,7 +217,15 @@ void MenuPage::update(Vec2f pos) {
 		
 	}
 	
-	m_selected = m_children.getWidgetAt(Vec2f(GInput->getMousePosition()));
+	m_selected = nullptr;
+	for(Widget & widget : m_children.widgets()) {
+		if(widget.isEnabled() && isVisible(widget)) {
+			m_selected = widget.getWidgetAt(Vec2f(GInput->getMousePosition()));
+			if(m_selected) {
+				break;
+			}
+		}
+	}
 	
 	if(m_focused && m_selected != m_focused && GInput->getMouseButton(Mouse::Button_0)) {
 		m_focused->unfocus();
@@ -235,7 +248,9 @@ void MenuPage::update(Vec2f pos) {
 			return;
 		}
 		
-		m_selected->hover();
+		if(!scrolled) {
+			m_selected->hover();
+		}
 		
 	}
 	
@@ -243,12 +258,48 @@ void MenuPage::update(Vec2f pos) {
 
 void MenuPage::render() {
 	
-	m_children.render(m_selected);
+	for(Widget & widget : m_children.widgets()) {
+		if(isVisible(widget)) {
+			widget.render(&widget == m_selected);
+		}
+	}
+	
+	// Scroll bar
+	if(m_scrollMax > 0.f) {
+		float width = std::max(2.f, RATIO_X(2.f));
+		float total = m_content.height() + m_scrollMax;
+		Rectf track(Vec2f(m_rect.right - width, m_content.top), width, m_content.height());
+		Rectf thumb = track;
+		thumb.top = track.top + track.height() * (m_scroll / total);
+		thumb.bottom = thumb.top + track.height() * (m_content.height() / total);
+		EERIEDrawBitmap(track, 0.f, nullptr, Color::gray(0.2f));
+		EERIEDrawBitmap(thumb, 0.f, nullptr, Color::gray(0.6f));
+	}
 	
 	if(m_selected) {
 		pMenuCursor->SetMouseOver();
 	}
 	
+}
+
+bool MenuPage::isVisible(const Widget & widget) const {
+	
+	if(m_scrollMax <= 0.f || std::find(m_centered.begin(), m_centered.end(), &widget) == m_centered.end()) {
+		return true;
+	}
+	
+	return widget.m_rect.top >= m_content.top - 0.5f && widget.m_rect.bottom <= m_content.bottom + 0.5f;
+}
+
+void MenuPage::scrollTo(float scroll) {
+	
+	scroll = glm::clamp(scroll, 0.f, m_scrollMax);
+	
+	for(Widget * widget : m_centered) {
+		widget->move(Vec2f(0.f, m_scroll - scroll));
+	}
+	
+	m_scroll = scroll;
 }
 
 void MenuPage::drawDebug() {
