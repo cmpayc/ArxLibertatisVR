@@ -24,7 +24,6 @@
 #include <map>
 #include <utility>
 
-#include "core/Config.h"
 #include "graphics/GraphicsTypes.h"
 #include "graphics/Vertex.h"
 #include "graphics/data/Mesh.h"
@@ -37,13 +36,9 @@ static const float CreaseCosine = 0.5f;
 static const float SmoothingFullDistance = 1000.f;
 static const float SmoothingEndDistance = 3000.f;
 
-bool meshSmoothingEnabled() {
-	return config.video.modelSmoothing > 0;
-}
-
-int meshSmoothingSegments(float distance) {
+int meshSmoothingSegments(int level, float distance) {
 	
-	int segments = std::clamp(config.video.modelSmoothing, 0, MeshSmoothingMaxSegments - 1) + 1;
+	int segments = std::clamp(level, 0, MeshSmoothingMaxSegments - 1) + 1;
 	
 	if(segments > 1 && distance > SmoothingFullDistance) {
 		float fade = (SmoothingEndDistance - distance) / (SmoothingEndDistance - SmoothingFullDistance);

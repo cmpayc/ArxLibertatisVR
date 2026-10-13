@@ -30,9 +30,9 @@ struct ShaderLight;
 struct TexturedVertex;
 
 /*!
- * Animated models are drawn as curved point-normal triangles (Vlachos et al. 2001):
+ * Models are drawn as curved point-normal triangles (Vlachos et al. 2001):
  * each triangle is split into segments^2 smaller ones that are placed on a cubic patch
- * through the corners, using smooth normals computed from the animated vertex positions.
+ * through the corners, using smooth normals computed from the transformed vertex positions.
  * Neighboring patches share the same edge curves so no cracks appear between them.
  * Creases and non-manifold edges stay straight to keep sharp features intact.
  * The same normals are used to light the model so that the shading is smooth across triangles.
@@ -50,11 +50,8 @@ struct MeshLighting {
 //! Largest number of segments per edge
 const int MeshSmoothingMaxSegments = 4;
 
-//! Whether animated characters are smoothed
-bool meshSmoothingEnabled();
-
-//! Number of segments each edge is split into for the configured smoothing level and a distance
-int meshSmoothingSegments(float distance);
+//! Number of segments each edge is split into for a smoothing level (0 = off to 3) and a distance
+int meshSmoothingSegments(int level, float distance);
 
 //! Update the smooth normals of an animated object after its vertices have been transformed
 void updateMeshSmoothing(EERIE_3DOBJ & eobj);

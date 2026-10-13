@@ -53,6 +53,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "animation/MeshSmoothing.h"
 
 #include "core/Application.h"
+#include "core/Config.h"
 #include "core/GameTime.h"
 #include "core/Core.h"
 
@@ -695,7 +696,16 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 	UpdateLlights(lights, lightsCount, tv, false);
 	
 	arx_assert(eobj->vertexColors.size() == eobj->vertexWorldPositions.size());
-		
+	
+	// Objects are drawn with curved triangles and smooth shading unless they should look faceted
+	int level = (io && !useFaceNormal) ? config.video.objectSmoothing : 0;
+	int segments = 1;
+	if(level > 0) {
+		updateMeshSmoothing(*eobj);
+		segments = meshSmoothingSegments(level, fdist(t.pos, g_camera->m_pos));
+	}
+	MeshLighting lighting = { lights, lightsCount, &colorMod };
+	
 	for(size_t i = 0; i < eobj->facelist.size(); i++) {
 		const EERIE_FACE & face = eobj->facelist[i];
 		
@@ -709,12 +719,16 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 		}
 		
 		float fTransp = 0.f;
-		TexturedVertex * tvList = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
+		TexturedVertex * output = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
 		
+		TexturedVertex tvList[3];
 		for(size_t n = 0; n < 3; n++) {
 			
 			const Vec3f & position = eobj->vertexWorldPositions[face.vid[n]].v;
 			Vec3f normal = t.rotation * (useFaceNormal ? face.norm : eobj->vertexlist[face.vid[n]].norm);
+			if(level > 0) {
+				normal = meshSmoothingNormal(*eobj, face.vid[n].handleData());
+			}
 			float diffuse = useFaceNormal ? 0.5f : 1.f;
 			
 			eobj->vertexColors[face.vid[n]] = ApplyLight(lights, lightsCount, position, normal, colorMod, diffuse);
@@ -768,10 +782,27 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 		}
 
 		// HALO HANDLING START
-		if(io && (io->halo.flags & HALO_ACTIVE)) {
-			const IO_HALO & halo = io->halo;
-			AddFixedObjectHalo(face, t, halo, tvList, eobj);
+		bool halo = io && (io->halo.flags & HALO_ACTIVE);
+		if(halo) {
+			AddFixedObjectHalo(face, t, io->halo, tvList, eobj);
 		}
+		
+		TexturedVertex smoothed[MeshSmoothingMaxSegments * MeshSmoothingMaxSegments * 3];
+		size_t triangles = 1;
+		const TexturedVertex * vertices = tvList;
+		if(segments > 1) {
+			bool fixedColor = (face.facetype & (POLY_TRANS | POLY_GLOW)) || invisibility > 0.f
+			                  || (io && player.m_improve) || halo;
+			triangles = smoothFace(*eobj, i, tvList, segments, fixedColor ? nullptr : &lighting, smoothed);
+			vertices = smoothed;
+		}
+		
+		std::copy(vertices, vertices + 3, output);
+		for(size_t n = 1; n < triangles; n++) {
+			output = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
+			std::copy(vertices + n * 3, vertices + n * 3 + 3, output);
+		}
+		
 	}
 }
 
@@ -1130,17 +1161,22 @@ static void Cedric_AnimateDrawEntityRender(EERIE_3DOBJ * eobj, const Vec3f & pos
 	size_t lightsCount;
 	UpdateLlights(lights, lightsCount, tv, false);
 	
-	// Characters are drawn with curved triangles and smooth shading
+	// Models are drawn with curved triangles and smooth shading
 	Entity * character = io;
 	if(!io && IN_BOOK_DRAW && eobj == entities.player()->obj) {
 		character = entities.player();
 	}
-	bool smooth = meshSmoothingEnabled() && character
-	              && (character == entities.player() || (character->ioflags & IO_NPC));
+	int level = 0;
+	if(character && (character == entities.player() || (character->ioflags & IO_NPC))) {
+		level = config.video.characterSmoothing;
+	} else if(io && !(io->ioflags & IO_ANGULAR)) {
+		level = config.video.objectSmoothing;
+	}
+	bool smooth = level > 0;
 	int segments = 1;
 	if(smooth) {
 		updateMeshSmoothing(*eobj);
-		segments = meshSmoothingSegments(IN_BOOK_DRAW ? 0.f : glm::distance(pos, g_camera->m_pos));
+		segments = meshSmoothingSegments(level, IN_BOOK_DRAW ? 0.f : glm::distance(pos, g_camera->m_pos));
 	}
 	
 	Cedric_ApplyLighting(lights, lightsCount, eobj, obj, colorMod, smooth);
