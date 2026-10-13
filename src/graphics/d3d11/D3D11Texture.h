@@ -43,7 +43,8 @@ public:
 	void destroy() override;
 	
 	ID3D11ShaderResourceView * view() const { return m_view.Get(); }
-	
+	ID3D11Texture2D * texture() const { return m_texture.Get(); }
+
 	//! Slope of the texture brightness for normal mapping, nullptr if not generated
 	ID3D11ShaderResourceView * normalView() const { return m_normalView.Get(); }
 	

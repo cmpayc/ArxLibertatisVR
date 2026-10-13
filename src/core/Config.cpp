@@ -165,6 +165,7 @@ constexpr const float
 	vrHeightOffset = 0.f,
 	vrSmoothTurnSpeed = 120.f,
 	vrUiDistance = 1.5f,
+	vrResolutionScale = 1.f,
 	vrHandOffsetX = 0.f,
 	vrHandOffsetY = 0.06f,
 	vrHandOffsetZ = 0.07f,
@@ -340,6 +341,7 @@ constexpr const std::string_view
 	vrHandOrientedMovement = "hand_oriented_movement",
 	vrLeftHanded = "left_handed",
 	vrUiDistance = "ui_distance",
+	vrResolutionScale = "resolution_scale",
 	vrHandOffsetX = "hand_offset_x",
 	vrHandOffsetY = "hand_offset_y",
 	vrHandOffsetZ = "hand_offset_z",
@@ -647,6 +649,7 @@ bool Config::save() {
 	writer.writeKey(Key::vrHandOrientedMovement, vr.handOrientedMovement);
 	writer.writeKey(Key::vrLeftHanded, vr.leftHanded);
 	writer.writeKey(Key::vrUiDistance, vr.uiDistance);
+	writer.writeKey(Key::vrResolutionScale, vr.resolutionScale);
 	writer.writeKey(Key::vrHandOffsetX, vr.handOffset.x);
 	writer.writeKey(Key::vrHandOffsetY, vr.handOffset.y);
 	writer.writeKey(Key::vrHandOffsetZ, vr.handOffset.z);
@@ -842,6 +845,8 @@ bool Config::init(const fs::path & file) {
 	vr.leftHanded = reader.getKey(Section::VR, Key::vrLeftHanded, Default::vrLeftHanded);
 	float vrUiDistance = reader.getKey(Section::VR, Key::vrUiDistance, Default::vrUiDistance);
 	vr.uiDistance = glm::clamp(vrUiDistance, 0.5f, 5.f);
+	float vrResolutionScale = reader.getKey(Section::VR, Key::vrResolutionScale, Default::vrResolutionScale);
+	vr.resolutionScale = glm::clamp(vrResolutionScale, 0.5f, 2.f);
 	vr.handOffset.x = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetX, Default::vrHandOffsetX), -0.2f, 0.2f);
 	vr.handOffset.y = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetY, Default::vrHandOffsetY), -0.2f, 0.2f);
 	vr.handOffset.z = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetZ, Default::vrHandOffsetZ), -0.2f, 0.2f);

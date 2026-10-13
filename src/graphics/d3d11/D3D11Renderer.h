@@ -24,12 +24,14 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "graphics/d3d11/D3D11ComPtr.h"
 
 #include <boost/intrusive/list.hpp>
 
 #include "graphics/Renderer.h"
+#include "graphics/StereoView.h"
 #include "graphics/d3d11/D3D11Texture.h"
 #include "math/Rectangle.h"
 #include "platform/Platform.h"
@@ -185,7 +187,91 @@ public:
 	//! Mipmap LOD bias to add while rendering the 3D scene at a lower resolution
 	float sceneLodBias() const { return m_inScene ? m_sceneLodBias : 0.f; }
 	
+	/*!
+	 * VR: replicate every draw call of the 3D scene into the views of a stereo target, like
+	 * OpenGLRenderer::setStereoViews. The scene is rendered into a target with the eyes side by side, which stays
+	 * bound after \ref endScene() for the overlays drawn in the world (pointer, hand menus), until
+	 * \ref finishStereoScene().
+	 *
+	 * \param views The views to draw into, or an empty list to disable
+	 * \param size  The size of the stereo output with both eyes side by side, the view rectangles are in it
+	 */
+	void setStereoViews(std::vector<StereoView> views, const Vec2i & size);
+	bool hasStereoViews() const { return !m_stereoViews.empty(); }
+	
+	/*!
+	 * Apply the effects to the stereo scene and copy it into the stereo output
+	 *
+	 * \return the output with both eyes side by side, nullptr if no scene was rendered
+	 */
+	ID3D11Texture2D * finishStereoScene();
+	
+	/*!
+	 * Render everything except the 3D scene into another target of the window size (the VR interface layer)
+	 * instead of the window, or into the window again for nullptr
+	 */
+	void setOutputTarget(ID3D11RenderTargetView * color, ID3D11DepthStencilView * depth);
+	
+	//! Write premultiplied alpha coverage to the alpha channel, see OpenGLRenderer::setPremultipliedAlphaOutput
+	void setPremultipliedAlphaOutput(bool enable);
+	
+	struct OverlayVertex {
+		float position[4]; //!< Clip space
+		float uv[2];
+	};
+	
+	/*!
+	 * Draw a textured triangle strip into a target, for the VR desktop view
+	 *
+	 * \param blend Blend the premultiplied alpha texture over the target instead of replacing it
+	 */
+	void drawOverlay(ID3D11RenderTargetView * target, const Vec2i & size, ID3D11ShaderResourceView * texture,
+	                 const OverlayVertex * vertices, size_t count, bool blend);
+	
+	//! The window image, which the interface is drawn into
+	ID3D11Texture2D * windowTexture() const { return m_colorTarget.Get(); }
+	ID3D11RenderTargetView * windowView() const { return m_colorView.Get(); }
+	const Vec2i & windowSize() const { return m_size; }
+
 private:
+	
+	//! A view of the scene in the scene target: the whole target, or one eye of the stereo scene
+	struct SceneRegion {
+		Rect pixels;
+		glm::mat4x4 projection;
+		glm::mat4x4 view;
+		glm::mat4x4 previousProjection; //!< In the last frame, for the motion vectors
+		glm::mat4x4 previousView;
+	};
+	
+	//! \return true while the 3D scene is drawn into the stereo target
+	bool stereoActive() const { return m_inScene && !m_stereoViews.empty(); }
+	//! \return true if the temporal upscaler is used for the stereo scene (each eye on its own)
+	bool stereoUpscaling() const;
+	//! Upscale each eye of the stereo scene into the stereo upscaler output, nullptr if not upscaled
+	ID3D11ShaderResourceView * runStereoUpscaler();
+	std::vector<SceneRegion> sceneRegions() const;
+	
+	//! Issue a draw call once, or once for each eye with its viewport and matrices
+	template <class DrawFunction>
+	void drawViews(VertexType type, const DrawFunction & draw);
+	void applyStereoView(VertexType type, size_t eye);
+	
+	//! Constants of the vertex shaders, see VSConstants
+	void fillVSConstants(float * data, VertexType type, const glm::mat4x4 & transform, const glm::mat4x4 & view,
+	                     const glm::mat4x4 & projection, const glm::mat4x4 & prevTransform,
+	                     const Vec2i & viewSize) const;
+	//! From pre-transformed vertices (window pixels) to clip space
+	glm::mat4x4 screenTransform() const;
+	
+	ID3D11RenderTargetView * outputColorView() const { return m_outputColor ? m_outputColor : m_colorView.Get(); }
+	ID3D11DepthStencilView * outputDepthView() const { return m_outputColor ? m_outputDepth : m_depthView.Get(); }
+	
+	//! Ambient occlusion, reflections and bloom for the resolved scene
+	void postProcessScene();
+	//! Copy the scene into the output with the color grading or a debug view
+	void composeScene(ID3D11RenderTargetView * target, const Vec2i & size, ID3D11ShaderResourceView * upscaled,
+	                  bool vignette);
 	
 	struct RingBuffer {
 		
@@ -201,7 +287,7 @@ private:
 	bool createSizeDependentResources();
 	//! Generate or free the relief maps of the loaded textures after a setting changed
 	void updateReliefMaps(bool wasEnabled);
-	bool createSceneTargets(const Vec2i & size);
+	bool createSceneTargets(const Vec2i & size, UINT samples);
 	void releaseSceneTargets();
 	
 	//! \return true if the 3D scene is rendered to separate targets
@@ -235,8 +321,12 @@ private:
 	//! Run the upscaler on the scene, returns the upscaled image or nullptr
 	ID3D11ShaderResourceView * runUpscaler();
 	
-	//! Draw a full-screen triangle with the given pixel shader
-	void drawFullscreen(ID3D11PixelShader * shader);
+	/*!
+	 * Draw a full-screen triangle with the given pixel shader
+	 *
+	 * \param uvRect The part of the source textures covered by the viewport: offset and size
+	 */
+	void drawFullscreen(ID3D11PixelShader * shader, const Vec4f & uvRect = Vec4f(0.f, 0.f, 1.f, 1.f));
 	
 	//! Render target size divided by the window size
 	Vec2f targetScale() const;
@@ -261,7 +351,7 @@ private:
 	
 	ID3D11RasterizerState * getRasterizerState(bool cull, unsigned depthOffset, bool wireframe, bool scissor);
 	ID3D11BlendState * getBlendState(BlendingFactor src, BlendingFactor dst, bool alphaToCoverage,
-	                                 bool colorWrite);
+	                                 bool colorWrite, bool premultipliedAlpha = false);
 	ID3D11DepthStencilState * getDepthState(bool test, bool write);
 	
 	HWND m_window;
@@ -276,10 +366,30 @@ private:
 	
 	Vec2i m_size;
 	UINT m_msaaSamples;
+	UINT m_stereoSamples; //!< MSAA samples of the stereo scene (VR), independent of the window
 	ComPtr<ID3D11Texture2D> m_colorTarget;
 	ComPtr<ID3D11RenderTargetView> m_colorView;
 	ComPtr<ID3D11Texture2D> m_depthTarget;
 	ComPtr<ID3D11DepthStencilView> m_depthView;
+	
+	// VR: the interface layer replacing the window, see setOutputTarget()
+	ID3D11RenderTargetView * m_outputColor;
+	ID3D11DepthStencilView * m_outputDepth;
+	bool m_premultipliedAlpha;
+	
+	// VR: the eyes of the stereo scene, see setStereoViews()
+	std::vector<StereoView> m_stereoViews;
+	Vec2i m_stereoSize; //!< Output with both eyes
+	Vec2i m_stereoEyeSize; //!< One eye in the scene target, even so that the half size targets split evenly
+	ComPtr<ID3D11Texture2D> m_stereoOutput;
+	ComPtr<ID3D11RenderTargetView> m_stereoOutputView;
+	ComPtr<ID3D11Texture2D> m_stereoUpscaled; //!< Output of the temporal upscaler, the size of m_stereoOutput
+	ComPtr<ID3D11ShaderResourceView> m_stereoUpscaledView;
+	std::vector<StereoView> m_previousStereoViews; //!< Of the last stereo frame, for the motion vectors
+	bool m_lastSceneStereo = false; //!< The history of the upscaler is reset when switching
+	ComPtr<ID3D11Buffer> m_stereoVSConstants[2];
+	float m_stereoVSConstantsData[2][72];
+	bool m_stereoVSConstantsValid[2];
 	
 	// 3D scene rendered at a lower resolution
 	float m_sceneScale;
@@ -382,6 +492,10 @@ private:
 	ComPtr<ID3D11DomainShader> m_modelDomainShader;
 	ComPtr<ID3D11PixelShader> m_blitPixelShader;
 	ComPtr<ID3D11SamplerState> m_blitSampler;
+	ComPtr<ID3D11Buffer> m_blitConstants;
+	Vec4f m_blitRect;
+	ComPtr<ID3D11VertexShader> m_overlayVertexShader;
+	ComPtr<ID3D11InputLayout> m_overlayLayout;
 	ComPtr<ID3D11PixelShader> m_motionPixelShader;
 	ComPtr<ID3D11PixelShader> m_motionPixelShaderMS;
 	ComPtr<ID3D11PixelShader> m_debugDepthPixelShader;
@@ -450,7 +564,7 @@ private:
 	ID3D11SamplerState * m_currentSamplers[3];
 	ID3D11ShaderResourceView * m_currentNormalView;
 	static constexpr UINT NormalMapSlot = 3;
-	float m_vsConstantsData[56];
+	float m_vsConstantsData[72];
 	bool m_vsConstantsValid;
 	unsigned char m_psConstantsData[128];
 	bool m_psConstantsValid;

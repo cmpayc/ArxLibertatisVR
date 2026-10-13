@@ -252,7 +252,10 @@ public:
 		bool leftHanded;
 
 		float uiDistance;
-		
+
+		//! Eye image size relative to the runtime's recommended size (above 1 for sharper eyes)
+		float resolutionScale;
+
 		//! Wrist joint relative to the controller grip pose (meters; x right, y towards the thumb, z backwards)
 		Vec3f handOffset;
 		

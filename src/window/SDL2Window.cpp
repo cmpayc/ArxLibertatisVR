@@ -62,6 +62,9 @@
 #include "platform/Environment.h"
 #include "platform/WindowsUtils.h"
 #include "platform/profiler/Profiler.h"
+#if ARX_HAVE_OPENXR
+#include "vr/VRSystem.h"
+#endif
 #include "window/SDL2X11Util.h"
 
 // Avoid including SDL_syswm.h without SDL_PROTOTYPES_ONLY on non-Windows systems
@@ -87,7 +90,15 @@ SDL2Window::SDL2Window()
 	, m_sdlSubsystem(ARX_SDL_SYSWM_UNKNOWN)
 {
 	#if ARX_HAVE_D3D11
-	if(config.video.renderer == "Direct3D 11") {
+	bool d3d11 = (config.video.renderer == "Direct3D 11");
+	#if ARX_HAVE_OPENXR
+	// The VR runtime may support only OpenGL, see VRSystem::initInstance()
+	if(d3d11 && g_vr && !g_vr->usesDirect3D11()) {
+		LogInfo << "Using OpenGL instead of Direct3D 11 for VR";
+		d3d11 = false;
+	}
+	#endif
+	if(d3d11) {
 		m_d3d11 = d3d11::createRenderer();
 		m_renderer = m_d3d11;
 		return;

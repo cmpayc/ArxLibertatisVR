@@ -136,6 +136,8 @@ public:
 	void setVirtualMousePosition(bool active, const Vec2s & position = Vec2s(0));
 	void setVirtualMouseButton(int buttonId, bool pressed);
 	void setVirtualKey(int keyId, bool pressed);
+	//! Mouse wheel steps (positive is up) added to the next update
+	void addVirtualMouseWheel(int steps) { m_virtualWheelSteps += steps; }
 
 	void setMouseSensitivity(int sensitivity);
 	void setMouseAcceleration(int acceleration);
@@ -222,6 +224,7 @@ private:
 	bool  m_virtualMouseButton[Mouse::ButtonCount];
 	bool  m_virtualMouseButtonApplied[Mouse::ButtonCount];
 	bool  m_virtualKeys[Keyboard::KeyCount];
+	int   m_virtualWheelSteps;
 
 };
 

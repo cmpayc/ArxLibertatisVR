@@ -34,6 +34,16 @@ namespace d3d11 {
 Renderer * createRenderer();
 
 /*!
+ * Create the device on a specific adapter (VR: the one the headset is connected to), before \ref createDevice()
+ *
+ * \param luid The LUID of the adapter (LowPart in the low 32 bits, HighPart in the high 32 bits)
+ */
+void setRequiredAdapter(unsigned long long luid);
+
+//! \return true if the renderer is a Direct3D 11 renderer (it can fall back to OpenGL)
+bool isDirect3D11(const Renderer * renderer);
+
+/*!
  * Create the Direct3D 11 device and swap chain for a native window.
  *
  * \param window a HWND

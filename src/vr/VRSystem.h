@@ -24,6 +24,7 @@
 #include <array>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,22 +32,25 @@
 #include <openxr/openxr.h>
 
 #include "game/GameTypes.h"
-#include "graphics/opengl/OpenGLRenderer.h"
+#include "graphics/StereoView.h"
 #include "math/Rectangle.h"
 #include "math/Types.h"
 #include "vr/VRInput.h"
 
 class Texture;
+class VRGraphics;
 
 struct VRHudAreas;
 
 
 /*!
- * OpenXR integration: instance, OpenGL session, stereo swapchains and the frame loop.
+ * OpenXR integration: instance, session, stereo swapchains and the frame loop.
+ *
+ * The session uses the graphics API of the renderer (OpenGL or Direct3D 11), see VRGraphics.
  *
  * Lifetime:
- *  - initInstance() once at startup (no GL context needed)
- *  - createSession() / destroySession() follow the OpenGL context (onRendererInit / onRendererShutdown)
+ *  - initInstance() once at startup, before the renderer is created (it picks the graphics API and the adapter)
+ *  - createSession() / destroySession() follow the renderer (onRendererInit / onRendererShutdown)
  *  - each frame: pollEvents(), beginFrame(), render into the eye images, endFrame()
  */
 class VRSystem {
@@ -67,12 +71,21 @@ public:
 	bool initInstance();
 	void shutdown();
 
-	//! Create the session for the OpenGL context that is current on the calling thread
+	//! \return true if the session uses Direct3D 11, else OpenGL (the renderer must match)
+	[[nodiscard]] bool usesDirect3D11() const;
+
+	//! Create the session for the renderer: its Direct3D 11 device, or the OpenGL context current on this thread
 	bool createSession();
 	void destroySession();
 
 	//! Process pending OpenXR events, must be called once per frame
 	void pollEvents();
+
+	/*!
+	 * Create a new session (and instance) after the runtime lost them, e.g. when the headset was disconnected, once
+	 * the headset is back. Called every frame while there is no session, it retries once per second.
+	 */
+	void recoverSession();
 
 	[[nodiscard]] bool hasSession() const { return m_session != XR_NULL_HANDLE; }
 	[[nodiscard]] bool isSessionRunning() const { return m_sessionRunning; }
@@ -114,7 +127,7 @@ public:
 	[[nodiscard]] bool isRenderingFrame() const { return m_frameActive && m_shouldRender; }
 
 	//! Set the eye views for the current frame, see \ref prepareVRCamera
-	void setStereoViews(std::vector<OpenGLRenderer::StereoView> views);
+	void setStereoViews(std::vector<StereoView> views);
 
 	/*!
 	 * Redirect rendering into the stereo render target, replicating draw calls into both eyes
@@ -203,21 +216,26 @@ public:
 	 */
 	bool getBookPose(Vec3f & position, glm::quat & orientation, Vec2f & coverSize) const;
 	/*!
-	 * The book as it is drawn in the interface (upside down: OpenGL images start at the bottom) and its size with the
-	 * bookmarks in metres, nullptr while it is closed
+	 * Whether the copies of interface parts (the book, the inventory) are upside down: OpenGL images start at the
+	 * bottom
+	 */
+	[[nodiscard]] bool isPanelTextureFlipped() const;
+	/*!
+	 * The book as it is drawn in the interface (see isPanelTextureFlipped) and its size with the bookmarks in metres,
+	 * nullptr while it is closed
 	 */
 	[[nodiscard]] Texture * getBookTexture(Vec2f & panelSize) const {
 		panelSize = m_bookPanel.size;
 		return (m_bookOpen && m_bookPanel.active) ? m_bookPanel.texture : nullptr;
 	}
 	/*!
-	 * The open inventory at the wrist, drawn in the world like the book: its texture (upside down), where it is in the
-	 * tracking space now (attached to the wrist) and its size in metres, false if it is not shown
+	 * The open inventory at the wrist, drawn in the world like the book: its texture (see isPanelTextureFlipped),
+	 * where it is in the tracking space now (attached to the wrist) and its size in metres, false if it is not shown
 	 */
 	bool getInventoryPanel(Texture *& texture, Vec3f & position, glm::quat & orientation, Vec2f & size) const;
 
-	//! Acquire the current swapchain image for an eye and return its OpenGL texture name
-	unsigned acquireEyeImage(size_t eye);
+	//! Acquire the current swapchain image for an eye and return its handle (see VRGraphics), 0 on failure
+	u64 acquireEyeImage(size_t eye);
 	void releaseEyeImage(size_t eye);
 
 	[[nodiscard]] const std::string & getRuntimeName() const { return m_runtimeName; }
@@ -227,14 +245,14 @@ private:
 
 	struct EyeSwapchain {
 		XrSwapchain handle = XR_NULL_HANDLE;
-		std::vector<unsigned> images;
+		std::vector<u64> images;
 		bool acquired = false;
 	};
 
+	//! Destroy a lost session (and instance), and start waiting for the headset, see recoverSession()
+	void handleLoss();
 	bool createSwapchains();
 	void destroySwapchains();
-	bool createStereoTarget();
-	void destroyStereoTarget();
 	bool createUITarget(const Vec2i & size);
 	void destroyUITarget();
 	void updateUIPlacement(bool followHead);
@@ -257,19 +275,19 @@ private:
 	void updateLabelPanel(const VRHudAreas & areas);
 	//! \return false if nothing is drawn to the desktop window (see config.vr.desktopView)
 	static bool isDesktopViewShown();
-	void drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear);
+	//! The whole interface over the whole desktop window
+	void drawUIToWindow(const Vec2i & windowSize, bool clear);
 	//! The panels of this frame as the left eye sees them, over the desktop view (like the headset)
 	void drawPanelsToWindow(const Vec2i & windowSize);
-	//! Draw into the window with a texture and premultiplied alpha, saving and restoring the renderer's state
-	void drawToWindow(unsigned texture, const Vec2i & windowSize, bool clear, const std::function<void()> & draw);
 	//! The panels of the in-game interface: the book, the screen, subtitles, the wrists, labels...
 	void updateGamePanels();
 	void updatePointer();
-	unsigned acquireSwapchainImage(EyeSwapchain & swapchain);
+	u64 acquireSwapchainImage(EyeSwapchain & swapchain);
 	void releaseSwapchainImage(EyeSwapchain & swapchain);
 	void handleSessionStateChange(XrSessionState state);
 	bool check(XrResult result, const char * call) const;
 
+	std::unique_ptr<VRGraphics> m_graphics;
 	XrInstance m_instance;
 	XrSystemId m_systemId;
 	XrSession m_session;
@@ -277,31 +295,28 @@ private:
 	XrSessionState m_sessionState;
 	bool m_sessionRunning;
 	bool m_exitRequested;
+	// The runtime lost the session or the instance (set by events and failed calls, handled in pollEvents)
+	mutable bool m_sessionLost = false;
+	mutable bool m_instanceLost = false;
+	bool m_recoverSession = false; //!< A new session is to be created, see recoverSession()
+	u64 m_nextRecoverTime = 0; //!< ms
+	u64 m_recoverAttempts = 0;
+	int m_sessionFailures = 0; //!< Failed attempts to create a session with the current instance
 
 	std::array<EyeSwapchain, EyeCount> m_swapchains;
 	std::array<XrView, EyeCount> m_views;
 	std::array<XrCompositionLayerProjectionView, EyeCount> m_layerViews;
 	Vec2i m_eyeSize;
 	s64 m_colorFormat;
-	unsigned m_blitFramebuffer;
 
-	// Double-wide (left eye | right eye) multisampled render target and its resolve target
-	std::vector<OpenGLRenderer::StereoView> m_stereoViews;
-	unsigned m_stereoFramebuffer;
-	unsigned m_stereoColor;
-	unsigned m_stereoDepth;
-	unsigned m_stereoResolveFramebuffer;
-	unsigned m_stereoResolveColor;
+	// The eyes of the stereo render target (left eye | right eye), see VRGraphics
+	std::vector<StereoView> m_stereoViews;
+	bool m_stereoTarget;
 	bool m_stereoActive;
 	bool m_stereoRendered;
-	unsigned m_stereoPreviousTarget;
-	Vec2i m_stereoPreviousTargetSize;
 
 	// Virtual screen (interface layer) render target and quad layer
 	EyeSwapchain m_uiSwapchain;
-	unsigned m_uiFramebuffer;
-	unsigned m_uiColor;
-	unsigned m_uiDepth;
 	Vec2i m_uiSize;
 	bool m_uiActive;
 	bool m_uiSubmitted;

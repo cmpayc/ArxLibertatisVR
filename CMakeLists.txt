@@ -1067,6 +1067,7 @@ set(VR_OPENXR_SOURCES
 	src/vr/VRCombat.cpp
 	src/vr/VRControls.cpp
 	src/vr/VRGrab.cpp
+	src/vr/VRGraphicsGL.cpp
 	src/vr/VRHud.cpp
 	src/vr/VRInput.cpp
 	src/vr/VRKeyboard.cpp
@@ -1367,6 +1368,13 @@ if(ARX_HAVE_OPENXR)
 	# The OpenXR loader (or a runtime selected in the config) is loaded at runtime, see src/vr/VRSystem.cpp
 	include_directories(SYSTEM ${OpenXR_INCLUDE_DIR})
 	add_definitions(-DXR_NO_PROTOTYPES)
+	# The OpenXR platform header declares the types of the graphics APIs enabled before its first inclusion
+	set_source_files_properties(src/vr/VRGraphicsGL.cpp PROPERTIES ARX_SEPARATE_UNIT 1)
+	if(ARX_HAVE_D3D11)
+		set(VR_D3D11_SOURCES src/vr/VRGraphicsD3D11.cpp)
+		list(APPEND GRAPHICS_SOURCES ${VR_D3D11_SOURCES})
+		set_source_files_properties(${VR_D3D11_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
+	endif()
 endif()
 
 # Windowing / input

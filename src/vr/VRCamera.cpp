@@ -30,7 +30,7 @@
 #include "game/Player.h"
 #include "graphics/Math.h"
 #include "graphics/Raycast.h"
-#include "graphics/opengl/OpenGLRenderer.h"
+#include "graphics/StereoView.h"
 #include "vr/VRControls.h"
 #include "vr/VRMath.h"
 #include "vr/VRSystem.h"
@@ -540,10 +540,10 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	 */
 	float zoom = isPlayer ? 1.f + 0.5f * glm::clamp(player.m_bowAimRatio, 0.f, 1.f) : 1.f;
 
-	std::vector<OpenGLRenderer::StereoView> stereoViews(VRSystem::EyeCount);
+	std::vector<StereoView> stereoViews(VRSystem::EyeCount);
 	for(size_t eye = 0; eye < VRSystem::EyeCount; eye++) {
 		const XrFovf & fov = views[eye]->fov;
-		OpenGLRenderer::StereoView & view = stereoViews[eye];
+		StereoView & view = stereoViews[eye];
 		view.viewport = Rect(s32(eye) * eyeSize.x, 0, s32(eye + 1) * eyeSize.x, eyeSize.y);
 		view.view = vr::worldToViewMatrix(eyeRotation[eye], eyePosition[eye]);
 		view.projection = vr::projectionFromTangents(glm::tan(fov.angleLeft) / zoom, glm::tan(fov.angleRight) / zoom,

@@ -84,24 +84,62 @@ void shutdownNGX(ID3D11Device * device) {
 
 class DLSSUpscaler final : public D3D11Upscaler {
 	
+	//! A DLSS feature with its own history for each view (VR eye)
+	struct View {
+		NVSDK_NGX_Handle * feature = nullptr;
+		Vec2i renderSize = Vec2i(0);
+		Vec2i outputSize = Vec2i(0);
+		// Copies of the inputs and the output for views in parts of the textures (VR eyes)
+		d3d11::ComPtr<ID3D11Texture2D> color;
+		d3d11::ComPtr<ID3D11Texture2D> depth;
+		d3d11::ComPtr<ID3D11Texture2D> motion;
+		d3d11::ComPtr<ID3D11Texture2D> output;
+	};
+	
+	//! Create the texture if it does not exist or has another size or format
+	bool ensureTexture(d3d11::ComPtr<ID3D11Texture2D> & texture, const Vec2i & size, DXGI_FORMAT format,
+	                   UINT bindFlags) {
+		if(texture) {
+			D3D11_TEXTURE2D_DESC desc;
+			texture->GetDesc(&desc);
+			if(desc.Width == UINT(size.x) && desc.Height == UINT(size.y) && desc.Format == format) {
+				return true;
+			}
+			texture.Reset();
+		}
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = UINT(size.x);
+		desc.Height = UINT(size.y);
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = format;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = bindFlags;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &texture))) {
+			LogError << "Failed to create a " << size.x << "x" << size.y << " texture for DLSS";
+			texture.Reset();
+			return false;
+		}
+		return true;
+	}
+	
 	ID3D11Device * m_device;
 	NVSDK_NGX_Parameter * m_parameters;
-	NVSDK_NGX_Handle * m_feature;
-	Vec2i m_renderSize;
-	Vec2i m_outputSize;
+	View m_views[MaxViews];
 	NVSDK_NGX_DLSS_Hint_Render_Preset m_preset;
 	bool m_initialized;
 	
-	void releaseFeature() {
-		if(m_feature) {
-			NVSDK_NGX_D3D11_ReleaseFeature(m_feature);
-			m_feature = nullptr;
+	static void releaseFeature(View & view) {
+		if(view.feature) {
+			NVSDK_NGX_D3D11_ReleaseFeature(view.feature);
+			view.feature = nullptr;
 		}
 	}
 	
-	bool createFeature(ID3D11DeviceContext * context, const Inputs & inputs) {
+	bool createFeature(ID3D11DeviceContext * context, View & view, const Inputs & inputs) {
 		
-		releaseFeature();
+		releaseFeature(view);
 		
 		const char * const presetParameters[] = {
 			NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
@@ -126,20 +164,20 @@ class DLSSUpscaler final : public D3D11Upscaler {
 		// Motion vectors are at the render resolution and do not include the jitter
 		params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
 		
-		NVSDK_NGX_Result result = NGX_D3D11_CREATE_DLSS_EXT(context, &m_feature, m_parameters, &params);
+		NVSDK_NGX_Result result = NGX_D3D11_CREATE_DLSS_EXT(context, &view.feature, m_parameters, &params);
 		if(NVSDK_NGX_FAILED(result)) {
 			LogError << "Failed to create DLSS feature for " << inputs.renderSize.x << "x" << inputs.renderSize.y
 			         << " -> " << inputs.outputSize.x << "x" << inputs.outputSize.y << ": " << resultString(result);
-			m_feature = nullptr;
+			view.feature = nullptr;
 			return false;
 		}
 		
-		LogInfo << "DLSS: " << inputs.renderSize.x << "x" << inputs.renderSize.y << " -> "
+		LogInfo << "DLSS view " << inputs.view << ": " << inputs.renderSize.x << "x" << inputs.renderSize.y << " -> "
 		        << inputs.outputSize.x << "x" << inputs.outputSize.y << ", preset "
 		        << (m_preset == NVSDK_NGX_DLSS_Hint_Render_Preset_Default ? '-' : char('A' + int(m_preset) - 1));
 		
-		m_renderSize = inputs.renderSize;
-		m_outputSize = inputs.outputSize;
+		view.renderSize = inputs.renderSize;
+		view.outputSize = inputs.outputSize;
 		
 		return true;
 	}
@@ -149,15 +187,14 @@ public:
 	DLSSUpscaler(ID3D11Device * device, NVSDK_NGX_DLSS_Hint_Render_Preset preset)
 		: m_device(device)
 		, m_parameters(nullptr)
-		, m_feature(nullptr)
-		, m_renderSize(0)
-		, m_outputSize(0)
 		, m_preset(preset)
 		, m_initialized(false)
 	{ }
 	
 	~DLSSUpscaler() override {
-		releaseFeature();
+		for(View & view : m_views) {
+			releaseFeature(view);
+		}
 		if(m_parameters) {
 			NVSDK_NGX_D3D11_DestroyParameters(m_parameters);
 		}
@@ -231,19 +268,66 @@ public:
 	
 	bool evaluate(ID3D11DeviceContext * context, const Inputs & inputs) override {
 		
+		if(inputs.view >= MaxViews) {
+			return false;
+		}
+		View & view = m_views[inputs.view];
+		
 		bool reset = inputs.reset;
-		if(!m_feature || inputs.renderSize != m_renderSize || inputs.outputSize != m_outputSize) {
-			if(!createFeature(context, inputs)) {
+		if(!view.feature || inputs.renderSize != view.renderSize || inputs.outputSize != view.outputSize) {
+			if(!createFeature(context, view, inputs)) {
 				return false;
 			}
 			reset = true;
 		}
 		
+		/*
+		 * DLSS rejects views in parts of larger textures with sub-rectangles (seen with the VR eyes side by side):
+		 * those are copied into textures of their own
+		 */
+		D3D11_TEXTURE2D_DESC colorDesc;
+		inputs.color->GetDesc(&colorDesc);
+		D3D11_TEXTURE2D_DESC outputDesc;
+		inputs.output->GetDesc(&outputDesc);
+		bool copyInputs = inputs.renderOffset != Vec2i(0) || colorDesc.Width != UINT(inputs.renderSize.x)
+		                  || colorDesc.Height != UINT(inputs.renderSize.y);
+		bool copyOutput = inputs.outputOffset != Vec2i(0) || outputDesc.Width != UINT(inputs.outputSize.x)
+		                  || outputDesc.Height != UINT(inputs.outputSize.y);
+		
+		ID3D11Texture2D * color = inputs.color;
+		ID3D11Texture2D * depth = inputs.depth;
+		ID3D11Texture2D * motion = inputs.motion;
+		ID3D11Texture2D * output = inputs.output;
+		if(copyInputs) {
+			if(!ensureTexture(view.color, inputs.renderSize, colorDesc.Format, D3D11_BIND_SHADER_RESOURCE)
+			   || !ensureTexture(view.depth, inputs.renderSize, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE)
+			   || !ensureTexture(view.motion, inputs.renderSize, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE)) {
+				return false;
+			}
+			D3D11_BOX box = {
+				UINT(inputs.renderOffset.x), UINT(inputs.renderOffset.y), 0,
+				UINT(inputs.renderOffset.x + inputs.renderSize.x), UINT(inputs.renderOffset.y + inputs.renderSize.y), 1
+			};
+			context->CopySubresourceRegion(view.color.Get(), 0, 0, 0, 0, inputs.color, 0, &box);
+			context->CopySubresourceRegion(view.depth.Get(), 0, 0, 0, 0, inputs.depth, 0, &box);
+			context->CopySubresourceRegion(view.motion.Get(), 0, 0, 0, 0, inputs.motion, 0, &box);
+			color = view.color.Get();
+			depth = view.depth.Get();
+			motion = view.motion.Get();
+		}
+		if(copyOutput) {
+			if(!ensureTexture(view.output, inputs.outputSize, outputDesc.Format,
+			                  D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS)) {
+				return false;
+			}
+			output = view.output.Get();
+		}
+		
 		NVSDK_NGX_D3D11_DLSS_Eval_Params params = {};
-		params.Feature.pInColor = inputs.color;
-		params.Feature.pInOutput = inputs.output;
-		params.pInDepth = inputs.depth;
-		params.pInMotionVectors = inputs.motion;
+		params.Feature.pInColor = color;
+		params.Feature.pInOutput = output;
+		params.pInDepth = depth;
+		params.pInMotionVectors = motion;
 		params.InJitterOffsetX = inputs.jitter.x;
 		params.InJitterOffsetY = inputs.jitter.y;
 		params.InRenderSubrectDimensions.Width = unsigned(inputs.renderSize.x);
@@ -253,14 +337,19 @@ public:
 		params.InMVScaleY = 1.f;
 		params.InFrameTimeDeltaInMsec = inputs.frameTime;
 		
-		NVSDK_NGX_Result result = NGX_D3D11_EVALUATE_DLSS_EXT(context, m_feature, m_parameters, &params);
+		NVSDK_NGX_Result result = NGX_D3D11_EVALUATE_DLSS_EXT(context, view.feature, m_parameters, &params);
 		if(NVSDK_NGX_FAILED(result)) {
 			static bool warned = false;
 			if(!warned) {
-				LogError << "DLSS evaluation failed: " << resultString(result);
+				LogError << "DLSS evaluation failed for view " << inputs.view << ": " << resultString(result);
 				warned = true;
 			}
 			return false;
+		}
+		
+		if(copyOutput) {
+			context->CopySubresourceRegion(inputs.output, 0, UINT(inputs.outputOffset.x), UINT(inputs.outputOffset.y), 0,
+			                               output, 0, nullptr);
 		}
 		
 		return true;
@@ -270,8 +359,12 @@ public:
 		return "DLSS";
 	}
 	
+	bool supportsViews() const override {
+		return true;
+	}
+	
 };
-
+	
 } // anonymous namespace
 
 namespace d3d11 {
@@ -290,5 +383,5 @@ std::unique_ptr<D3D11Upscaler> createDLSSUpscaler(ID3D11Device * device, const s
 	
 	return upscaler;
 }
-
+	
 } // namespace d3d11

@@ -47,6 +47,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "input/Input.h"
 
 #include <algorithm>
+#include <utility>
 #include <string>
 #include <map>
 #include <cmath>
@@ -345,6 +346,7 @@ Input::Input()
 	, iKeyId(-1)
 	, m_virtualMouseActive(false)
 	, m_virtualMousePosition(0)
+	, m_virtualWheelSteps(0)
 {
 	std::fill(std::begin(m_virtualMouseButton), std::end(m_virtualMouseButton), false);
 	std::fill(std::begin(m_virtualMouseButtonApplied), std::end(m_virtualMouseButtonApplied), false);
@@ -585,7 +587,8 @@ void Input::update(float time) {
 	}	
 	int relX, relY;
 	backend->getRelativeMouseCoords(relX, relY, iWheelDir);
-	
+	iWheelDir += std::exchange(m_virtualWheelSteps, 0);
+
 	if(m_mouseMode == Mouse::Relative) {
 		
 		if(m_useRawMouseInput) {

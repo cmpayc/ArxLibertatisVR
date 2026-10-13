@@ -57,11 +57,15 @@ struct VSConstants {
 	float camera[4]; // World position of the camera
 	float modelToWorld[16]; // From pre-transformed model vertices to world space, for per-pixel highlights
 	float worldToClip[16]; // From world space to clip space in the 3D scene, for tessellated models
+	float prevTransform[16]; // Like transform for the positions of the previous frame (differs for VR eyes)
 };
+
+const size_t VSConstantsSize = sizeof(VSConstants) / sizeof(float);
 
 struct MotionConstants {
 	float reprojection[16];
 	float targetSize[4];
+	float region[4]; // The view in the scene target: xy = first pixel, zw = size
 };
 
 struct PSConstants {
@@ -78,6 +82,12 @@ struct ReflectionConstants {
 	float projection[4]; // x = 1 / projection[0][0], y = 1 / projection[1][1], z = near, w = far
 	float view[3][4];    // Rows of the rotation from world space to the view space of the depth reconstruction
 	float params[4];     // x = strength, y = maximum ray length, z = mip levels of the scene copy, w = debug view
+	float region[4];     // The view in the scene target: xy = first pixel, zw = size
+	float center[4];     // xy = projection[2][0], projection[2][1] (off-center projections of VR eyes)
+};
+
+struct BlitConstants {
+	float rect[4]; // The part of the source textures covered by the viewport: offset and size
 };
 
 struct ClearConstants {
@@ -89,6 +99,8 @@ struct AmbientOcclusionConstants {
 	float target[4];
 	float projection[4];
 	float params[4];
+	float region[4]; // See ReflectionConstants
+	float center[4];
 };
 
 // Ambient occlusion settings: sample radius in world units (about centimeters), depth bias
@@ -98,6 +110,7 @@ const float AmbientOcclusionBias = 1.f;
 struct BloomConstants {
 	float params[4];
 	float source[4];
+	float clamp[4]; // The source texture coordinates of the view: xy = minimum, zw = maximum
 };
 
 struct GradingConstants {
@@ -167,6 +180,7 @@ static_assert(sizeof(AmbientOcclusionConstants) % 16 == 0, "constant buffer size
 static_assert(sizeof(ReflectionConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(BloomConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(GradingConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
+static_assert(sizeof(BlitConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(LightConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 
 const size_t VertexRingSize = 4 * 1024 * 1024;
@@ -220,6 +234,16 @@ std::string hresultString(HRESULT hr) {
 	return oss.str();
 }
 
+// See d3d11::isDirect3D11()
+const D3D11Renderer * g_d3d11Renderer = nullptr;
+
+// The adapter the device must be created on (VR), see d3d11::setRequiredAdapter()
+bool g_hasRequiredAdapter = false;
+LUID g_requiredAdapter = { };
+
+// MSAA samples of the stereo scene at most: both eyes at the headset resolution are expensive
+const UINT StereoMaxSamples = 4;
+	
 } // anonymous namespace
 
 D3D11Renderer::D3D11Renderer()
@@ -230,6 +254,14 @@ D3D11Renderer::D3D11Renderer()
 	, m_vsync(1)
 	, m_size(0)
 	, m_msaaSamples(1)
+	, m_stereoSamples(1)
+	, m_outputColor(nullptr)
+	, m_outputDepth(nullptr)
+	, m_premultipliedAlpha(false)
+	, m_stereoSize(0)
+	, m_stereoEyeSize(0)
+	, m_stereoVSConstantsData()
+	, m_stereoVSConstantsValid()
 	, m_sceneScale(1.f)
 	, m_inScene(false)
 	, m_drawingScene(false)
@@ -260,6 +292,7 @@ D3D11Renderer::D3D11Renderer()
 	, m_dlssFailed(false)
 	, m_fsrFailed(false)
 	, m_lastUpscaleTime(0)
+	, m_blitRect(0.f)
 	, m_maximumAnisotropy(1.f)
 	, m_maximumSupportedAnisotropy(1.f)
 	, m_wireframe(false)
@@ -299,9 +332,15 @@ D3D11Renderer::D3D11Renderer()
 	, m_fpsLogFrames(0)
 	, m_fpsLogTessellatedDraws(0)
 	, m_fpsLogModelDraws(0)
-{ }
+{
+	g_d3d11Renderer = this;
+}
 
 D3D11Renderer::~D3D11Renderer() {
+	
+	if(g_d3d11Renderer == this) {
+		g_d3d11Renderer = nullptr;
+	}
 	
 	if(isInitialized()) {
 		shutdown();
@@ -370,7 +409,25 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	ComPtr<IDXGIFactory2> factory;
 	ComPtr<IDXGIAdapter1> defaultAdapter;
 	if(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-		factory->EnumAdapters1(0, &defaultAdapter);
+		// VR: the headset may be connected to another adapter than the primary one
+		if(g_hasRequiredAdapter) {
+			ComPtr<IDXGIAdapter1> adapter;
+			for(UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++) {
+				DXGI_ADAPTER_DESC1 desc;
+				if(SUCCEEDED(adapter->GetDesc1(&desc)) && desc.AdapterLuid.LowPart == g_requiredAdapter.LowPart
+				   && desc.AdapterLuid.HighPart == g_requiredAdapter.HighPart) {
+					defaultAdapter = adapter;
+					break;
+				}
+				adapter.Reset();
+			}
+			if(!defaultAdapter) {
+				LogWarning << "The adapter required by the VR runtime was not found";
+			}
+		}
+		if(!defaultAdapter) {
+			factory->EnumAdapters1(0, &defaultAdapter);
+		}
 	}
 	
 	auto createDevice = [&](UINT deviceFlags, const D3D_FEATURE_LEVEL * featureLevels, UINT count) {
@@ -485,16 +542,20 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	// Fullscreen is handled by SDL
 	factory->MakeWindowAssociation(m_window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
 	
-	m_msaaSamples = 1;
-	for(int samples = maxMSAALevel; samples > 1; samples--) {
-		UINT colorQuality = 0, depthQuality = 0;
-		if(SUCCEEDED(m_device->CheckMultisampleQualityLevels(ColorFormat, UINT(samples), &colorQuality))
-		   && SUCCEEDED(m_device->CheckMultisampleQualityLevels(DepthFormat, UINT(samples), &depthQuality))
-		   && colorQuality > 0 && depthQuality > 0) {
-			m_msaaSamples = UINT(samples);
-			break;
+	auto supportedSamples = [this](UINT maximum) {
+		for(UINT samples = maximum; samples > 1; samples--) {
+			UINT colorQuality = 0, depthQuality = 0;
+			if(SUCCEEDED(m_device->CheckMultisampleQualityLevels(ColorFormat, samples, &colorQuality))
+			   && SUCCEEDED(m_device->CheckMultisampleQualityLevels(DepthFormat, samples, &depthQuality))
+			   && colorQuality > 0 && depthQuality > 0) {
+				return samples;
+			}
 		}
-	}
+		return UINT(1);
+	};
+	m_msaaSamples = supportedSamples(UINT(std::max(maxMSAALevel, 1)));
+	// VR copies the stereo scene into the eye images, the window is not multisampled then
+	m_stereoSamples = supportedSamples(StereoMaxSamples);
 	
 	if(!compileShaders()) {
 		return false;
@@ -542,6 +603,16 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		bufferDesc.ByteWidth = sizeof(GradingConstants);
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_gradingConstants))) {
 			return false;
+		}
+		bufferDesc.ByteWidth = sizeof(BlitConstants);
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_blitConstants))) {
+			return false;
+		}
+		bufferDesc.ByteWidth = sizeof(VSConstants);
+		for(ComPtr<ID3D11Buffer> & buffer : m_stereoVSConstants) {
+			if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &buffer))) {
+				return false;
+			}
 		}
 	}
 	
@@ -702,6 +773,22 @@ bool D3D11Renderer::compileShaders() {
 		desc.MaxAnisotropy = 1;
 		desc.MaxLOD = D3D11_FLOAT32_MAX;
 		if(FAILED(m_device->CreateSamplerState(&desc, &m_blitSampler))) {
+			return false;
+		}
+	}
+	
+	{
+		const D3D11_INPUT_ELEMENT_DESC layout[] = {
+			{ "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, UINT(offsetof(OverlayVertex, position)),
+			  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, UINT(offsetof(OverlayVertex, uv)),
+			  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		};
+		ComPtr<ID3DBlob> code = compileShader("vsOverlay", "vs_4_0");
+		if(!code || FAILED(m_device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(),
+		                                                nullptr, &m_overlayVertexShader))
+		   || FAILED(m_device->CreateInputLayout(layout, UINT(std::size(layout)), code->GetBufferPointer(),
+		                                         code->GetBufferSize(), &m_overlayLayout))) {
 			return false;
 		}
 	}
@@ -906,11 +993,11 @@ void D3D11Renderer::releaseSizeDependentResources() {
 	
 }
 
-bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
+bool D3D11Renderer::createSceneTargets(const Vec2i & size, UINT samples) {
 	
 	releaseSceneTargets();
 	
-	m_sceneSamples = m_upscaler ? 1 : m_msaaSamples;
+	m_sceneSamples = samples;
 	
 	D3D11_TEXTURE2D_DESC desc = {};
 	desc.Width = UINT(size.x);
@@ -1205,37 +1292,37 @@ void D3D11Renderer::setReflections(float strength) {
 }
 
 void D3D11Renderer::setNormalMaps(float strength) {
-
+	
 	bool wasEnabled = reliefMapsEnabled();
 	m_normalMapStrength = glm::clamp(strength, 0.f, 1.f);
 	updateReliefMaps(wasEnabled);
-
+	
 }
 
 void D3D11Renderer::setParallaxMapping(float strength) {
-
+	
 	bool wasEnabled = reliefMapsEnabled();
 	m_parallaxStrength = glm::clamp(strength, 0.f, 1.f);
 	updateReliefMaps(wasEnabled);
-
+	
 }
 
 void D3D11Renderer::setSpecular(float strength) {
-
+	
 	m_specularStrength = glm::clamp(strength, 0.f, 1.f);
 	m_stateValid = false;
-
+	
 }
 
 void D3D11Renderer::updateReliefMaps(bool wasEnabled) {
-
+	
 	m_stateValid = false;
-
+	
 	bool enabled = reliefMapsEnabled();
 	if(enabled == wasEnabled) {
 		return;
 	}
-
+	
 	// Generate the relief maps for the loaded textures, or free them
 	for(D3D11Texture & texture : m_textures) {
 		if(enabled) {
@@ -1335,26 +1422,47 @@ void D3D11Renderer::renderBloom(bool apply) {
 	
 	ID3D11ShaderResourceView * none = nullptr;
 	
+	// Each eye of the stereo scene is blurred on its own: the same part of every level
+	std::vector<Vec4f> regions;
+	for(const SceneRegion & region : sceneRegions()) {
+		regions.emplace_back(float(region.pixels.left) / float(m_sceneSize.x),
+		                     float(region.pixels.top) / float(m_sceneSize.y),
+		                     float(region.pixels.width()) / float(m_sceneSize.x),
+		                     float(region.pixels.height()) / float(m_sceneSize.y));
+	}
+	
 	auto pass = [&](ID3D11RenderTargetView * target, const Vec2i & targetSize, ID3D11ShaderResourceView * source,
 	                const Vec2i & sourceSize, ID3D11PixelShader * shader, bool additive) {
-		
-		BloomConstants constants = { };
-		constants.params[0] = BloomThreshold;
-		constants.params[1] = BloomKnee;
-		// The upsampled levels add up, normalize the result
-		constants.params[2] = 6.f * m_bloomStrength / float(BloomLevels);
-		constants.source[0] = 1.f / float(sourceSize.x);
-		constants.source[1] = 1.f / float(sourceSize.y);
-		m_context->UpdateSubresource(m_bloomConstants.Get(), 0, nullptr, &constants, 0, 0);
 		
 		m_context->PSSetShaderResources(0, 1, &none);
 		m_context->OMSetRenderTargets(1, &target, nullptr);
 		m_context->PSSetShaderResources(0, 1, &source);
-		D3D11_VIEWPORT viewport = { 0.f, 0.f, float(targetSize.x), float(targetSize.y), 0.f, 1.f };
-		m_context->RSSetViewports(1, &viewport);
 		BlendingFactor dst = additive ? BlendOne : BlendZero;
 		m_context->OMSetBlendState(getBlendState(BlendOne, dst, false, true), nullptr, 0xffffffff);
-		drawFullscreen(shader);
+		
+		for(const Vec4f & region : regions) {
+			
+			BloomConstants constants = { };
+			constants.params[0] = BloomThreshold;
+			constants.params[1] = BloomKnee;
+			// The upsampled levels add up, normalize the result
+			constants.params[2] = 6.f * m_bloomStrength / float(BloomLevels);
+			constants.source[0] = 1.f / float(sourceSize.x);
+			constants.source[1] = 1.f / float(sourceSize.y);
+			constants.clamp[0] = region.x + 0.5f * constants.source[0];
+			constants.clamp[1] = region.y + 0.5f * constants.source[1];
+			constants.clamp[2] = region.x + region.z - 0.5f * constants.source[0];
+			constants.clamp[3] = region.y + region.w - 0.5f * constants.source[1];
+			m_context->UpdateSubresource(m_bloomConstants.Get(), 0, nullptr, &constants, 0, 0);
+			
+			D3D11_VIEWPORT viewport = {
+				region.x * float(targetSize.x), region.y * float(targetSize.y),
+				region.z * float(targetSize.x), region.w * float(targetSize.y), 0.f, 1.f
+			};
+			m_context->RSSetViewports(1, &viewport);
+			drawFullscreen(shader, region);
+			
+		}
 	};
 	
 	pass(m_bloomViews[0].Get(), m_bloomSizes[0], m_sceneResolvedView.Get(), m_sceneSize,
@@ -1387,37 +1495,10 @@ void D3D11Renderer::renderAmbientOcclusion(bool apply) {
 		return;
 	}
 	
-	// See runUpscaler() for the projection layout
-	float q = m_sceneProjection[2][2];
-	float nearPlane = (q != 0.f) ? -m_sceneProjection[3][2] / q : 1.f;
-	float farPlane = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
-	float scaleX = std::max(std::abs(m_sceneProjection[0][0]), 0.0001f);
-	float scaleY = std::max(std::abs(m_sceneProjection[1][1]), 0.0001f);
-	
-	AmbientOcclusionConstants constants;
-	constants.target[0] = float(m_sceneSize.x);
-	constants.target[1] = float(m_sceneSize.y);
-	constants.target[2] = 1.f / float(m_sceneSize.x);
-	constants.target[3] = 1.f / float(m_sceneSize.y);
-	constants.projection[0] = 1.f / scaleX;
-	constants.projection[1] = 1.f / scaleY;
-	constants.projection[2] = nearPlane;
-	constants.projection[3] = farPlane;
-	constants.params[0] = AmbientOcclusionRadius;
-	constants.params[1] = m_ambientOcclusionStrength;
-	constants.params[2] = AmbientOcclusionBias;
-	// Pixels per world unit at distance 1
-	constants.params[3] = 0.5f * float(m_sceneSize.y) * scaleY;
-	m_context->UpdateSubresource(m_aoConstants.Get(), 0, nullptr, &constants, 0, 0);
 	ID3D11Buffer * buffer = m_aoConstants.Get();
 	m_context->PSSetConstantBuffers(3, 1, &buffer);
-	
-	// The ambient occlusion is computed at half the size and upsampled when it is applied
-	D3D11_VIEWPORT halfViewport = { 0.f, 0.f, float((m_sceneSize.x + 1) / 2), float((m_sceneSize.y + 1) / 2), 0.f, 1.f };
-	m_context->RSSetViewports(1, &halfViewport);
 	m_context->RSSetState(getRasterizerState(false, 0, false, false));
 	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
-	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
 	
 	ID3D11ShaderResourceView * none[2] = { };
 	
@@ -1429,16 +1510,65 @@ void D3D11Renderer::renderAmbientOcclusion(bool apply) {
 		drawFullscreen(shader);
 	};
 	
-	pass(m_aoView.Get(), nullptr, m_aoPixelShader.Get());
-	pass(m_aoBlurView.Get(), m_aoResource.Get(), m_aoBlurPixelShader.Get());
-	pass(m_aoView.Get(), m_aoBlurResource.Get(), m_aoBlurVerticalPixelShader.Get());
-	
-	if(apply) {
-		// Darken the scene by multiplying it with the ambient occlusion
-		D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
-		m_context->RSSetViewports(1, &viewport);
-		m_context->OMSetBlendState(getBlendState(BlendZero, BlendSrcColor, false, true), nullptr, 0xffffffff);
-		pass(m_sceneResolvedTargetView.Get(), m_aoResource.Get(), m_aoApplyPixelShader.Get());
+	// Each eye of the stereo scene on its own, with its projection
+	for(const SceneRegion & region : sceneRegions()) {
+		
+		// See runUpscaler() for the projection layout
+		const glm::mat4x4 & projection = region.projection;
+		float q = projection[2][2];
+		float nearPlane = (q != 0.f) ? -projection[3][2] / q : 1.f;
+		float farPlane = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
+		float scaleX = std::max(std::abs(projection[0][0]), 0.0001f);
+		float scaleY = std::max(std::abs(projection[1][1]), 0.0001f);
+		
+		AmbientOcclusionConstants constants;
+		constants.target[0] = float(m_sceneSize.x);
+		constants.target[1] = float(m_sceneSize.y);
+		constants.target[2] = 1.f / float(m_sceneSize.x);
+		constants.target[3] = 1.f / float(m_sceneSize.y);
+		constants.projection[0] = 1.f / scaleX;
+		constants.projection[1] = 1.f / scaleY;
+		constants.projection[2] = nearPlane;
+		constants.projection[3] = farPlane;
+		constants.params[0] = AmbientOcclusionRadius;
+		constants.params[1] = m_ambientOcclusionStrength;
+		constants.params[2] = AmbientOcclusionBias;
+		// Pixels per world unit at distance 1
+		constants.params[3] = 0.5f * float(region.pixels.height()) * scaleY;
+		constants.region[0] = float(region.pixels.left);
+		constants.region[1] = float(region.pixels.top);
+		constants.region[2] = float(region.pixels.width());
+		constants.region[3] = float(region.pixels.height());
+		constants.center[0] = projection[2][0];
+		constants.center[1] = projection[2][1];
+		constants.center[2] = constants.center[3] = 0.f;
+		m_context->UpdateSubresource(m_aoConstants.Get(), 0, nullptr, &constants, 0, 0);
+		
+		// The ambient occlusion is computed at half the size and upsampled when it is applied
+		s32 halfLeft = region.pixels.left / 2;
+		s32 halfTop = region.pixels.top / 2;
+		D3D11_VIEWPORT halfViewport = {
+			float(halfLeft), float(halfTop), float((region.pixels.right + 1) / 2 - halfLeft),
+			float((region.pixels.bottom + 1) / 2 - halfTop), 0.f, 1.f
+		};
+		m_context->RSSetViewports(1, &halfViewport);
+		m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
+		
+		pass(m_aoView.Get(), nullptr, m_aoPixelShader.Get());
+		pass(m_aoBlurView.Get(), m_aoResource.Get(), m_aoBlurPixelShader.Get());
+		pass(m_aoView.Get(), m_aoBlurResource.Get(), m_aoBlurVerticalPixelShader.Get());
+		
+		if(apply) {
+			// Darken the scene by multiplying it with the ambient occlusion
+			D3D11_VIEWPORT viewport = {
+				float(region.pixels.left), float(region.pixels.top), float(region.pixels.width()),
+				float(region.pixels.height()), 0.f, 1.f
+			};
+			m_context->RSSetViewports(1, &viewport);
+			m_context->OMSetBlendState(getBlendState(BlendZero, BlendSrcColor, false, true), nullptr, 0xffffffff);
+			pass(m_sceneResolvedTargetView.Get(), m_aoResource.Get(), m_aoApplyPixelShader.Get());
+		}
+		
 	}
 	
 	m_context->PSSetShaderResources(0, 2, none);
@@ -1464,39 +1594,8 @@ void D3D11Renderer::renderReflections() {
 	m_context->CopySubresourceRegion(m_reflectionColor.Get(), 0, 0, 0, 0, m_sceneResolved.Get(), 0, nullptr);
 	m_context->GenerateMips(m_reflectionColorResource.Get());
 	
-	// See renderAmbientOcclusion() for the depth reconstruction
-	float q = m_sceneProjection[2][2];
-	float nearPlane = (q != 0.f) ? -m_sceneProjection[3][2] / q : 1.f;
-	float farPlane = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
-	
-	ReflectionConstants constants = {};
-	constants.target[0] = float(m_sceneSize.x);
-	constants.target[1] = float(m_sceneSize.y);
-	constants.target[2] = 1.f / float(m_sceneSize.x);
-	constants.target[3] = 1.f / float(m_sceneSize.y);
-	constants.projection[0] = 1.f / std::max(std::abs(m_sceneProjection[0][0]), 0.0001f);
-	constants.projection[1] = 1.f / std::max(std::abs(m_sceneProjection[1][1]), 0.0001f);
-	constants.projection[2] = nearPlane;
-	constants.projection[3] = farPlane;
-	// The reconstructed view positions are the view space positions with the signs of the projection
-	const float signs[3] = {
-		glm::sign(m_sceneProjection[0][0]), glm::sign(m_sceneProjection[1][1]), glm::sign(m_sceneProjection[2][3])
-	};
-	for(size_t row = 0; row < 3; row++) {
-		for(size_t column = 0; column < 3; column++) {
-			constants.view[row][column] = signs[row] * m_sceneView[column][row];
-		}
-	}
-	constants.params[0] = m_reflectionStrength;
-	constants.params[1] = ReflectionDistance;
-	constants.params[2] = float(m_reflectionColorLevels);
-	constants.params[3] = (m_sceneDebugView == 7) ? 1.f : 0.f;
-	m_context->UpdateSubresource(m_reflectionConstants.Get(), 0, nullptr, &constants, 0, 0);
 	ID3D11Buffer * buffer = m_reflectionConstants.Get();
 	m_context->PSSetConstantBuffers(7, 1, &buffer);
-	
-	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
-	m_context->RSSetViewports(1, &viewport);
 	m_context->RSSetState(getRasterizerState(false, 0, false, false));
 	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
 	// The debug view shows only the reflections
@@ -1519,7 +1618,54 @@ void D3D11Renderer::renderReflections() {
 	ID3D11SamplerState * sampler = m_blitSampler.Get();
 	m_context->PSSetSamplers(0, 1, &sampler);
 	
-	drawFullscreen(m_reflectionPixelShader.Get());
+	// Each eye of the stereo scene on its own, with its projection
+	for(const SceneRegion & region : sceneRegions()) {
+		
+		// See renderAmbientOcclusion() for the depth reconstruction
+		const glm::mat4x4 & projection = region.projection;
+		float q = projection[2][2];
+		float nearPlane = (q != 0.f) ? -projection[3][2] / q : 1.f;
+		float farPlane = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
+		
+		ReflectionConstants constants = {};
+		constants.target[0] = float(m_sceneSize.x);
+		constants.target[1] = float(m_sceneSize.y);
+		constants.target[2] = 1.f / float(m_sceneSize.x);
+		constants.target[3] = 1.f / float(m_sceneSize.y);
+		constants.projection[0] = 1.f / std::max(std::abs(projection[0][0]), 0.0001f);
+		constants.projection[1] = 1.f / std::max(std::abs(projection[1][1]), 0.0001f);
+		constants.projection[2] = nearPlane;
+		constants.projection[3] = farPlane;
+		// The reconstructed view positions are the view space positions with the signs of the projection
+		const float signs[3] = {
+			glm::sign(projection[0][0]), glm::sign(projection[1][1]), glm::sign(projection[2][3])
+		};
+		for(size_t row = 0; row < 3; row++) {
+			for(size_t column = 0; column < 3; column++) {
+				constants.view[row][column] = signs[row] * region.view[column][row];
+			}
+		}
+		constants.params[0] = m_reflectionStrength;
+		constants.params[1] = ReflectionDistance;
+		constants.params[2] = float(m_reflectionColorLevels);
+		constants.params[3] = debugView ? 1.f : 0.f;
+		constants.region[0] = float(region.pixels.left);
+		constants.region[1] = float(region.pixels.top);
+		constants.region[2] = float(region.pixels.width());
+		constants.region[3] = float(region.pixels.height());
+		constants.center[0] = projection[2][0];
+		constants.center[1] = projection[2][1];
+		m_context->UpdateSubresource(m_reflectionConstants.Get(), 0, nullptr, &constants, 0, 0);
+		
+		D3D11_VIEWPORT viewport = {
+			float(region.pixels.left), float(region.pixels.top), float(region.pixels.width()),
+			float(region.pixels.height()), 0.f, 1.f
+		};
+		m_context->RSSetViewports(1, &viewport);
+		
+		drawFullscreen(m_reflectionPixelShader.Get());
+		
+	}
 	
 	ID3D11ShaderResourceView * none[std::size(inputs)] = { };
 	m_context->PSSetShaderResources(0, UINT(std::size(none)), none);
@@ -1547,7 +1693,7 @@ void D3D11Renderer::updateSceneCamera() {
 	m_sceneView = m_view;
 	m_sceneProjection = m_projection;
 	
-	if(!m_hasPreviousScene || !m_sceneRenderedLastFrame) {
+	if(!m_hasPreviousScene || !m_sceneRenderedLastFrame || m_lastSceneStereo != !m_stereoViews.empty()) {
 		m_resetHistory = true;
 	} else {
 		// Detect camera cuts - the view matrix maps the forward direction of the camera to +z
@@ -1563,9 +1709,11 @@ void D3D11Renderer::updateSceneCamera() {
 		}
 	}
 	
-	Vec2f scale = Vec2f(m_sceneSize) / Vec2f(m_size);
+	// The stereo scene is scaled relative to the eye images
+	Vec2f scale = Vec2f(m_sceneSize) / Vec2f(m_stereoViews.empty() ? m_size : m_stereoSize);
 	
-	if(m_jitterEnabled) {
+	// The same jitter for both eyes of the stereo scene, upscaled on their own
+	if(m_jitterEnabled && (m_stereoViews.empty() || stereoUpscaling())) {
 		// Halton(2, 3) sequence with enough phases to cover each window pixel
 		u32 phases = u32(std::ceil(8.f / (scale.x * scale.y)));
 		m_jitterIndex = (m_jitterIndex + 1) % std::max(phases, u32(1));
@@ -1579,7 +1727,15 @@ void D3D11Renderer::updateSceneCamera() {
 	
 }
 
-void D3D11Renderer::drawFullscreen(ID3D11PixelShader * shader) {
+void D3D11Renderer::drawFullscreen(ID3D11PixelShader * shader, const Vec4f & uvRect) {
+	
+	if(uvRect != m_blitRect) {
+		BlitConstants constants = { { uvRect.x, uvRect.y, uvRect.z, uvRect.w } };
+		m_context->UpdateSubresource(m_blitConstants.Get(), 0, nullptr, &constants, 0, 0);
+		m_blitRect = uvRect;
+	}
+	ID3D11Buffer * buffer = m_blitConstants.Get();
+	m_context->VSSetConstantBuffers(8, 1, &buffer);
 	
 	bindTessellation(false);
 	m_context->IASetInputLayout(nullptr);
@@ -1598,26 +1754,9 @@ void D3D11Renderer::renderSceneMotion() {
 		return;
 	}
 	
-	MotionConstants constants;
-	glm::mat4x4 reprojection(1.f);
-	if(!m_resetHistory) {
-		// World coordinates are large (thousands of units) - single precision is not enough to cancel them out
-		// and results in sub-pixel noise in the motion vectors. Compute the relative camera motion first.
-		glm::dmat4 relative = glm::dmat4(m_previousView) * glm::inverse(glm::dmat4(m_sceneView));
-		reprojection = glm::mat4x4(glm::dmat4(m_previousProjection) * relative * glm::inverse(glm::dmat4(m_sceneProjection)));
-	}
-	std::memcpy(constants.reprojection, &reprojection, sizeof(constants.reprojection));
-	constants.targetSize[0] = float(m_sceneSize.x);
-	constants.targetSize[1] = float(m_sceneSize.y);
-	constants.targetSize[2] = 1.f / float(m_sceneSize.x);
-	constants.targetSize[3] = 1.f / float(m_sceneSize.y);
-	m_context->UpdateSubresource(m_motionConstants.Get(), 0, nullptr, &constants, 0, 0);
-	
 	ID3D11RenderTargetView * views[] = { m_motionView.Get(), m_linearDepthView.Get() };
 	m_context->OMSetRenderTargets(UINT(std::size(views)), views, nullptr);
 	
-	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
-	m_context->RSSetViewports(1, &viewport);
 	m_context->RSSetState(getRasterizerState(false, 0, false, false));
 	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
 	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
@@ -1627,7 +1766,38 @@ void D3D11Renderer::renderSceneMotion() {
 	ID3D11ShaderResourceView * inputs[] = { m_sceneDepthResource.Get(), m_objectMotionResource.Get() };
 	m_context->PSSetShaderResources(1, UINT(std::size(inputs)), inputs);
 	
-	drawFullscreen(shader);
+	// Each eye of the stereo scene with its own camera motion
+	for(const SceneRegion & region : sceneRegions()) {
+		
+		MotionConstants constants;
+		glm::mat4x4 reprojection(1.f);
+		if(!m_resetHistory) {
+			// World coordinates are large (thousands of units) - single precision is not enough to cancel them out
+			// and results in sub-pixel noise in the motion vectors. Compute the relative camera motion first.
+			glm::dmat4 relative = glm::dmat4(region.previousView) * glm::inverse(glm::dmat4(region.view));
+			reprojection = glm::mat4x4(glm::dmat4(region.previousProjection) * relative
+			                           * glm::inverse(glm::dmat4(region.projection)));
+		}
+		std::memcpy(constants.reprojection, &reprojection, sizeof(constants.reprojection));
+		constants.targetSize[0] = float(m_sceneSize.x);
+		constants.targetSize[1] = float(m_sceneSize.y);
+		constants.targetSize[2] = 1.f / float(m_sceneSize.x);
+		constants.targetSize[3] = 1.f / float(m_sceneSize.y);
+		constants.region[0] = float(region.pixels.left);
+		constants.region[1] = float(region.pixels.top);
+		constants.region[2] = float(region.pixels.width());
+		constants.region[3] = float(region.pixels.height());
+		m_context->UpdateSubresource(m_motionConstants.Get(), 0, nullptr, &constants, 0, 0);
+		
+		D3D11_VIEWPORT viewport = {
+			float(region.pixels.left), float(region.pixels.top), float(region.pixels.width()),
+			float(region.pixels.height()), 0.f, 1.f
+		};
+		m_context->RSSetViewports(1, &viewport);
+		
+		drawFullscreen(shader);
+		
+	}
 	
 	ID3D11ShaderResourceView * none[std::size(inputs)] = { };
 	m_context->PSSetShaderResources(1, UINT(std::size(none)), none);
@@ -1672,8 +1842,8 @@ D3D11_RECT D3D11Renderer::toTargetRect(const Rect & rect) const {
 
 void D3D11Renderer::bindRenderTargets() {
 	
-	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : m_colorView.Get();
-	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : m_depthView.Get();
+	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : outputColorView();
+	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : outputDepthView();
 	
 	if(m_inScene && (m_objectMotionView || m_surfaceView)) {
 		ID3D11RenderTargetView * views[] = { colorView, m_objectMotionView.Get(), m_surfaceView.Get() };
@@ -1710,18 +1880,27 @@ void D3D11Renderer::beginScene() {
 	
 	updateUpscaler();
 	
-	if(!sceneEnabled()) {
-		return;
-	}
-	
 	float scale = std::min(m_sceneScale, 1.f);
 	Vec2i size(std::max<s32>(s32(float(m_size.x) * scale + 0.5f), 1),
 	           std::max<s32>(s32(float(m_size.y) * scale + 0.5f), 1));
 	UINT samples = m_upscaler ? 1 : m_msaaSamples;
+	
+	if(!m_stereoViews.empty()) {
+		// The stereo scene always has its own targets, the eyes side by side with an even width each
+		Vec2i eye(m_stereoSize.x / s32(m_stereoViews.size()), m_stereoSize.y);
+		m_stereoEyeSize = Vec2i(std::max<s32>((s32(float(eye.x) * scale + 0.5f) + 1) / 2 * 2, 2),
+		                        std::max<s32>(s32(float(eye.y) * scale + 0.5f), 1));
+		size = Vec2i(m_stereoEyeSize.x * s32(m_stereoViews.size()), m_stereoEyeSize.y);
+		// Temporal upscalers need a scene without MSAA
+		samples = (config.video.antialiasing && !stereoUpscaling()) ? m_stereoSamples : 1;
+	} else if(!sceneEnabled()) {
+		return;
+	}
+	
 	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded() || bool(m_aoView) != m_ambientOcclusion
 	    || bool(m_bloomViews[0]) != m_bloom || bool(m_surfaceView) != (m_reflectionStrength > 0.f)
 	    || samples != m_sceneSamples)
-	   && !createSceneTargets(size)) {
+	   && !createSceneTargets(size, samples)) {
 		return;
 	}
 	
@@ -1754,11 +1933,168 @@ void D3D11Renderer::endScene() {
 	
 	m_drawingScene = false;
 	
-	if(!m_inScene) {
+	// The stereo scene stays bound for the overlays drawn in the world, see finishStereoScene()
+	if(!m_inScene || !m_stereoViews.empty()) {
 		return;
 	}
 	
 	m_inScene = false;
+	
+	postProcessScene();
+	
+	ID3D11ShaderResourceView * upscaled = runUpscaler();
+	
+	// Upscale the scene to the window
+	composeScene(outputColorView(), m_size, upscaled, true);
+	
+	// The interface is drawn on top of the scene, with its own depth
+	if(ID3D11DepthStencilView * depthView = outputDepthView()) {
+		m_context->ClearDepthStencilView(depthView, D3D11_CLEAR_DEPTH, 1.f, 0);
+	}
+	
+	// Remember the camera for the motion vectors of the next frame
+	m_previousProjection = m_sceneProjection;
+	m_previousView = m_sceneView;
+	m_previousStereoViews.clear();
+	m_hasPreviousScene = true;
+	m_lastSceneStereo = false;
+	m_resetHistory = false;
+	
+}
+
+ID3D11Texture2D * D3D11Renderer::finishStereoScene() {
+	
+	m_drawingScene = false;
+	
+	if(!m_inScene || m_stereoViews.empty()) {
+		return nullptr;
+	}
+	
+	m_inScene = false;
+	
+	postProcessScene();
+	
+	if(!m_stereoOutput) {
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = UINT(m_stereoSize.x);
+		desc.Height = UINT(m_stereoSize.y);
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = ColorFormat;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_stereoOutput))
+		   || FAILED(m_device->CreateRenderTargetView(m_stereoOutput.Get(), nullptr, &m_stereoOutputView))) {
+			LogError << "Failed to create " << m_stereoSize.x << "x" << m_stereoSize.y << " Direct3D 11 stereo output";
+			m_stereoOutput.Reset();
+			m_stereoOutputView.Reset();
+			invalidateCachedState();
+			return nullptr;
+		}
+	}
+	
+	ID3D11ShaderResourceView * upscaled = runStereoUpscaler();
+	
+	// The lenses darken the edges of the view already
+	composeScene(m_stereoOutputView.Get(), m_stereoSize, upscaled, false);
+	
+	// Remember the cameras for the motion vectors of the next frame
+	m_previousProjection = m_sceneProjection;
+	m_previousView = m_sceneView;
+	m_previousStereoViews = m_stereoViews;
+	m_hasPreviousScene = true;
+	m_lastSceneStereo = true;
+	m_resetHistory = false;
+	
+	return m_stereoOutput.Get();
+}
+
+bool D3D11Renderer::stereoUpscaling() const {
+	return m_upscaler && m_upscaler->supportsViews();
+}
+
+ID3D11ShaderResourceView * D3D11Renderer::runStereoUpscaler() {
+	
+	if(!stereoUpscaling() || !m_motionTarget || !m_linearDepthTarget || m_stereoViews.empty()) {
+		return nullptr;
+	}
+	
+	if(!m_stereoUpscaled) {
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = UINT(m_stereoSize.x);
+		desc.Height = UINT(m_stereoSize.y);
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = ColorFormat;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_stereoUpscaled))
+		   || FAILED(m_device->CreateShaderResourceView(m_stereoUpscaled.Get(), nullptr, &m_stereoUpscaledView))) {
+			LogError << "Failed to create " << m_stereoSize.x << "x" << m_stereoSize.y
+			         << " Direct3D 11 stereo upscaler output";
+			m_stereoUpscaled.Reset();
+			m_stereoUpscaledView.Reset();
+			return nullptr;
+		}
+	}
+	
+	// The upscaler reads the scene textures and writes the output
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	ID3D11ShaderResourceView * none[TextureStageCount] = { };
+	m_context->PSSetShaderResources(0, TextureStageCount, none);
+	for(UINT i = 0; i < TextureStageCount; i++) {
+		m_currentViews[i] = nullptr;
+	}
+	
+	LARGE_INTEGER now, frequency;
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&frequency);
+	float frameTime = 1000.f / 90.f;
+	if(m_lastUpscaleTime != 0) {
+		frameTime = float(double(now.QuadPart - m_lastUpscaleTime) * 1000.0 / double(frequency.QuadPart));
+	}
+	m_lastUpscaleTime = now.QuadPart;
+	
+	// Each eye with its own history, from its part of the scene into its part of the output
+	Vec2i outputSize(m_stereoSize.x / s32(m_stereoViews.size()), m_stereoSize.y);
+	bool success = true;
+	for(size_t eye = 0; eye < m_stereoViews.size() && success; eye++) {
+		
+		D3D11Upscaler::Inputs inputs;
+		inputs.color = m_sceneResolved.Get();
+		inputs.depth = m_linearDepthTarget.Get();
+		inputs.motion = m_motionTarget.Get();
+		inputs.output = m_stereoUpscaled.Get();
+		inputs.renderSize = m_stereoEyeSize;
+		inputs.outputSize = outputSize;
+		inputs.view = eye;
+		inputs.renderOffset = Vec2i(s32(eye) * m_stereoEyeSize.x, 0);
+		inputs.outputOffset = Vec2i(s32(eye) * outputSize.x, 0);
+		inputs.jitter = m_jitter;
+		inputs.reset = m_resetHistory;
+		inputs.frameTime = frameTime;
+		inputs.sharpness = m_upscalerSharpness;
+		
+		// See runUpscaler()
+		const glm::mat4x4 & projection = m_stereoViews[eye].projection;
+		float q = projection[2][2];
+		float nearPlane = (q != 0.f) ? -projection[3][2] / q : 1.f;
+		inputs.cameraNear = nearPlane;
+		inputs.cameraFar = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
+		inputs.cameraFovVertical = 2.f * std::atan(1.f / std::max(std::abs(projection[1][1]), 0.0001f));
+		
+		success = m_upscaler->evaluate(m_context.Get(), inputs);
+	}
+	
+	// The upscaler changes the device state
+	invalidateCachedState();
+	
+	return success ? m_stereoUpscaledView.Get() : nullptr;
+}
+
+void D3D11Renderer::postProcessScene() {
 	
 	if(m_sceneSamples > 1) {
 		m_context->ResolveSubresource(m_sceneResolved.Get(), 0, m_sceneColorTarget.Get(), 0, ColorFormat);
@@ -1779,14 +2115,14 @@ void D3D11Renderer::endScene() {
 		renderBloom(m_sceneDebugView != 5);
 	}
 	
-	ID3D11ShaderResourceView * upscaled = runUpscaler();
+}
+
+void D3D11Renderer::composeScene(ID3D11RenderTargetView * target, const Vec2i & size,
+                                 ID3D11ShaderResourceView * upscaled, bool vignette) {
 	
-	// Upscale the scene to the window
+	m_context->OMSetRenderTargets(1, &target, nullptr);
 	
-	ID3D11RenderTargetView * colorView = m_colorView.Get();
-	m_context->OMSetRenderTargets(1, &colorView, nullptr);
-	
-	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_size.x), float(m_size.y), 0.f, 1.f };
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(size.x), float(size.y), 0.f, 1.f };
 	m_context->RSSetViewports(1, &viewport);
 	m_context->RSSetState(getRasterizerState(false, 0, false, false));
 	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
@@ -1813,8 +2149,8 @@ void D3D11Renderer::endScene() {
 		GradingConstants constants = { };
 		constants.params[0] = preset.contrast;
 		constants.params[1] = preset.saturation;
-		constants.params[2] = preset.vignette;
-		constants.params[3] = float(m_size.x) / float(std::max<s32>(m_size.y, 1));
+		constants.params[2] = vignette ? preset.vignette : 0.f;
+		constants.params[3] = float(size.x) / float(std::max<s32>(size.y, 1));
 		constants.tone[0] = preset.exposure;
 		constants.tone[1] = preset.gamma;
 		constants.tone[2] = ColorGradingPivot;
@@ -1834,15 +2170,6 @@ void D3D11Renderer::endScene() {
 	m_context->PSSetSamplers(0, 1, &sampler);
 	
 	drawFullscreen(shader);
-	
-	// The interface is drawn on top of the scene, with its own depth
-	m_context->ClearDepthStencilView(m_depthView.Get(), D3D11_CLEAR_DEPTH, 1.f, 0);
-	
-	// Remember the camera for the motion vectors of the next frame
-	m_previousProjection = m_sceneProjection;
-	m_previousView = m_sceneView;
-	m_hasPreviousScene = true;
-	m_resetHistory = false;
 	
 	invalidateCachedState();
 	m_currentViews[0] = view;
@@ -2235,15 +2562,23 @@ void D3D11Renderer::Clear(BufferFlags bufferFlags, Color clearColor, float clear
 	
 	Color4f color(clearColor);
 	
-	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : m_colorView.Get();
-	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : m_depthView.Get();
+	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : outputColorView();
+	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : outputDepthView();
+	
+	if(nrects != 0 && stereoActive()) {
+		/*
+		 * Screen rectangles do not map to the stereo views, and clearing the whole target instead would erase the
+		 * scene (cinematic borders clear the depth buffer to 0). These are only used for letterboxing.
+		 */
+		return;
+	}
 	
 	if(nrects == 0) {
 		if(bufferFlags & ColorBuffer) {
 			const float c[4] = { color.r, color.g, color.b, color.a };
 			m_context->ClearRenderTargetView(colorView, c);
 		}
-		if(bufferFlags & DepthBuffer) {
+		if((bufferFlags & DepthBuffer) && depthView) {
 			m_context->ClearDepthStencilView(depthView, D3D11_CLEAR_DEPTH, clearDepth, 0);
 		}
 		return;
@@ -2292,11 +2627,12 @@ void D3D11Renderer::SetFogParams(float fogStart, float fogEnd) {
 
 void D3D11Renderer::SetAntialiasing(bool enable) {
 	
-	if(m_msaaSamples <= 1) {
+	if(enable && !config.video.antialiasing) {
 		return;
 	}
 	
-	if(enable && !config.video.antialiasing) {
+	// The window is not multisampled in VR, but the stereo scene is
+	if(m_msaaSamples <= 1 && m_stereoSamples <= 1) {
 		return;
 	}
 	
@@ -2405,6 +2741,209 @@ bool D3D11Renderer::uploadIndices(const unsigned short * indices, size_t nindice
 	return true;
 }
 
+glm::mat4x4 D3D11Renderer::screenTransform() const {
+	
+	// Direct3D doesn't apply any transform for D3DTLVERTEX
+	// Change coordinate system from [0, width] x [0, height] to [-1, 1] x [-1, 1] and flip the y axis
+	glm::mat4x4 transform = glm::translate(glm::mat4x4(1.f), Vec3f(-1.f, 1.f, 0.f));
+	transform = glm::scale(transform, Vec3f(2.f / float(std::max<s32>(m_viewport.width(), 1)),
+	                                        -2.f / float(std::max<s32>(m_viewport.height(), 1)), 1.f));
+	// Change pixel origins
+	return glm::translate(transform, Vec3f(0.5f, 0.5f, 0.f));
+}
+
+void D3D11Renderer::fillVSConstants(float * data, VertexType type, const glm::mat4x4 & transform,
+                                    const glm::mat4x4 & view, const glm::mat4x4 & projection,
+                                    const glm::mat4x4 & prevTransform, const Vec2i & viewSize) const {
+	
+	VSConstants constants;
+	std::memcpy(constants.transform, &transform, sizeof(constants.transform));
+	std::memcpy(constants.prevTransform, &prevTransform, sizeof(constants.prevTransform));
+	// The jitter is in pixels of the view (one eye in VR)
+	constants.jitter[0] = m_inScene ? 2.f * m_jitter.x / float(std::max<s32>(viewSize.x, 1)) : 0.f;
+	constants.jitter[1] = m_inScene ? -2.f * m_jitter.y / float(std::max<s32>(viewSize.y, 1)) : 0.f;
+	constants.jitter[2] = constants.jitter[3] = 0.f;
+	// The view matrix is a rotation and translation
+	Vec3f camera = -(glm::transpose(glm::mat3(view)) * Vec3f(view[3]));
+	constants.camera[0] = camera.x;
+	constants.camera[1] = camera.y;
+	constants.camera[2] = camera.z;
+	constants.camera[3] = 0.f;
+	// Pre-transformed vertices of models in the 3D scene go back to world space with the scene camera (the center
+	// camera in VR, which projected them)
+	glm::mat4x4 modelToWorld(1.f);
+	if(type == VertexTL && m_drawingScene) {
+		modelToWorld = glm::mat4x4(glm::inverse(glm::dmat4(m_projection) * glm::dmat4(m_view))
+		                           * glm::dmat4(screenTransform()));
+	}
+	std::memcpy(constants.modelToWorld, &modelToWorld, sizeof(constants.modelToWorld));
+	glm::mat4x4 worldToClip = projection * view;
+	std::memcpy(constants.worldToClip, &worldToClip, sizeof(constants.worldToClip));
+	static_assert(sizeof(constants) == sizeof(m_vsConstantsData), "unexpected constant buffer size");
+	std::memcpy(data, &constants, sizeof(constants));
+	
+}
+
+template <class DrawFunction>
+void D3D11Renderer::drawViews(VertexType type, const DrawFunction & draw) {
+	
+	if(!stereoActive()) {
+		draw();
+		return;
+	}
+	
+	for(size_t eye = 0; eye < m_stereoViews.size(); eye++) {
+		applyStereoView(type, eye);
+		draw();
+	}
+	
+}
+
+void D3D11Renderer::applyStereoView(VertexType type, size_t eye) {
+	
+	const StereoView & view = m_stereoViews[eye];
+	
+	D3D11_VIEWPORT viewport = {
+		float(s32(eye) * m_stereoEyeSize.x), 0.f, float(m_stereoEyeSize.x), float(m_stereoEyeSize.y), 0.f, 1.f
+	};
+	m_context->RSSetViewports(1, &viewport);
+	
+	// Pre-transformed vertices are re-projected from the center camera into the eye
+	glm::mat4x4 transform = (type == VertexTL) ? view.screenToClip : view.projection * view.view;
+	// Positions of the last frame were projected by the center camera of the last frame
+	glm::mat4x4 prevTransform = transform;
+	if(type == VertexTL && eye < m_previousStereoViews.size()) {
+		prevTransform = m_previousStereoViews[eye].screenToClip;
+	}
+	float constants[VSConstantsSize];
+	fillVSConstants(constants, type, transform, view.view, view.projection, prevTransform, m_stereoEyeSize);
+	if(!m_stereoVSConstantsValid[eye] || std::memcmp(m_stereoVSConstantsData[eye], constants, sizeof(constants)) != 0) {
+		std::memcpy(m_stereoVSConstantsData[eye], constants, sizeof(constants));
+		m_context->UpdateSubresource(m_stereoVSConstants[eye].Get(), 0, nullptr, constants, 0, 0);
+		m_stereoVSConstantsValid[eye] = true;
+	}
+	
+	ID3D11Buffer * buffer = m_stereoVSConstants[eye].Get();
+	m_context->VSSetConstantBuffers(0, 1, &buffer);
+	m_context->HSSetConstantBuffers(0, 1, &buffer);
+	m_context->DSSetConstantBuffers(0, 1, &buffer);
+	
+}
+
+std::vector<D3D11Renderer::SceneRegion> D3D11Renderer::sceneRegions() const {
+	
+	std::vector<SceneRegion> regions;
+	
+	if(m_stereoViews.empty()) {
+		regions.push_back({ Rect(m_sceneSize.x, m_sceneSize.y), m_sceneProjection, m_sceneView, m_previousProjection,
+		                    m_previousView });
+		return regions;
+	}
+	
+	for(size_t eye = 0; eye < m_stereoViews.size(); eye++) {
+		s32 left = s32(eye) * m_stereoEyeSize.x;
+		Rect pixels(left, 0, left + m_stereoEyeSize.x, m_stereoEyeSize.y);
+		const StereoView & view = m_stereoViews[eye];
+		const StereoView & previous = (eye < m_previousStereoViews.size()) ? m_previousStereoViews[eye] : view;
+		regions.push_back({ pixels, view.projection, view.view, previous.projection, previous.view });
+	}
+	
+	return regions;
+}
+
+void D3D11Renderer::setStereoViews(std::vector<StereoView> views, const Vec2i & size) {
+	
+	if(views.size() > std::size(m_stereoVSConstants)) {
+		views.resize(std::size(m_stereoVSConstants));
+	}
+	
+	if(views.empty() && stereoActive()) {
+		// The stereo scene was not finished, it is not shown
+		m_inScene = false;
+		m_drawingScene = false;
+	}
+	
+	m_stereoViews = std::move(views);
+	
+	if(!m_stereoViews.empty() && size != m_stereoSize) {
+		m_stereoOutputView.Reset();
+		m_stereoOutput.Reset();
+		unbindTextureView(m_stereoUpscaledView.Get());
+		m_stereoUpscaledView.Reset();
+		m_stereoUpscaled.Reset();
+		m_stereoSize = size;
+	}
+	
+	invalidateCachedState();
+	
+}
+
+void D3D11Renderer::setOutputTarget(ID3D11RenderTargetView * color, ID3D11DepthStencilView * depth) {
+	
+	m_outputColor = color;
+	m_outputDepth = color ? depth : nullptr;
+	
+	invalidateCachedState();
+	
+}
+
+void D3D11Renderer::setPremultipliedAlphaOutput(bool enable) {
+	m_premultipliedAlpha = enable;
+}
+
+void D3D11Renderer::drawOverlay(ID3D11RenderTargetView * target, const Vec2i & size,
+                                ID3D11ShaderResourceView * texture, const OverlayVertex * vertices, size_t count,
+                                bool blend) {
+	
+	if(!target || !texture || !vertices || count < 3 || !m_overlayVertexShader) {
+		return;
+	}
+	
+	size_t offset = m_vertexRing.upload(m_context.Get(), vertices, count * sizeof(OverlayVertex),
+	                                    sizeof(OverlayVertex));
+	if(offset == size_t(-1)) {
+		return;
+	}
+	
+	bindTessellation(false);
+	
+	ID3D11ShaderResourceView * none = nullptr;
+	m_context->PSSetShaderResources(0, 1, &none);
+	m_context->OMSetRenderTargets(1, &target, nullptr);
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(size.x), float(size.y), 0.f, 1.f };
+	m_context->RSSetViewports(1, &viewport);
+	m_context->RSSetState(getRasterizerState(false, 0, false, false));
+	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
+	BlendingFactor dst = blend ? BlendInvSrcAlpha : BlendZero;
+	m_context->OMSetBlendState(getBlendState(BlendOne, dst, false, true), nullptr, 0xffffffff);
+	
+	ID3D11Buffer * buffer = m_vertexRing.buffer.Get();
+	UINT stride = UINT(sizeof(OverlayVertex));
+	UINT byteOffset = UINT(offset);
+	m_context->IASetVertexBuffers(0, 1, &buffer, &stride, &byteOffset);
+	m_context->IASetInputLayout(m_overlayLayout.Get());
+	m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+	m_context->VSSetShader(m_overlayVertexShader.Get(), nullptr, 0);
+	m_context->PSSetShader(m_blitPixelShader.Get(), nullptr, 0);
+	m_context->PSSetShaderResources(0, 1, &texture);
+	ID3D11SamplerState * sampler = m_blitSampler.Get();
+	m_context->PSSetSamplers(0, 1, &sampler);
+	
+	m_context->Draw(UINT(count), 0);
+	
+	m_context->PSSetShaderResources(0, 1, &none);
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	
+	// Restore the renderer state for the next draw
+	m_currentViews[0] = nullptr;
+	m_currentSamplers[0] = sampler;
+	m_currentVertexBuffer = nullptr;
+	m_currentTopology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+	m_currentVertexType = VertexTypeCount;
+	invalidateCachedState();
+	
+}
+
 bool D3D11Renderer::supportsModelTessellation() const {
 	return m_drawingScene && m_modelHullShader && m_modelDomainShader && m_modelPatchVertexShader;
 }
@@ -2475,7 +3014,9 @@ bool D3D11Renderer::drawFan(size_t count, size_t baseVertex) {
 	}
 	
 	setPrimitive(TriangleList, false);
-	m_context->DrawIndexed(UINT(nindices), start, INT(baseVertex));
+	drawViews(m_currentVertexType, [&]() {
+		m_context->DrawIndexed(UINT(nindices), start, INT(baseVertex));
+	});
 	
 	return true;
 }
@@ -2497,7 +3038,9 @@ void D3D11Renderer::drawBuffer(VertexType type, Primitive primitive, ID3D11Buffe
 	}
 	
 	setPrimitive(primitive);
-	m_context->Draw(UINT(count), UINT(offset));
+	drawViews(type, [&]() {
+		m_context->Draw(UINT(count), UINT(offset));
+	});
 	
 }
 
@@ -2520,7 +3063,9 @@ void D3D11Renderer::drawBufferIndexed(VertexType type, Primitive primitive, ID3D
 	}
 	
 	setPrimitive(primitive);
-	m_context->DrawIndexed(UINT(count), start, INT(baseVertex));
+	drawViews(type, [&]() {
+		m_context->DrawIndexed(UINT(count), start, INT(baseVertex));
+	});
 	
 }
 
@@ -2553,7 +3098,9 @@ void D3D11Renderer::drawIndexed(Primitive primitive, const TexturedVertex * vert
 	}
 	
 	setPrimitive(primitive);
-	m_context->DrawIndexed(UINT(count), start, 0);
+	drawViews(VertexTL, [&]() {
+		m_context->DrawIndexed(UINT(count), start, 0);
+	});
 	
 }
 
@@ -2693,7 +3240,7 @@ void D3D11Renderer::present() {
 	UINT flags = (interval == 0 && m_allowTearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
 	
 	HRESULT hr = m_swapChain->Present(interval, flags);
-
+	
 	// Overlays that hook Present (e.g. OptiScaler) may draw with our context and leave their state bound
 	invalidateCachedState();
 	if(hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -2741,9 +3288,10 @@ ID3D11RasterizerState * D3D11Renderer::getRasterizerState(bool cull, unsigned de
 }
 
 ID3D11BlendState * D3D11Renderer::getBlendState(BlendingFactor src, BlendingFactor dst, bool alphaToCoverage,
-                                                bool colorWrite) {
+                                                bool colorWrite, bool premultipliedAlpha) {
 	
-	u32 key = u32(src) | (u32(dst) << 4) | (u32(alphaToCoverage) << 8) | (u32(colorWrite) << 9);
+	u32 key = u32(src) | (u32(dst) << 4) | (u32(alphaToCoverage) << 8) | (u32(colorWrite) << 9)
+	          | (u32(premultipliedAlpha) << 10);
 	
 	auto it = m_blendStates.find(key);
 	if(it != m_blendStates.end()) {
@@ -2779,6 +3327,17 @@ ID3D11BlendState * D3D11Renderer::getBlendState(BlendingFactor src, BlendingFact
 	target.DestBlendAlpha = arxToD3DAlphaBlendFactor[dst];
 	target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
 	target.RenderTargetWriteMask = colorWrite ? D3D11_COLOR_WRITE_ENABLE_ALL : 0;
+	if(premultipliedAlpha) {
+		/*
+		 * Produce a premultiplied alpha image that can be composited over another one, like the OpenGL backend:
+		 * the color channels are blended as usual while the alpha channel accumulates coverage.
+		 * Additive and multiplicative blending do not add coverage.
+		 */
+		bool coverage = (dst != BlendOne && src != BlendZero);
+		target.BlendEnable = TRUE;
+		target.SrcBlendAlpha = coverage ? D3D11_BLEND_ONE : D3D11_BLEND_ZERO;
+		target.DestBlendAlpha = coverage ? D3D11_BLEND_INV_SRC_ALPHA : D3D11_BLEND_ONE;
+	}
 	
 	ComPtr<ID3D11BlendState> state;
 	if(FAILED(m_device->CreateBlendState(&desc, &state))) {
@@ -2859,41 +3418,13 @@ void D3D11Renderer::flushState(VertexType type) {
 		m_currentVertexType = type;
 	}
 	
-	{
-		glm::mat4x4 transform;
-		if(type == VertexTL) {
-			// Direct3D doesn't apply any transform for D3DTLVERTEX
-			// Change coordinate system from [0, width] x [0, height] to [-1, 1] x [-1, 1] and flip the y axis
-			transform = glm::translate(glm::mat4x4(1.f), Vec3f(-1.f, 1.f, 0.f));
-			transform = glm::scale(transform, Vec3f(2.f / float(std::max<s32>(m_viewport.width(), 1)),
-			                                        -2.f / float(std::max<s32>(m_viewport.height(), 1)), 1.f));
-			// Change pixel origins
-			transform = glm::translate(transform, Vec3f(0.5f, 0.5f, 0.f));
-		} else {
-			transform = m_projection * m_view;
-		}
-		VSConstants constants;
-		std::memcpy(constants.transform, &transform, sizeof(constants.transform));
-		constants.jitter[0] = m_inScene ? 2.f * m_jitter.x / float(m_sceneSize.x) : 0.f;
-		constants.jitter[1] = m_inScene ? -2.f * m_jitter.y / float(m_sceneSize.y) : 0.f;
-		constants.jitter[2] = constants.jitter[3] = 0.f;
-		// The view matrix is a rotation and translation
-		Vec3f camera = -(glm::transpose(glm::mat3(m_view)) * Vec3f(m_view[3]));
-		constants.camera[0] = camera.x;
-		constants.camera[1] = camera.y;
-		constants.camera[2] = camera.z;
-		constants.camera[3] = 0.f;
-		// Pre-transformed vertices of models in the 3D scene go back to world space with the scene camera
-		glm::mat4x4 modelToWorld(1.f);
-		if(type == VertexTL && m_drawingScene) {
-			modelToWorld = glm::mat4x4(glm::inverse(glm::dmat4(m_projection) * glm::dmat4(m_view)) * glm::dmat4(transform));
-		}
-		std::memcpy(constants.modelToWorld, &modelToWorld, sizeof(constants.modelToWorld));
-		glm::mat4x4 worldToClip = m_projection * m_view;
-		std::memcpy(constants.worldToClip, &worldToClip, sizeof(constants.worldToClip));
-		static_assert(sizeof(constants) == sizeof(m_vsConstantsData), "unexpected constant buffer size");
-		if(!m_vsConstantsValid || std::memcmp(m_vsConstantsData, &constants, sizeof(constants)) != 0) {
-			std::memcpy(m_vsConstantsData, &constants, sizeof(constants));
+	// The eyes of the stereo scene have their own constants, see applyStereoView()
+	if(!stereoActive()) {
+		glm::mat4x4 transform = (type == VertexTL) ? screenTransform() : m_projection * m_view;
+		float constants[VSConstantsSize];
+		fillVSConstants(constants, type, transform, m_view, m_projection, transform, m_sceneSize);
+		if(!m_vsConstantsValid || std::memcmp(m_vsConstantsData, constants, sizeof(constants)) != 0) {
+			std::memcpy(m_vsConstantsData, constants, sizeof(constants));
 			m_context->UpdateSubresource(m_vsConstants.Get(), 0, nullptr, m_vsConstantsData, 0, 0);
 			m_vsConstantsValid = true;
 		}
@@ -2946,7 +3477,8 @@ void D3D11Renderer::flushState(VertexType type) {
 		alphaReference = 0.5f;
 	}
 	
-	ID3D11BlendState * blend = getBlendState(blendSrc, blendDst, alphaTest == TestA2C, true);
+	ID3D11BlendState * blend = getBlendState(blendSrc, blendDst, alphaTest == TestA2C, true,
+	                                         m_premultipliedAlpha && !m_inScene);
 	if(force || blend != m_currentBlend) {
 		m_context->OMSetBlendState(blend, nullptr, 0xffffffff);
 		m_currentBlend = blend;
@@ -2961,8 +3493,9 @@ void D3D11Renderer::flushState(VertexType type) {
 	
 	// Debug view 9 shows models as wireframes
 	bool wireframe = m_wireframe || (m_sceneDebugView == 9 && m_modelTessellation && type == VertexTL);
+	// Screen-space scissor rectangles do not map to the stereo views
 	ID3D11RasterizerState * rasterizer = getRasterizerState(m_state.getCull(), m_state.getDepthOffset(),
-	                                                        wireframe, m_scissor.isValid());
+	                                                        wireframe, m_scissor.isValid() && !stereoActive());
 	if(force || rasterizer != m_currentRasterizer) {
 		m_context->RSSetState(rasterizer);
 		m_currentRasterizer = rasterizer;
@@ -3072,6 +3605,16 @@ Renderer * createRenderer() {
 	return new D3D11Renderer;
 }
 
+bool isDirect3D11(const Renderer * renderer) {
+	return renderer && renderer == g_d3d11Renderer;
+}
+
+void setRequiredAdapter(unsigned long long luid) {
+	g_hasRequiredAdapter = true;
+	g_requiredAdapter.LowPart = DWORD(luid & 0xffffffffu);
+	g_requiredAdapter.HighPart = LONG(luid >> 32);
+}
+
 int createDevice(Renderer & renderer, void * window, int maxMSAALevel) {
 	D3D11Renderer & d3d11 = static_cast<D3D11Renderer &>(renderer);
 	if(!d3d11.create(static_cast<HWND>(window), maxMSAALevel)) {
@@ -3087,5 +3630,5 @@ void setVSync(Renderer & renderer, int vsync) {
 void present(Renderer & renderer) {
 	static_cast<D3D11Renderer &>(renderer).present();
 }
-
+	
 } // namespace d3d11

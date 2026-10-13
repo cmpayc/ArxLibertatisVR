@@ -42,6 +42,10 @@ public:
 		ID3D11Texture2D * output = nullptr; //!< Output with unordered access, at the window size
 		Vec2i renderSize = Vec2i(0);
 		Vec2i outputSize = Vec2i(0);
+		//! The view (VR eye): each view has its own history, see supportsViews()
+		size_t view = 0;
+		Vec2i renderOffset = Vec2i(0);      //!< Where the view is in the color, depth and motion textures
+		Vec2i outputOffset = Vec2i(0);      //!< Where the view goes in the output
 		Vec2f jitter = Vec2f(0.f);          //!< Jitter applied to the projection, in render pixels
 		bool reset = false;                 //!< Discard the history, e.g. after a camera cut
 		float frameTime = 0.f;              //!< Time since the last frame in milliseconds
@@ -58,6 +62,12 @@ public:
 	
 	//! Short name used in log messages
 	virtual const char * name() const = 0;
+
+	//! Maximum number of views
+	static constexpr size_t MaxViews = 2;
+
+	//! \return true if the upscaler supports several views (VR eyes) in parts of the textures
+	virtual bool supportsViews() const { return false; }
 	
 };
 

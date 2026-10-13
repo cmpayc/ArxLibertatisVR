@@ -52,31 +52,35 @@ class FSRUpscaler final : public D3D11Upscaler {
 	PfnFfxDispatch m_dispatch;
 	
 	D3D12Bridge m_bridge;
-	D3D12Bridge::Texture m_color;
-	D3D12Bridge::Texture m_depth;
-	D3D12Bridge::Texture m_motion;
-	D3D12Bridge::Texture m_output;
 	
-	ffxContext m_context;
-	Vec2i m_renderSize;
-	Vec2i m_outputSize;
-	bool m_contextFailed; //!< Don't retry creating the context until the sizes change
+	//! A context with its own history and copies of the inputs for each view (VR eye)
+	struct View {
+		D3D12Bridge::Texture color;
+		D3D12Bridge::Texture depth;
+		D3D12Bridge::Texture motion;
+		D3D12Bridge::Texture output;
+		ffxContext context = nullptr;
+		Vec2i renderSize = Vec2i(0);
+		Vec2i outputSize = Vec2i(0);
+		bool contextFailed = false; //!< Don't retry creating the context until the sizes change
+	};
+	View m_views[MaxViews];
 	
 	//! Directory of the FidelityFX loader, which loads the upscaler library from the DLL search path
 	std::wstring m_libraryDirectory;
 	
-	void destroyContext() {
-		if(m_context) {
+	void destroyContext(View & view) {
+		if(view.context) {
 			// The context may still be used by the GPU
 			m_bridge.waitIdle();
-			m_destroyContext(&m_context, nullptr);
-			m_context = nullptr;
+			m_destroyContext(&view.context, nullptr);
+			view.context = nullptr;
 		}
 	}
 	
-	bool createContext(const Inputs & inputs) {
+	bool createContext(View & view, const Inputs & inputs) {
 		
-		destroyContext();
+		destroyContext(view);
 		
 		ffxCreateBackendDX12Desc backend = {};
 		backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
@@ -92,12 +96,12 @@ class FSRUpscaler final : public D3D11Upscaler {
 		desc.maxUpscaleSize.width = uint32_t(inputs.outputSize.x);
 		desc.maxUpscaleSize.height = uint32_t(inputs.outputSize.y);
 		
-		m_renderSize = inputs.renderSize;
-		m_outputSize = inputs.outputSize;
+		view.renderSize = inputs.renderSize;
+		view.outputSize = inputs.outputSize;
 		
 		// The loader looks for amd_fidelityfx_upscaler_dx12.dll in the DLL search path
 		SetDllDirectoryW(m_libraryDirectory.c_str());
-		ffxReturnCode_t result = m_createContext(&m_context, &desc.header, nullptr);
+		ffxReturnCode_t result = m_createContext(&view.context, &desc.header, nullptr);
 		SetDllDirectoryW(nullptr);
 		
 		if(result != FFX_API_RETURN_OK) {
@@ -105,20 +109,20 @@ class FSRUpscaler final : public D3D11Upscaler {
 			         << " -> " << inputs.outputSize.x << "x" << inputs.outputSize.y << ": " << returnCodeString(result)
 			         << (result == FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE
 			             ? " - amd_fidelityfx_upscaler_dx12.dll must be next to the FidelityFX loader" : "");
-			m_context = nullptr;
-			m_contextFailed = true;
+			view.context = nullptr;
+			view.contextFailed = true;
 			return false;
 		}
-		m_contextFailed = false;
+		view.contextFailed = false;
 		
 		ffxQueryGetProviderVersion version = {};
 		version.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
 		const char * versionName = "(unknown)";
-		if(m_query(&m_context, &version.header) == FFX_API_RETURN_OK && version.versionName) {
+		if(m_query(&view.context, &version.header) == FFX_API_RETURN_OK && version.versionName) {
 			versionName = version.versionName;
 		}
 		
-		LogInfo << "FSR " << versionName << ": " << inputs.renderSize.x << "x" << inputs.renderSize.y << " -> "
+		LogInfo << "FSR " << versionName << ", view " << inputs.view << ": " << inputs.renderSize.x << "x" << inputs.renderSize.y << " -> "
 		        << inputs.outputSize.x << "x" << inputs.outputSize.y;
 		
 		return true;
@@ -132,15 +136,13 @@ public:
 		, m_destroyContext(nullptr)
 		, m_query(nullptr)
 		, m_dispatch(nullptr)
-		, m_context(nullptr)
-		, m_renderSize(0)
-		, m_outputSize(0)
-		, m_contextFailed(false)
 	{ }
 	
 	~FSRUpscaler() override {
-		destroyContext();
-		m_color = m_depth = m_motion = m_output = D3D12Bridge::Texture();
+		for(View & view : m_views) {
+			destroyContext(view);
+			view = View();
+		}
 		if(m_library) {
 			FreeLibrary(m_library);
 		}
@@ -185,13 +187,18 @@ public:
 	
 	bool evaluate(ID3D11DeviceContext * context, const Inputs & inputs) override {
 		
-		bool reset = inputs.reset;
-		bool resized = (inputs.renderSize != m_renderSize || inputs.outputSize != m_outputSize);
-		if(m_contextFailed && !resized) {
+		if(inputs.view >= MaxViews) {
 			return false;
 		}
-		if(!m_context || resized) {
-			if(!createContext(inputs)) {
+		View & view = m_views[inputs.view];
+		
+		bool reset = inputs.reset;
+		bool resized = (inputs.renderSize != view.renderSize || inputs.outputSize != view.outputSize);
+		if(view.contextFailed && !resized) {
+			return false;
+		}
+		if(!view.context || resized) {
+			if(!createContext(view, inputs)) {
 				return false;
 			}
 			reset = true;
@@ -202,16 +209,21 @@ public:
 		D3D11_TEXTURE2D_DESC outputDesc;
 		inputs.output->GetDesc(&outputDesc);
 		
-		if(!m_bridge.createTexture(m_color, inputs.renderSize, colorDesc.Format, false)
-		   || !m_bridge.createTexture(m_depth, inputs.renderSize, DXGI_FORMAT_R32_FLOAT, false)
-		   || !m_bridge.createTexture(m_motion, inputs.renderSize, DXGI_FORMAT_R16G16_FLOAT, false)
-		   || !m_bridge.createTexture(m_output, inputs.outputSize, outputDesc.Format, true)) {
+		if(!m_bridge.createTexture(view.color, inputs.renderSize, colorDesc.Format, false)
+		   || !m_bridge.createTexture(view.depth, inputs.renderSize, DXGI_FORMAT_R32_FLOAT, false)
+		   || !m_bridge.createTexture(view.motion, inputs.renderSize, DXGI_FORMAT_R16G16_FLOAT, false)
+		   || !m_bridge.createTexture(view.output, inputs.outputSize, outputDesc.Format, true)) {
 			return false;
 		}
 		
-		context->CopyResource(m_color.texture.Get(), inputs.color);
-		context->CopyResource(m_depth.texture.Get(), inputs.depth);
-		context->CopyResource(m_motion.texture.Get(), inputs.motion);
+		// The view is a part of the textures (one eye in VR)
+		D3D11_BOX box = {
+			UINT(inputs.renderOffset.x), UINT(inputs.renderOffset.y), 0,
+			UINT(inputs.renderOffset.x + inputs.renderSize.x), UINT(inputs.renderOffset.y + inputs.renderSize.y), 1
+		};
+		context->CopySubresourceRegion(view.color.texture.Get(), 0, 0, 0, 0, inputs.color, 0, &box);
+		context->CopySubresourceRegion(view.depth.texture.Get(), 0, 0, 0, 0, inputs.depth, 0, &box);
+		context->CopySubresourceRegion(view.motion.texture.Get(), 0, 0, 0, 0, inputs.motion, 0, &box);
 		
 		ID3D12GraphicsCommandList * list = m_bridge.begin();
 		if(!list) {
@@ -222,10 +234,10 @@ public:
 		desc.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
 		desc.commandList = list;
 		// The shared textures are in the common state between frames
-		desc.color = ffxApiGetResourceDX12(m_color.resource.Get(), FFX_API_RESOURCE_STATE_COMMON);
-		desc.depth = ffxApiGetResourceDX12(m_depth.resource.Get(), FFX_API_RESOURCE_STATE_COMMON);
-		desc.motionVectors = ffxApiGetResourceDX12(m_motion.resource.Get(), FFX_API_RESOURCE_STATE_COMMON);
-		desc.output = ffxApiGetResourceDX12(m_output.resource.Get(), FFX_API_RESOURCE_STATE_COMMON);
+		desc.color = ffxApiGetResourceDX12(view.color.resource.Get(), FFX_API_RESOURCE_STATE_COMMON);
+		desc.depth = ffxApiGetResourceDX12(view.depth.resource.Get(), FFX_API_RESOURCE_STATE_COMMON);
+		desc.motionVectors = ffxApiGetResourceDX12(view.motion.resource.Get(), FFX_API_RESOURCE_STATE_COMMON);
+		desc.output = ffxApiGetResourceDX12(view.output.resource.Get(), FFX_API_RESOURCE_STATE_COMMON);
 		desc.jitterOffset.x = inputs.jitter.x;
 		desc.jitterOffset.y = inputs.jitter.y;
 		desc.motionVectorScale.x = 1.f;
@@ -245,7 +257,7 @@ public:
 		desc.viewSpaceToMetersFactor = 0.01f; // One unit is about one centimeter
 		desc.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
 		
-		ffxReturnCode_t result = m_dispatch(&m_context, &desc.header);
+		ffxReturnCode_t result = m_dispatch(&view.context, &desc.header);
 		
 		if(!m_bridge.end() || result != FFX_API_RETURN_OK) {
 			static bool warned = false;
@@ -256,7 +268,8 @@ public:
 			return false;
 		}
 		
-		context->CopyResource(inputs.output, m_output.texture.Get());
+		context->CopySubresourceRegion(inputs.output, 0, UINT(inputs.outputOffset.x), UINT(inputs.outputOffset.y), 0,
+		                               view.output.texture.Get(), 0, nullptr);
 		
 		return true;
 	}
@@ -265,8 +278,12 @@ public:
 		return "FSR";
 	}
 	
+	bool supportsViews() const override {
+		return true;
+	}
+	
 };
-
+	
 } // anonymous namespace
 
 namespace d3d11 {
@@ -290,5 +307,5 @@ bool findFSRLibrary(const std::string & searchPath) {
 	}
 	return false;
 }
-
+	
 } // namespace d3d11

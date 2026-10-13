@@ -26,6 +26,7 @@
 #include <boost/intrusive/list.hpp>
 
 #include "graphics/Renderer.h"
+#include "graphics/StereoView.h"
 #include "graphics/opengl/GLTexture.h"
 #include "graphics/opengl/OpenGLUtil.h"
 #include "math/Rectangle.h"
@@ -101,12 +102,7 @@ public:
 	template <class DrawFunction>
 	void drawViews(const DrawFunction & draw);
 
-	struct StereoView {
-		Rect viewport; //!< In render target coordinates (top-left origin)
-		glm::mat4x4 view; //!< World to view space for transformed vertices
-		glm::mat4x4 projection; //!< View to clip space for transformed vertices
-		glm::mat4x4 screenToClip; //!< Screen to clip space for pre-transformed vertices
-	};
+	using StereoView = ::StereoView;
 
 	/*!
 	 * Render into a framebuffer object instead of the window

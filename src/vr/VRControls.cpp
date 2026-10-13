@@ -95,6 +95,7 @@ bool isWeaponInHand() {
 }
 float g_bookHoldTime = -1.f; // s the B button is held, negative after a long press opened the spells
 int g_bookTapFrames = 0; // Frames left of the book action from a short press of B
+float g_menuScroll = 0.f; // Mouse wheel steps of the thumbsticks in the menus not sent yet (see updateMenuScroll)
 bool g_sheatheArmed = false; // The drawn weapon left the sheath: bringing it back sheathes it
 VRHand g_weaponHand = VRHandRight; // The hand that drew the weapon (set before the first use)
 
@@ -201,6 +202,38 @@ Vec2f applyDeadZone(const Vec2f & stick) {
 	}
 	float scaled = std::min((length - StickDeadZone) / (1.f - StickDeadZone), 1.f);
 	return stick * (scaled / length);
+}
+
+/*!
+ * In the menus either thumbstick scrolls the pages that do not fit (the settings) like the mouse wheel, faster the
+ * further it is pushed
+ */
+void updateMenuScroll(const VRHandState & main, const VRHandState & off) {
+
+	float stick = applyDeadZone(main.thumbstick).y;
+	float offStick = applyDeadZone(off.thumbstick).y;
+	if(std::abs(offStick) > std::abs(stick)) {
+		stick = offStick;
+	}
+	if(ARXmenu.mode() == Mode_InGame || stick == 0.f) {
+		g_menuScroll = 0.f;
+		return;
+	}
+
+	// The first step at once, then up to 15 per second
+	const float MaxStepsPerSecond = 15.f;
+	if(g_menuScroll == 0.f) {
+		g_menuScroll = (stick > 0.f) ? 1.f : -1.f;
+	} else {
+		g_menuScroll += stick * MaxStepsPerSecond * g_vr->getFrameDuration();
+	}
+	int steps = int(g_menuScroll);
+	if(steps != 0) {
+		GInput->addVirtualMouseWheel(steps);
+		// Not back to 0, which would send the first step again
+		g_menuScroll -= float(steps) - ((stick > 0.f) ? 0.001f : -0.001f);
+	}
+
 }
 
 //! \return the keyboard key bound to a game action, or -1 if it is only bound to the mouse or a key combination
@@ -645,6 +678,7 @@ void updateVRControls() {
 	updateSpellWheel();
 	updateQuakeVibration();
 	updateItemWheel();
+	updateMenuScroll(main, off);
 
 	/*
 	 * Buttons are mapped to the keys bound to the game actions, so they also work in places that read keys.
@@ -1354,8 +1388,9 @@ void drawStoredSpells(const HandMenuView & view) {
 }
 
 /*!
- * Draw a part of the interface copied into a texture (upside down, OpenGL images start at the bottom) in the world, at
- * a pose in the tracking space: with depth testing, so that the hands are in front of it (quad layers cover them)
+ * Draw a part of the interface copied into a texture (upside down with OpenGL, see VRSystem::isPanelTextureFlipped)
+ * in the world, at a pose in the tracking space: with depth testing, so that the hands are in front of it (quad layers
+ * cover them)
  */
 void drawWorldPanel(Texture * texture, const Vec3f & position, const glm::quat & orientation, const Vec2f & size) {
 	
@@ -1373,7 +1408,9 @@ void drawWorldPanel(Texture * texture, const Vec3f & position, const glm::quat &
 		}
 	}
 	Vec2f uv = Vec2f(texture->getSize()) / Vec2f(texture->getStoredSize());
-	const Vec2f uvs[4] = { Vec2f(0.f, uv.y), Vec2f(uv.x, uv.y), Vec2f(0.f, 0.f), Vec2f(uv.x, 0.f) };
+	float top = g_vr->isPanelTextureFlipped() ? uv.y : 0.f;
+	float bottom = uv.y - top;
+	const Vec2f uvs[4] = { Vec2f(0.f, top), Vec2f(uv.x, top), Vec2f(0.f, bottom), Vec2f(uv.x, bottom) };
 	TexturedVertex quad[4];
 	for(size_t i = 0; i < 4; i++) {
 		worldToClipSpace(corners[i], quad[i]);

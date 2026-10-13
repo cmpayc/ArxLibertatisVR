@@ -38,6 +38,7 @@ cbuffer VSConstants : register(b0) {
 	float4 camera; // World position of the camera
 	float4x4 modelToWorld; // From pre-transformed model vertices to world space, for per-pixel highlights
 	float4x4 worldToClip; // From world space to clip space in the 3D scene, for tessellated models
+	float4x4 prevTransform; // Like transform for the positions of the previous frame (differs for VR eyes)
 };
 
 cbuffer PSConstants : register(b0) {
@@ -127,7 +128,7 @@ VSOutput makeOutput(float4 clip, float4 prevClip, float4 color, float2 uv0, floa
 
 VSOutput vsTL(float4 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0,
               float4 prevPosition : PREVPOSITION, float3 normal : NORMAL) {
-	float4 prevClip = prevPosition.w > 0 ? mul(transform, prevPosition) : float4(0, 0, 0, 0);
+	float4 prevClip = prevPosition.w > 0 ? mul(prevTransform, prevPosition) : float4(0, 0, 0, 0);
 	VSOutput o = makeOutput(mul(transform, position), prevClip, color, uv, float2(0, 0), float2(0, 0));
 	// Models provide a world space normal for per-pixel highlights
 	if(dot(normal, normal) > 0) {
@@ -449,11 +450,23 @@ struct BlitOutput {
 	float2 uv : TEXCOORD0;
 };
 
+cbuffer BlitConstants : register(b8) {
+	float4 blitRect; // The part of the source textures covered by the viewport: xy = offset, zw = size
+};
+
 BlitOutput vsBlit(uint id : SV_VertexID) {
 	BlitOutput o;
 	float2 p = float2((id << 1) & 2, id & 2);
 	o.position = float4(p * float2(2, -2) + float2(-1, 1), 0, 1);
-	o.uv = p;
+	o.uv = blitRect.xy + p * blitRect.zw;
+	return o;
+}
+
+// Textured triangles with clip space positions, for the VR desktop view
+BlitOutput vsOverlay(float4 position : POSITION, float2 uv : TEXCOORD0) {
+	BlitOutput o;
+	o.position = position;
+	o.uv = uv;
 	return o;
 }
 
@@ -464,6 +477,7 @@ float4 psBlit(BlitOutput input) : SV_Target {
 cbuffer MotionConstants : register(b2) {
 	float4x4 reprojection; // current clip space to previous clip space
 	float4 targetSize; // xy = size, zw = 1 / size
+	float4 motionRegion; // The view in the target (one eye in VR): xy = first pixel, zw = size
 };
 
 #ifdef MSAA_DEPTH
@@ -492,7 +506,7 @@ MotionOutput psMotion(float4 position : SV_Position) {
 	#endif
 	
 	float z = depth * 2 - 1;
-	float2 uv = position.xy * targetSize.zw;
+	float2 uv = (position.xy - motionRegion.xy) / motionRegion.zw;
 	float2 ndc = float2(uv.x * 2 - 1, 1 - uv.y * 2);
 	
 	float4 previous = mul(reprojection, float4(ndc, z, 1));
@@ -500,13 +514,13 @@ MotionOutput psMotion(float4 position : SV_Position) {
 	float2 previousUV = float2(previousNdc.x * 0.5 + 0.5, 0.5 - previousNdc.y * 0.5);
 	
 	MotionOutput o;
-	o.motion = (previousUV - uv) * targetSize.xy;
+	o.motion = (previousUV - uv) * motionRegion.zw;
 	o.depth = saturate(z);
-	
+
 	// Moving objects (characters, items) provide their own motion
 	float4 object = objectMotion.Load(int3(pixel, 0));
 	if(object.w > 0) {
-		o.motion = object.xy * float2(0.5, -0.5) * targetSize.xy;
+		o.motion = object.xy * float2(0.5, -0.5) * motionRegion.zw;
 	}
 	
 	return o;
@@ -543,6 +557,8 @@ cbuffer AmbientOcclusionConstants : register(b3) {
 	float4 aoTarget;     // xy = size, zw = 1 / size
 	float4 aoProjection; // x = 1 / projection[0][0], y = 1 / projection[1][1], z = near, w = far
 	float4 aoParams;     // x = radius in world units, y = strength, z = bias, w = projected radius scale
+	float4 aoRegion;     // The view in the target (one eye in VR): xy = first pixel, zw = size
+	float4 aoCenter;     // xy = projection[2][0], projection[2][1]: the center of off-center projections (VR)
 };
 
 Texture2D<float> aoDepth : register(t0);
@@ -551,8 +567,13 @@ Texture2D<float> aoInput : register(t1);
 // The ambient occlusion is computed at half the scene size from every second depth pixel
 static const int AoScale = 2;
 
-int2 aoHalfSize() {
-	return (int2(aoTarget.xy) + AoScale - 1) / AoScale;
+// The first and the last half size pixel of the view
+int2 aoHalfMin() {
+	return int2(uint2(aoRegion.xy) / AoScale);
+}
+
+int2 aoHalfMax() {
+	return int2((uint2(aoRegion.xy + aoRegion.zw) + AoScale - 1) / AoScale) - 1;
 }
 
 float aoViewDistance(float depth) {
@@ -560,10 +581,10 @@ float aoViewDistance(float depth) {
 }
 
 float3 aoViewPosition(int2 pixel) {
-	pixel = clamp(pixel, int2(0, 0), int2(aoTarget.xy) - 1);
+	pixel = clamp(pixel, int2(aoRegion.xy), int2(aoRegion.xy + aoRegion.zw) - 1);
 	float distance = aoViewDistance(aoDepth.Load(int3(pixel, 0)));
-	float2 ndc = (float2(pixel) + 0.5) * aoTarget.zw * float2(2, -2) + float2(-1, 1);
-	return float3(ndc * aoProjection.xy * distance, distance);
+	float2 ndc = (float2(pixel) - aoRegion.xy + 0.5) / aoRegion.zw * float2(2, -2) + float2(-1, 1);
+	return float3((ndc - aoCenter.xy) * aoProjection.xy * distance, distance);
 }
 
 float psAmbientOcclusion(float4 position : SV_Position) : SV_Target {
@@ -633,7 +654,7 @@ float psAmbientOcclusionBlur(float4 position : SV_Position) : SV_Target {
 	float sum = 0;
 	float weights = 0;
 	[unroll] for(int i = -4; i <= 4; i++) {
-		int2 p = clamp(pixel + axis * i, int2(0, 0), aoHalfSize() - 1);
+		int2 p = clamp(pixel + axis * i, aoHalfMin(), aoHalfMax());
 		float distance = aoViewDistance(aoDepth.Load(int3(p * AoScale, 0)));
 		float weight = exp(-float(i * i) / 12) * exp(-abs(distance - centerDistance) / (centerDistance * 0.02 + 1));
 		sum += aoInput.Load(int3(p, 0)) * weight;
@@ -655,7 +676,7 @@ float4 psApplyAmbientOcclusion(float4 position : SV_Position) : SV_Target {
 	float weights = 0;
 	[unroll] for(int i = 0; i < 4; i++) {
 		int2 offset = int2(i & 1, i >> 1);
-		int2 p = clamp(base + offset, int2(0, 0), aoHalfSize() - 1);
+		int2 p = clamp(base + offset, aoHalfMin(), aoHalfMax());
 		float2 bilinear = lerp(1 - f, f, float2(offset));
 		float distance = aoViewDistance(aoDepth.Load(int3(p * AoScale, 0)));
 		float weight = bilinear.x * bilinear.y * exp(-abs(distance - centerDistance) / (centerDistance * 0.02 + 1)) + 1e-4;
@@ -683,6 +704,8 @@ cbuffer ReflectionConstants : register(b7) {
 	float4 ssrProjection; // x = 1 / projection[0][0], y = 1 / projection[1][1], z = near, w = far
 	float4 ssrView[3];    // Rows of the rotation from world space to the reconstructed view space
 	float4 ssrParams;     // x = strength, y = maximum ray length, z = mip levels of the scene copy, w = debug view
+	float4 ssrRegion;     // The view in the target (one eye in VR): xy = first pixel, zw = size
+	float4 ssrCenter;     // xy = projection[2][0], projection[2][1]: the center of off-center projections (VR)
 };
 
 Texture2D<float> ssrDepth : register(t0);
@@ -690,14 +713,19 @@ Texture2D<float4> ssrSurface : register(t1);
 Texture2D<float4> ssrColor : register(t2);
 
 float ssrViewDistance(int2 pixel) {
-	pixel = clamp(pixel, int2(0, 0), int2(ssrTarget.xy) - 1);
+	pixel = clamp(pixel, int2(ssrRegion.xy), int2(ssrRegion.xy + ssrRegion.zw) - 1);
 	float depth = ssrDepth.Load(int3(pixel, 0));
 	return ssrProjection.z * ssrProjection.w / (ssrProjection.w - depth * (ssrProjection.w - ssrProjection.z));
 }
 
+// Texture coordinates in the view, from 0 to 1 over the region
 float2 ssrProject(float3 position) {
-	float2 ndc = position.xy / (position.z * ssrProjection.xy);
+	float2 ndc = position.xy / (position.z * ssrProjection.xy) + ssrCenter.xy;
 	return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
+int2 ssrPixel(float2 uv) {
+	return int2(ssrRegion.xy + uv * ssrRegion.zw);
 }
 
 // How far behind the depth buffer a ray may be and still count as a hit
@@ -715,8 +743,8 @@ float4 psReflection(float4 position : SV_Position) : SV_Target {
 	}
 	
 	float distance = ssrViewDistance(pixel);
-	float2 ndc = (float2(pixel) + 0.5) * ssrTarget.zw * float2(2, -2) + float2(-1, 1);
-	float3 origin = float3(ndc * ssrProjection.xy * distance, distance);
+	float2 ndc = (float2(pixel) - ssrRegion.xy + 0.5) / ssrRegion.zw * float2(2, -2) + float2(-1, 1);
+	float3 origin = float3((ndc - ssrCenter.xy) * ssrProjection.xy * distance, distance);
 	float3 view = normalize(origin);
 	
 	float3 worldNormal = decodeNormal(surface.xy);
@@ -751,7 +779,7 @@ float4 psReflection(float4 position : SV_Position) : SV_Target {
 		if(any(uv < 0) || any(uv > 1)) {
 			break;
 		}
-		float behind = p.z - ssrViewDistance(int2(uv * ssrTarget.xy));
+		float behind = p.z - ssrViewDistance(ssrPixel(uv));
 		if(behind > 0 && behind < ssrThickness(rayLength, p.z)) {
 			hitLength = rayLength;
 			break;
@@ -768,7 +796,7 @@ float4 psReflection(float4 position : SV_Position) : SV_Target {
 	[unroll] for(int j = 0; j < 5; j++) {
 		float middle = (low + high) * 0.5;
 		float3 p = origin + direction * middle;
-		if(p.z > ssrViewDistance(int2(ssrProject(p) * ssrTarget.xy))) {
+		if(p.z > ssrViewDistance(ssrPixel(ssrProject(p)))) {
 			high = middle;
 		} else {
 			low = middle;
@@ -786,7 +814,7 @@ float4 psReflection(float4 position : SV_Position) : SV_Target {
 	// Rough surfaces get blurry reflections, more so the further the reflected object is
 	float roughness = 1 - reflectivity;
 	float level = min(roughness * roughness * 2 * saturate(high / 400), ssrParams.z - 1);
-	float3 color = ssrColor.SampleLevel(sampler0, hit, level).rgb;
+	float3 color = ssrColor.SampleLevel(sampler0, (ssrRegion.xy + hit * ssrRegion.zw) * ssrTarget.zw, level).rgb;
 	
 	// More reflection at grazing angles (Schlick's approximation of the Fresnel factor)
 	float fresnel = pow(1 - cosView, 5);
@@ -805,7 +833,12 @@ float4 psReflection(float4 position : SV_Position) : SV_Target {
 cbuffer BloomConstants : register(b4) {
 	float4 bloomParams; // x = threshold, y = soft knee, z = intensity
 	float4 bloomSource; // xy = 1 / source size
+	float4 bloomClamp;  // The source texture coordinates of the view (one eye in VR): xy = minimum, zw = maximum
 };
+
+float3 bloomSample(float2 uv) {
+	return texture0.Sample(sampler0, clamp(uv, bloomClamp.xy, bloomClamp.zw)).rgb;
+}
 
 float3 bloomThreshold(float3 color) {
 	float brightness = max(color.r, max(color.g, color.b));
@@ -824,35 +857,29 @@ float bloomKarisWeight(float3 color) {
 // First downsample from the scene with the threshold
 float4 psBloomPrefilter(BlitOutput input) : SV_Target {
 	float2 t = bloomSource.xy;
-	float3 a = bloomThreshold(texture0.Sample(sampler0, input.uv + t * float2(-1, -1)).rgb);
-	float3 b = bloomThreshold(texture0.Sample(sampler0, input.uv + t * float2(1, -1)).rgb);
-	float3 c = bloomThreshold(texture0.Sample(sampler0, input.uv + t * float2(-1, 1)).rgb);
-	float3 d = bloomThreshold(texture0.Sample(sampler0, input.uv + t * float2(1, 1)).rgb);
+	float3 a = bloomThreshold(bloomSample(input.uv + t * float2(-1, -1)));
+	float3 b = bloomThreshold(bloomSample(input.uv + t * float2(1, -1)));
+	float3 c = bloomThreshold(bloomSample(input.uv + t * float2(-1, 1)));
+	float3 d = bloomThreshold(bloomSample(input.uv + t * float2(1, 1)));
 	float wa = bloomKarisWeight(a), wb = bloomKarisWeight(b), wc = bloomKarisWeight(c), wd = bloomKarisWeight(d);
 	return float4((a * wa + b * wb + c * wc + d * wd) / (wa + wb + wc + wd), 1);
 }
 
 float4 psBloomDownsample(BlitOutput input) : SV_Target {
 	float2 t = bloomSource.xy;
-	float3 sum = texture0.Sample(sampler0, input.uv + t * float2(-1, -1)).rgb
-	           + texture0.Sample(sampler0, input.uv + t * float2(1, -1)).rgb
-	           + texture0.Sample(sampler0, input.uv + t * float2(-1, 1)).rgb
-	           + texture0.Sample(sampler0, input.uv + t * float2(1, 1)).rgb;
+	float3 sum = bloomSample(input.uv + t * float2(-1, -1)) + bloomSample(input.uv + t * float2(1, -1))
+	           + bloomSample(input.uv + t * float2(-1, 1)) + bloomSample(input.uv + t * float2(1, 1));
 	return float4(sum * 0.25, 1);
 }
 
 // 3x3 tent filter, added to the next larger level by the blend state
 float4 psBloomUpsample(BlitOutput input) : SV_Target {
 	float2 t = bloomSource.xy;
-	float3 sum = texture0.Sample(sampler0, input.uv).rgb * 4;
-	sum += (texture0.Sample(sampler0, input.uv + t * float2(-1, 0)).rgb
-	        + texture0.Sample(sampler0, input.uv + t * float2(1, 0)).rgb
-	        + texture0.Sample(sampler0, input.uv + t * float2(0, -1)).rgb
-	        + texture0.Sample(sampler0, input.uv + t * float2(0, 1)).rgb) * 2;
-	sum += texture0.Sample(sampler0, input.uv + t * float2(-1, -1)).rgb
-	       + texture0.Sample(sampler0, input.uv + t * float2(1, -1)).rgb
-	       + texture0.Sample(sampler0, input.uv + t * float2(-1, 1)).rgb
-	       + texture0.Sample(sampler0, input.uv + t * float2(1, 1)).rgb;
+	float3 sum = bloomSample(input.uv) * 4;
+	sum += (bloomSample(input.uv + t * float2(-1, 0)) + bloomSample(input.uv + t * float2(1, 0))
+	        + bloomSample(input.uv + t * float2(0, -1)) + bloomSample(input.uv + t * float2(0, 1))) * 2;
+	sum += bloomSample(input.uv + t * float2(-1, -1)) + bloomSample(input.uv + t * float2(1, -1))
+	       + bloomSample(input.uv + t * float2(-1, 1)) + bloomSample(input.uv + t * float2(1, 1));
 	return float4(sum / 16, 1);
 }
 
@@ -1061,7 +1088,7 @@ ModelPatchVertex vsModelPatch(float4 position : POSITION, float4 color : COLOR, 
 	o.color = color;
 	o.uv = uv;
 	o.clip = mul(transform, position);
-	o.prevClip = prevPosition.w > 0 ? mul(transform, prevPosition) : float4(0, 0, 0, 0);
+	o.prevClip = prevPosition.w > 0 ? mul(prevTransform, prevPosition) : float4(0, 0, 0, 0);
 	o.tessellation = tessellation;
 	return o;
 }

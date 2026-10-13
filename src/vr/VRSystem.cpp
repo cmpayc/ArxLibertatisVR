@@ -44,12 +44,11 @@
 #include "graphics/Draw.h"
 #include "graphics/Renderer.h"
 #include "graphics/texture/Texture.h"
-#include "graphics/opengl/GLTexture.h"
-#include "graphics/opengl/OpenGLUtil.h"
-#include <epoxy/wgl.h>
+
+#include <windows.h>
+#include <unknwn.h>
 
 #define XR_USE_PLATFORM_WIN32
-#define XR_USE_GRAPHICS_API_OPENGL
 #include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
 
@@ -74,6 +73,7 @@
 #include "vr/VRCombat.h"
 #include "vr/VRControls.h"
 #include "vr/VRGrab.h"
+#include "vr/VRGraphics.h"
 #include "vr/VRHud.h"
 
 
@@ -116,6 +116,14 @@ XrTime getCurrentTime(XrInstance instance) {
 		return 0;
 	}
 	return time;
+}
+
+//! \return a monotonic time in milliseconds
+u64 getMilliseconds() {
+	LARGE_INTEGER counter, frequency;
+	QueryPerformanceCounter(&counter);
+	QueryPerformanceFrequency(&frequency);
+	return u64(counter.QuadPart / (frequency.QuadPart / 1000));
 }
 
 //! Rate limit for repeated per-frame errors: log the first few, then every 1000th
@@ -220,8 +228,8 @@ std::string findMetaRuntime() {
 /*!
  * \return the runtime manifests to try in order, an empty string stands for the system default runtime
  *
- * With runtime=auto the system default is tried first, then the installed OpenGL capable runtimes: the default
- * may not support OpenGL (e.g. Virtual Desktop).
+ * With runtime=auto the system default is tried first, then the installed runtimes: the default may not support the
+ * graphics API (e.g. Virtual Desktop does not support OpenGL).
  */
 std::vector<std::string> getRuntimeCandidates() {
 
@@ -349,6 +357,14 @@ bool hasExtension(const std::vector<XrExtensionProperties> & extensions, const c
 
 } // anonymous namespace
 
+bool checkXrResult(XrInstance instance, XrResult result, const char * call) {
+	if(XR_FAILED(result)) {
+		LogError << "OpenXR: " << call << " failed: " << resultString(instance, result);
+		return false;
+	}
+	return true;
+}
+
 VRSystem::VRSystem()
 	: m_instance(XR_NULL_HANDLE)
 	, m_systemId(XR_NULL_SYSTEM_ID)
@@ -359,19 +375,9 @@ VRSystem::VRSystem()
 	, m_exitRequested(false)
 	, m_eyeSize(0)
 	, m_colorFormat(0)
-	, m_blitFramebuffer(0)
-	, m_stereoFramebuffer(0)
-	, m_stereoColor(0)
-	, m_stereoDepth(0)
-	, m_stereoResolveFramebuffer(0)
-	, m_stereoResolveColor(0)
+	, m_stereoTarget(false)
 	, m_stereoActive(false)
 	, m_stereoRendered(false)
-	, m_stereoPreviousTarget(0)
-	, m_stereoPreviousTargetSize(0)
-	, m_uiFramebuffer(0)
-	, m_uiColor(0)
-	, m_uiDepth(0)
 	, m_uiSize(0)
 	, m_uiActive(false)
 	, m_uiSubmitted(false)
@@ -434,40 +440,67 @@ bool VRSystem::isRequested() {
 }
 
 bool VRSystem::check(XrResult result, const char * call) const {
-	if(XR_FAILED(result)) {
-		LogError << "OpenXR: " << call << " failed: " << resultString(m_instance, result);
-		return false;
+	if(result == XR_ERROR_SESSION_LOST) {
+		m_sessionLost = true;
+	} else if(result == XR_ERROR_INSTANCE_LOST) {
+		m_instanceLost = true;
 	}
-	return true;
+	return checkXrResult(m_instance, result, call);
+}
+
+bool VRSystem::usesDirect3D11() const {
+	return m_graphics && m_graphics->isDirect3D11();
+}
+
+bool VRSystem::isPanelTextureFlipped() const {
+	return m_graphics && m_graphics->isPanelCopyFlipped();
 }
 
 bool VRSystem::initInstance() {
 
 	arx_assert(m_instance == XR_NULL_HANDLE);
 
-	// Use the first runtime that supports OpenGL
+	/*
+	 * The graphics API of the renderer: Direct3D 11 if it is selected and a runtime supports it, else OpenGL (the
+	 * window then creates an OpenGL renderer). The first runtime that supports it is used.
+	 */
+	std::vector<std::unique_ptr<VRGraphics>> apis;
+	#if ARX_HAVE_D3D11
+	if(config.video.renderer == "Direct3D 11") {
+		apis.push_back(createVRGraphicsD3D11());
+	}
+	#endif
+	apis.push_back(createVRGraphicsOpenGL());
+	std::vector<std::string> candidates = getRuntimeCandidates();
 	std::vector<XrExtensionProperties> extensions;
-	for(const std::string & manifest : getRuntimeCandidates()) {
-		if(!loadOpenXR(manifest)) {
-			continue;
+	for(std::unique_ptr<VRGraphics> & api : apis) {
+		for(const std::string & manifest : candidates) {
+			if(!loadOpenXR(manifest)) {
+				continue;
+			}
+			extensions = getInstanceExtensions();
+			if(hasExtension(extensions, api->getExtension())) {
+				m_graphics = std::move(api);
+				break;
+			}
+			LogWarning << "OpenXR: " << (manifest.empty() ? "the system default runtime" : manifest)
+			           << (extensions.empty() ? " is not available" : " does not support ")
+			           << (extensions.empty() ? "" : api->getName());
+			xrGetInstanceProcAddr = nullptr;
 		}
-		extensions = getInstanceExtensions();
-		if(hasExtension(extensions, XR_KHR_OPENGL_ENABLE_EXTENSION_NAME)) {
+		if(m_graphics) {
 			break;
 		}
-		LogWarning << "OpenXR: " << (manifest.empty() ? "the system default runtime" : manifest)
-		           << (extensions.empty() ? " is not available" : " does not support OpenGL");
-		xrGetInstanceProcAddr = nullptr;
 	}
-	if(!xrGetInstanceProcAddr) {
-		LogError << "OpenXR: no runtime with OpenGL support available - install SteamVR or the Meta Quest PC app,"
-		         << " or select a runtime with runtime= in the [vr] config section";
+	if(!m_graphics) {
+		LogError << "OpenXR: no runtime with OpenGL or Direct3D 11 support available - install SteamVR or the Meta"
+		         << " Quest PC app, or select a runtime with runtime= in the [vr] config section";
 		return false;
 	}
 
 	bool hasTimeConversion = hasExtension(extensions, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
-	
-	std::vector<const char *> enabledExtensions = { XR_KHR_OPENGL_ENABLE_EXTENSION_NAME };
+
+	std::vector<const char *> enabledExtensions = { m_graphics->getExtension() };
 	if(hasTimeConversion) {
 		enabledExtensions.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
 	}
@@ -526,6 +559,12 @@ bool VRSystem::initInstance() {
 		m_systemName = systemProperties.systemName;
 	}
 
+	// Direct3D 11: the renderer is created on the adapter of the headset
+	if(!m_graphics->checkRequirements(m_instance, m_systemId)) {
+		shutdown();
+		return false;
+	}
+
 	uint32_t viewCount = 0;
 	xrEnumerateViewConfigurationViews(m_instance, m_systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
 	                                  0, &viewCount, nullptr);
@@ -538,10 +577,16 @@ bool VRSystem::initInstance() {
 		shutdown();
 		return false;
 	}
-	m_eyeSize = Vec2i(s32(configViews[0].recommendedImageRectWidth), s32(configViews[0].recommendedImageRectHeight));
+	// Sharper eyes above the recommended size (config.vr.resolutionScale), up to the maximum of the runtime
+	const XrViewConfigurationView & configView = configViews[0];
+	float resolutionScale = config.vr.resolutionScale;
+	m_eyeSize = Vec2i(s32(float(configView.recommendedImageRectWidth) * resolutionScale + 0.5f),
+	                  s32(float(configView.recommendedImageRectHeight) * resolutionScale + 0.5f));
+	m_eyeSize = glm::clamp(m_eyeSize, Vec2i(16),
+	                       Vec2i(s32(configView.maxImageRectWidth), s32(configView.maxImageRectHeight)));
 
 	LogInfo << "OpenXR runtime: " << m_runtimeName << ", system: " << m_systemName
-	        << ", eye resolution: " << m_eyeSize.x << 'x' << m_eyeSize.y;
+	        << ", eye resolution: " << m_eyeSize.x << 'x' << m_eyeSize.y << ", " << m_graphics->getName();
 
 	return true;
 }
@@ -556,6 +601,7 @@ void VRSystem::shutdown() {
 		m_instance = XR_NULL_HANDLE;
 	}
 	m_systemId = XR_NULL_SYSTEM_ID;
+	m_graphics.reset();
 
 }
 
@@ -564,40 +610,17 @@ bool VRSystem::createSession() {
 	arx_assert(m_instance != XR_NULL_HANDLE);
 	arx_assert(m_session == XR_NULL_HANDLE);
 
-	// Must be called before xrCreateSession
-	PFN_xrGetOpenGLGraphicsRequirementsKHR getRequirements = nullptr;
-	if(!check(xrGetInstanceProcAddr(m_instance, "xrGetOpenGLGraphicsRequirementsKHR",
-	                                reinterpret_cast<PFN_xrVoidFunction *>(&getRequirements)),
-	          "xrGetInstanceProcAddr(xrGetOpenGLGraphicsRequirementsKHR)")) {
+	// The requirements must be queried before each xrCreateSession (SteamVR, after the headset reconnected)
+	if(!m_graphics->checkRequirements(m_instance, m_systemId)) {
 		return false;
 	}
-	XrGraphicsRequirementsOpenGLKHR requirements = { XR_TYPE_GRAPHICS_REQUIREMENTS_OPENGL_KHR };
-	if(!check(getRequirements(m_instance, m_systemId, &requirements), "xrGetOpenGLGraphicsRequirementsKHR")) {
-		return false;
-	}
-
-	XrVersion glVersion = XR_MAKE_VERSION(epoxy_gl_version() / 10, epoxy_gl_version() % 10, 0);
-	if(glVersion < requirements.minApiVersionSupported) {
-		LogError << "OpenXR: runtime requires OpenGL " << XR_VERSION_MAJOR(requirements.minApiVersionSupported)
-		         << '.' << XR_VERSION_MINOR(requirements.minApiVersionSupported);
-		return false;
-	}
-
-	if(!epoxy_has_gl_extension("GL_ARB_framebuffer_object") && epoxy_gl_version() < 30) {
-		LogError << "OpenXR: OpenGL framebuffer objects are required";
-		return false;
-	}
-
-	XrGraphicsBindingOpenGLWin32KHR binding = { XR_TYPE_GRAPHICS_BINDING_OPENGL_WIN32_KHR };
-	binding.hDC = wglGetCurrentDC();
-	binding.hGLRC = wglGetCurrentContext();
-	if(!binding.hDC || !binding.hGLRC) {
-		LogError << "OpenXR: no current OpenGL context";
+	const void * binding = m_graphics->getSessionBinding(m_instance, m_systemId);
+	if(!binding) {
 		return false;
 	}
 
 	XrSessionCreateInfo sessionInfo = { XR_TYPE_SESSION_CREATE_INFO };
-	sessionInfo.next = &binding;
+	sessionInfo.next = binding;
 	sessionInfo.systemId = m_systemId;
 	if(!check(xrCreateSession(m_instance, &sessionInfo, &m_session), "xrCreateSession")) {
 		m_session = XR_NULL_HANDLE;
@@ -621,9 +644,8 @@ bool VRSystem::createSession() {
 		return false;
 	}
 
-	glGenFramebuffers(1, &m_blitFramebuffer);
-
-	if(!createStereoTarget()) {
+	m_stereoTarget = m_graphics->createStereoTarget(m_eyeSize);
+	if(!m_stereoTarget) {
 		destroySession();
 		return false;
 	}
@@ -645,18 +667,7 @@ bool VRSystem::createSwapchains() {
 		return false;
 	}
 
-	/*
-	 * The game renders gamma-encoded colors. Storing them unchanged in an sRGB image (with GL_FRAMEBUFFER_SRGB
-	 * disabled) makes the compositor decode them correctly.
-	 */
-	const s64 preferred[] = { GL_SRGB8_ALPHA8, GL_SRGB8, GL_RGBA8 };
-	m_colorFormat = 0;
-	for(s64 format : preferred) {
-		if(std::find(formats.begin(), formats.end(), format) != formats.end()) {
-			m_colorFormat = format;
-			break;
-		}
-	}
+	m_colorFormat = m_graphics->selectColorFormat(formats);
 	if(m_colorFormat == 0) {
 		LogError << "OpenXR: no supported swapchain color format";
 		return false;
@@ -678,17 +689,8 @@ bool VRSystem::createSwapchains() {
 			return false;
 		}
 
-		uint32_t imageCount = 0;
-		xrEnumerateSwapchainImages(swapchain.handle, 0, &imageCount, nullptr);
-		std::vector<XrSwapchainImageOpenGLKHR> images(imageCount, { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR });
-		if(!check(xrEnumerateSwapchainImages(swapchain.handle, imageCount, &imageCount,
-		                                     reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data())),
-		          "xrEnumerateSwapchainImages")) {
+		if(!m_graphics->enumerateImages(swapchain.handle, swapchain.images)) {
 			return false;
-		}
-		swapchain.images.clear();
-		for(const XrSwapchainImageOpenGLKHR & image : images) {
-			swapchain.images.push_back(image.image);
 		}
 
 	}
@@ -717,12 +719,11 @@ void VRSystem::destroySession() {
 		endFrame();
 	}
 
-	if(m_blitFramebuffer) {
-		glDeleteFramebuffers(1, &m_blitFramebuffer);
-		m_blitFramebuffer = 0;
+	arx_assert(!m_stereoActive);
+	if(m_stereoTarget) {
+		m_graphics->destroyStereoTarget();
+		m_stereoTarget = false;
 	}
-
-	destroyStereoTarget();
 	destroyUITarget();
 
 	destroySwapchains();
@@ -768,7 +769,7 @@ void VRSystem::pollEvents() {
 			
 			case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING: {
 				LogWarning << "OpenXR: instance loss pending";
-				m_exitRequested = true;
+				m_instanceLost = true;
 				break;
 			}
 
@@ -778,6 +779,86 @@ void VRSystem::pollEvents() {
 
 		event = { XR_TYPE_EVENT_DATA_BUFFER };
 	}
+
+	if(m_sessionLost || m_instanceLost) {
+		handleLoss();
+	}
+
+}
+
+void VRSystem::handleLoss() {
+
+	LogWarning << "OpenXR: the " << (m_instanceLost ? "instance" : "session")
+	           << " was lost (headset disconnected?), waiting for the headset";
+
+	destroySession();
+	m_sessionLost = false;
+
+	if(m_instanceLost) {
+		m_input.shutdown();
+		xrDestroyInstance(m_instance);
+		m_instance = XR_NULL_HANDLE;
+		m_systemId = XR_NULL_SYSTEM_ID;
+		m_instanceLost = false;
+		m_sessionFailures = 0;
+	}
+
+	m_recoverSession = true;
+	m_recoverAttempts = 0;
+	m_nextRecoverTime = getMilliseconds() + 1000;
+	// Back in the menu when the headset is back
+	m_pauseRequested = true;
+
+}
+
+void VRSystem::recoverSession() {
+
+	if(!m_recoverSession || m_session != XR_NULL_HANDLE || getMilliseconds() < m_nextRecoverTime) {
+		return;
+	}
+	m_nextRecoverTime = getMilliseconds() + 1000;
+
+	if(m_instance == XR_NULL_HANDLE) {
+		m_graphics.reset();
+		if(!initInstance()) {
+			return;
+		}
+	}
+
+	// The system is not available while the headset is disconnected
+	XrSystemGetInfo systemInfo = { XR_TYPE_SYSTEM_GET_INFO };
+	systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+	XrSystemId systemId = XR_NULL_SYSTEM_ID;
+	XrResult result = xrGetSystem(m_instance, &systemInfo, &systemId);
+	if(result == XR_ERROR_INSTANCE_LOST) {
+		m_instanceLost = true;
+		handleLoss();
+		return;
+	}
+	if(XR_FAILED(result)) {
+		if(shouldLogRepeatedError(m_recoverAttempts)) {
+			LogInfo << "OpenXR: waiting for the headset (" << resultString(m_instance, result) << ')';
+		}
+		return;
+	}
+	m_systemId = systemId;
+
+	if(!createSession()) {
+		// The instance may not be usable any more: create it again
+		if(++m_sessionFailures >= 3) {
+			LogWarning << "OpenXR: creating the instance again";
+			m_instanceLost = true;
+			handleLoss();
+		}
+		return;
+	}
+	m_sessionFailures = 0;
+
+	m_recoverSession = false;
+	// The tracking origin may have changed
+	m_uiPlaced = false;
+	requestVRRecenter();
+	LogInfo << "OpenXR: the session was created again";
 
 }
 
@@ -810,9 +891,10 @@ void VRSystem::handleSessionStateChange(XrSessionState state) {
 
 		case XR_SESSION_STATE_EXITING:
 		case XR_SESSION_STATE_LOSS_PENDING: {
+			// The headset was disconnected (the Meta runtime): a new session is created once it is back
 			LogInfo << "OpenXR session ending";
 			m_sessionRunning = false;
-			m_exitRequested = true;
+			m_sessionLost = true;
 			break;
 		}
 
@@ -972,7 +1054,7 @@ bool VRSystem::locateViews(XrTime now) {
 	return (viewState.viewStateFlags & required) == required;
 }
 
-unsigned VRSystem::acquireSwapchainImage(EyeSwapchain & swapchain) {
+u64 VRSystem::acquireSwapchainImage(EyeSwapchain & swapchain) {
 
 	arx_assert(m_shouldRender);
 	arx_assert(!swapchain.acquired);
@@ -1005,7 +1087,7 @@ void VRSystem::releaseSwapchainImage(EyeSwapchain & swapchain) {
 
 }
 
-unsigned VRSystem::acquireEyeImage(size_t eye) {
+u64 VRSystem::acquireEyeImage(size_t eye) {
 	return acquireSwapchainImage(m_swapchains[eye]);
 }
 
@@ -1072,7 +1154,8 @@ void VRSystem::endFrame() {
 			quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
 			quad.subImage.swapchain = m_uiSwapchain.handle;
 			// OpenGL images start at the bottom (except for the Meta runtime, see m_imageRectFromTop)
-			int top = m_imageRectFromTop ? panel.area.top : m_uiSize.y - panel.area.bottom;
+			bool fromTop = m_graphics->areImageRectsFromTop(m_imageRectFromTop);
+			int top = fromTop ? panel.area.top : m_uiSize.y - panel.area.bottom;
 			quad.subImage.imageRect.offset = { panel.area.left, top };
 			quad.subImage.imageRect.extent = { panel.area.width(), panel.area.height() };
 			quad.subImage.imageArrayIndex = 0;
@@ -1102,68 +1185,7 @@ void VRSystem::endFrame() {
 
 }
 
-bool VRSystem::createStereoTarget() {
-
-	const Vec2i size(m_eyeSize.x * s32(EyeCount), m_eyeSize.y);
-
-	GLint maxSamples = 0;
-	glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
-	GLsizei samples = config.video.antialiasing ? std::min(GLint(4), maxSamples) : 0;
-
-	glGenRenderbuffers(1, &m_stereoColor);
-	glBindRenderbuffer(GL_RENDERBUFFER, m_stereoColor);
-	glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, size.x, size.y);
-
-	glGenRenderbuffers(1, &m_stereoDepth);
-	glBindRenderbuffer(GL_RENDERBUFFER, m_stereoDepth);
-	glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, size.x, size.y);
-
-	glGenRenderbuffers(1, &m_stereoResolveColor);
-	glBindRenderbuffer(GL_RENDERBUFFER, m_stereoResolveColor);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, size.x, size.y);
-
-	glBindRenderbuffer(GL_RENDERBUFFER, 0);
-
-	glGenFramebuffers(1, &m_stereoFramebuffer);
-	glBindFramebuffer(GL_FRAMEBUFFER, m_stereoFramebuffer);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, m_stereoColor);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_stereoDepth);
-	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-
-	glGenFramebuffers(1, &m_stereoResolveFramebuffer);
-	glBindFramebuffer(GL_FRAMEBUFFER, m_stereoResolveFramebuffer);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, m_stereoResolveColor);
-	GLenum resolveStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	if(status != GL_FRAMEBUFFER_COMPLETE || resolveStatus != GL_FRAMEBUFFER_COMPLETE) {
-		LogError << "OpenXR: could not create the stereo render target (status 0x" << std::hex << status
-		         << ", 0x" << resolveStatus << ')';
-		destroyStereoTarget();
-		return false;
-	}
-
-	LogInfo << "VR stereo render target: " << size.x << 'x' << size.y << ", " << samples << "x MSAA";
-
-	return true;
-}
-
-void VRSystem::destroyStereoTarget() {
-
-	arx_assert(!m_stereoActive);
-
-	GLuint framebuffers[] = { m_stereoFramebuffer, m_stereoResolveFramebuffer };
-	glDeleteFramebuffers(GLsizei(std::size(framebuffers)), framebuffers);
-	GLuint renderbuffers[] = { m_stereoColor, m_stereoDepth, m_stereoResolveColor };
-	glDeleteRenderbuffers(GLsizei(std::size(renderbuffers)), renderbuffers);
-
-	m_stereoFramebuffer = m_stereoResolveFramebuffer = 0;
-	m_stereoColor = m_stereoDepth = m_stereoResolveColor = 0;
-
-}
-
-void VRSystem::setStereoViews(std::vector<OpenGLRenderer::StereoView> views) {
+void VRSystem::setStereoViews(std::vector<StereoView> views) {
 	m_stereoViews = std::move(views);
 }
 
@@ -1171,16 +1193,13 @@ bool VRSystem::beginStereoRender() {
 
 	arx_assert(!m_stereoActive);
 
-	if(!isRenderingFrame() || m_stereoViews.size() != EyeCount || !m_stereoFramebuffer) {
+	if(!isRenderingFrame() || m_stereoViews.size() != EyeCount || !m_stereoTarget) {
 		return false;
 	}
 
-	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
-	m_stereoPreviousTarget = renderer->getRenderTarget();
-	m_stereoPreviousTargetSize = renderer->getRenderTargetSize();
-	renderer->setPremultipliedAlphaOutput(false);
-	renderer->setRenderTarget(m_stereoFramebuffer, Vec2i(m_eyeSize.x * s32(EyeCount), m_eyeSize.y));
-	renderer->setStereoViews(m_stereoViews);
+	if(!m_graphics->beginStereo(m_stereoViews)) {
+		return false;
+	}
 
 	m_stereoActive = true;
 
@@ -1193,59 +1212,23 @@ void VRSystem::endStereoRender(const Vec2i & windowSize) {
 		return;
 	}
 
-	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
-	renderer->setStereoViews({ });
-	renderer->setRenderTarget(m_stereoPreviousTarget, m_stereoPreviousTargetSize);
-	renderer->setPremultipliedAlphaOutput(m_uiActive);
 	m_stereoActive = false;
+	if(!m_graphics->endStereo(m_uiActive)) {
+		return;
+	}
 
-	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-	glDisable(GL_SCISSOR_TEST);
-
-	const Vec2i size(m_eyeSize.x * s32(EyeCount), m_eyeSize.y);
-
-	// Resolve multisampling - this cannot be combined with partial or scaled blits
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, m_stereoFramebuffer);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_stereoResolveFramebuffer);
-	glBlitFramebuffer(0, 0, size.x, size.y, 0, 0, size.x, size.y, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, m_stereoResolveFramebuffer);
 	for(size_t eye = 0; eye < EyeCount; eye++) {
-
-		GLuint image = acquireEyeImage(eye);
+		u64 image = acquireEyeImage(eye);
 		if(!image) {
 			continue;
 		}
-
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_blitFramebuffer);
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
-
-		GLint x = GLint(eye) * m_eyeSize.x;
-		glBlitFramebuffer(x, 0, x + m_eyeSize.x, m_eyeSize.y, 0, 0, m_eyeSize.x, m_eyeSize.y,
-		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
-
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
-
+		m_graphics->copyEyeToImage(eye, image);
 		releaseEyeImage(eye);
 	}
 
 	// Show the center of the left eye in the window, cropped to the window aspect ratio
 	if(windowSize.x > 0 && windowSize.y > 0 && isDesktopViewShown()) {
-		Vec2i crop = m_eyeSize;
-		if(m_eyeSize.x * windowSize.y > windowSize.x * m_eyeSize.y) {
-			crop.x = m_eyeSize.y * windowSize.x / windowSize.y;
-		} else {
-			crop.y = m_eyeSize.x * windowSize.y / windowSize.x;
-		}
-		Vec2i offset = (m_eyeSize - crop) / s32(2);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-		glBlitFramebuffer(offset.x, offset.y, offset.x + crop.x, offset.y + crop.y,
-		                  0, 0, windowSize.x, windowSize.y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-	}
-
-	glBindFramebuffer(GL_FRAMEBUFFER, m_stereoPreviousTarget);
-	if(scissor) {
-		glEnable(GL_SCISSOR_TEST);
+		m_graphics->drawEyeToWindow(windowSize);
 	}
 
 	m_stereoRendered = true;
@@ -1256,36 +1239,7 @@ bool VRSystem::createUITarget(const Vec2i & size) {
 
 	destroyUITarget();
 
-	GLint previousFramebuffer = 0;
-	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
-	GLint previousTexture = 0;
-	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
-
-	glGenTextures(1, &m_uiColor);
-	glBindTexture(GL_TEXTURE_2D, m_uiColor);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size.x, size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glBindTexture(GL_TEXTURE_2D, GLuint(previousTexture));
-
-	// The interface draws the 3D player model in the book, so it needs a depth buffer
-	glGenRenderbuffers(1, &m_uiDepth);
-	glBindRenderbuffer(GL_RENDERBUFFER, m_uiDepth);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, size.x, size.y);
-	glBindRenderbuffer(GL_RENDERBUFFER, 0);
-
-	glGenFramebuffers(1, &m_uiFramebuffer);
-	glBindFramebuffer(GL_FRAMEBUFFER, m_uiFramebuffer);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_uiColor, 0);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_uiDepth);
-	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-	glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFramebuffer));
-
-	if(status != GL_FRAMEBUFFER_COMPLETE) {
-		LogError << "OpenXR: could not create the interface render target (status 0x" << std::hex << status << ')';
-		destroyUITarget();
+	if(!m_graphics->createUITarget(size)) {
 		return false;
 	}
 
@@ -1304,17 +1258,9 @@ bool VRSystem::createUITarget(const Vec2i & size) {
 		return false;
 	}
 
-	uint32_t imageCount = 0;
-	xrEnumerateSwapchainImages(m_uiSwapchain.handle, 0, &imageCount, nullptr);
-	std::vector<XrSwapchainImageOpenGLKHR> images(imageCount, { XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR });
-	if(!check(xrEnumerateSwapchainImages(m_uiSwapchain.handle, imageCount, &imageCount,
-	                                     reinterpret_cast<XrSwapchainImageBaseHeader *>(images.data())),
-	          "xrEnumerateSwapchainImages")) {
+	if(!m_graphics->enumerateImages(m_uiSwapchain.handle, m_uiSwapchain.images)) {
 		destroyUITarget();
 		return false;
-	}
-	for(const XrSwapchainImageOpenGLKHR & image : images) {
-		m_uiSwapchain.images.push_back(image.image);
 	}
 
 	m_uiSize = size;
@@ -1339,16 +1285,9 @@ void VRSystem::destroyUITarget() {
 	m_visiblePanels.clear();
 	m_uiSubmitted = false;
 
-	if(m_uiFramebuffer) {
-		glDeleteFramebuffers(1, &m_uiFramebuffer);
+	if(m_graphics) {
+		m_graphics->destroyUITarget();
 	}
-	if(m_uiDepth) {
-		glDeleteRenderbuffers(1, &m_uiDepth);
-	}
-	if(m_uiColor) {
-		glDeleteTextures(1, &m_uiColor);
-	}
-	m_uiFramebuffer = m_uiDepth = m_uiColor = 0;
 	for(WorldPanel * panel : { &m_bookPanel, &m_inventoryPanel }) {
 		delete panel->texture;
 		*panel = WorldPanel();
@@ -1367,10 +1306,7 @@ bool VRSystem::beginUIRender(const Vec2i & windowSize) {
 		return false;
 	}
 
-	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
-	renderer->setRenderTarget(m_uiFramebuffer, m_uiSize);
-	renderer->setPremultipliedAlphaOutput(true);
-	renderer->Clear(Renderer::ColorBuffer | Renderer::DepthBuffer, Color(0, 0, 0, 0));
+	m_graphics->beginUI();
 
 	m_uiActive = true;
 	m_heldCaptured = HeldNone;
@@ -1389,8 +1325,7 @@ void VRSystem::drawWristIconBackings() {
 	VRHudAreas areas = getVRHudAreas();
 	const Rect * icons[] = { &areas.gauges, &areas.equipment, &areas.stealth, &areas.levelUp, &areas.changeLevel };
 
-	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
-	renderer->setPremultipliedAlphaOutput(false); // The blending below applies to all channels
+	m_graphics->setPremultipliedAlphaOutput(false); // The blending below applies to all channels
 	GRenderer->ResetTexture(0);
 	{
 		UseRenderState state(render2D().blend(BlendInvDstAlpha, BlendOne));
@@ -1426,7 +1361,7 @@ void VRSystem::drawWristIconBackings() {
 			EERIEDrawBitmap(Rectf(areas.map), 0.f, nullptr, Color(0, 0, 0, 179));
 		}
 	}
-	renderer->setPremultipliedAlphaOutput(true);
+	m_graphics->setPremultipliedAlphaOutput(true);
 
 }
 
@@ -1441,34 +1376,19 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 		drawWristIconBackings();
 	}
 
-	OpenGLRenderer * renderer = static_cast<OpenGLRenderer *>(GRenderer);
-	renderer->setPremultipliedAlphaOutput(false);
-	renderer->setRenderTarget(0, Vec2i(0));
+	m_graphics->endUI();
 	m_uiActive = false;
 	m_uiRendered = true;
 
-	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-	glDisable(GL_SCISSOR_TEST);
-
-	GLuint image = acquireSwapchainImage(m_uiSwapchain);
+	u64 image = acquireSwapchainImage(m_uiSwapchain);
 	if(image) {
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, m_uiFramebuffer);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_blitFramebuffer);
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
-		glBlitFramebuffer(0, 0, m_uiSize.x, m_uiSize.y, 0, 0, m_uiSize.x, m_uiSize.y,
-		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
-		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+		m_graphics->copyUIToImage(image);
 		releaseSwapchainImage(m_uiSwapchain);
-	}
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	if(scissor) {
-		glEnable(GL_SCISSOR_TEST);
 	}
 
 	if(!overScene) {
 		// Desktop view: the interface on its own for menus
-		drawTextureToWindow(m_uiColor, windowSize, true);
+		drawUIToWindow(windowSize, true);
 		if(image) {
 			updateUIPlacement(true); // Following the head (user request), like the panels in the game
 			addScreenPanel(Rect(m_uiSize.x, m_uiSize.y), true);
@@ -1476,14 +1396,14 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 		return;
 	}
 	if(!image) {
-		drawTextureToWindow(m_uiColor, windowSize, false);
+		drawUIToWindow(windowSize, false);
 		return;
 	}
 
 	// In-game the desktop view shows the panels over the left eye image, like the headset
 	updateGamePanels();
 	if(config.vr.showHud) {
-		drawTextureToWindow(m_uiColor, windowSize, false);
+		drawUIToWindow(windowSize, false);
 	} else {
 		drawPanelsToWindow(windowSize);
 	}
@@ -1808,7 +1728,7 @@ bool VRSystem::copyToWorldPanel(WorldPanel & panel, const Rect & area, float pix
 
 	panel.active = false;
 	Vec2i size(area.width(), area.height());
-	if(area.empty() || m_uiColor == 0) {
+	if(area.empty() || !m_graphics->hasUITarget()) {
 		return false;
 	}
 	if(!panel.texture || panel.textureSize != size) {
@@ -1822,10 +1742,10 @@ bool VRSystem::copyToWorldPanel(WorldPanel & panel, const Rect & area, float pix
 		panel.textureSize = size;
 	}
 
-	// OpenGL images start at the bottom: the copy is upside down
-	GLuint texture = static_cast<GLTexture *>(panel.texture)->getGLTexture();
-	glCopyImageSubData(m_uiColor, GL_TEXTURE_2D, 0, area.left, m_uiSize.y - area.bottom, 0,
-	                   texture, GL_TEXTURE_2D, 0, 0, 0, 0, size.x, size.y, 1);
+	// Upside down with OpenGL, see isPanelTextureFlipped()
+	if(!m_graphics->copyUIToTexture(panel.texture, area)) {
+		return false;
+	}
 	panel.size = Vec2f(size) * pixelSize;
 	panel.active = true;
 	return true;
@@ -2108,7 +2028,7 @@ void VRSystem::captureHeldPanel(bool book) {
 	 * Right after the book (with its rune flares) or a note is drawn, its area is copied into the texture of the held
 	 * sheet and cleared, for the rest to be drawn alone.
 	 */
-	if(!m_uiActive || m_uiColor == 0) {
+	if(!m_uiActive || !m_graphics->hasUITarget()) {
 		return;
 	}
 	VRHudAreas areas = getVRHudAreas();
@@ -2205,25 +2125,12 @@ void VRSystem::submitWindowAsUI(const Vec2i & windowSize) {
 		return;
 	}
 
-	GLuint image = acquireSwapchainImage(m_uiSwapchain);
+	u64 image = acquireSwapchainImage(m_uiSwapchain);
 	if(!image) {
 		return;
 	}
 
-	GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
-	glDisable(GL_SCISSOR_TEST);
-
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_blitFramebuffer);
-	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image, 0);
-	glBlitFramebuffer(0, 0, windowSize.x, windowSize.y, 0, 0, m_uiSize.x, m_uiSize.y,
-	                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
-	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	if(scissor) {
-		glEnable(GL_SCISSOR_TEST);
-	}
+	m_graphics->copyWindowToImage(image, windowSize);
 
 	releaseSwapchainImage(m_uiSwapchain);
 
@@ -2284,20 +2191,21 @@ void VRSystem::updateUIPlacement(bool followHead) {
 
 }
 
-void VRSystem::drawTextureToWindow(unsigned texture, const Vec2i & windowSize, bool clear) {
-	drawToWindow(texture, windowSize, clear, []() {
-		// The whole texture over the whole window
-		glBegin(GL_TRIANGLE_STRIP);
-		glTexCoord2f(0.f, 0.f);
-		glVertex2f(-1.f, -1.f);
-		glTexCoord2f(1.f, 0.f);
-		glVertex2f(1.f, -1.f);
-		glTexCoord2f(0.f, 1.f);
-		glVertex2f(-1.f, 1.f);
-		glTexCoord2f(1.f, 1.f);
-		glVertex2f(1.f, 1.f);
-		glEnd();
-	});
+void VRSystem::drawUIToWindow(const Vec2i & windowSize, bool clear) {
+
+	if(!isDesktopViewShown()) {
+		return; // Nothing is drawn to the window (see config.vr.desktopView)
+	}
+
+	// The whole interface over the whole window
+	VRWindowQuad quad;
+	const Vec2f corners[4] = { Vec2f(-1.f, -1.f), Vec2f(1.f, -1.f), Vec2f(-1.f, 1.f), Vec2f(1.f, 1.f) };
+	for(size_t i = 0; i < 4; i++) {
+		quad.position[i] = Vec4f(corners[i], 0.f, 1.f);
+		quad.uv[i] = Vec2f(corners[i].x * 0.5f + 0.5f, 0.5f - corners[i].y * 0.5f);
+	}
+	m_graphics->drawUIToWindow(windowSize, clear, { quad });
+
 }
 
 void VRSystem::drawPanelsToWindow(const Vec2i & windowSize) {
@@ -2306,7 +2214,8 @@ void VRSystem::drawPanelsToWindow(const Vec2i & windowSize) {
 	 * The desktop view shows what the headset shows (user request): the panels of this frame (wrist, book, screen,
 	 * labels...) seen from the left eye, cropped like its image (see endStereoRender), not the flat interface
 	 */
-	if(m_uiPanels.empty() || m_uiSize.x <= 0 || m_uiSize.y <= 0 || windowSize.x <= 0 || windowSize.y <= 0) {
+	if(m_uiPanels.empty() || m_uiSize.x <= 0 || m_uiSize.y <= 0 || windowSize.x <= 0 || windowSize.y <= 0
+	   || !isDesktopViewShown()) {
 		return;
 	}
 	const XrView & eye = m_views[0];
@@ -2318,118 +2227,50 @@ void VRSystem::drawPanelsToWindow(const Vec2i & windowSize) {
 	}
 	Vec2f zoom = Vec2f(m_eyeSize) / crop;
 
-	drawToWindow(m_uiColor, windowSize, false, [&]() {
-		const float Near = 0.05f;
-		glMatrixMode(GL_PROJECTION);
-		glLoadIdentity();
-		glScalef(zoom.x, zoom.y, 1.f);
-		glFrustum(std::tan(eye.fov.angleLeft) * Near, std::tan(eye.fov.angleRight) * Near,
-		          std::tan(eye.fov.angleDown) * Near, std::tan(eye.fov.angleUp) * Near, Near, 100.f);
-		glMatrixMode(GL_MODELVIEW);
-		glm::quat eyeOrientation(eye.pose.orientation.w, eye.pose.orientation.x, eye.pose.orientation.y,
-		                         eye.pose.orientation.z);
-		glm::mat4 eyeToTracking = glm::translate(glm::mat4(1.f), Vec3f(eye.pose.position.x, eye.pose.position.y,
-		                                                               eye.pose.position.z))
-		                          * glm::mat4_cast(eyeOrientation);
-		glm::mat4 view = glm::inverse(eyeToTracking);
-		glLoadMatrixf(&view[0][0]);
-		for(const UIPanel & panel : m_uiPanels) {
-			if(panel.hidden) {
-				continue; // Drawn in the world, so in the eye image already
-			}
-			glm::quat orientation(panel.pose.orientation.w, panel.pose.orientation.x, panel.pose.orientation.y,
-			                      panel.pose.orientation.z);
-			Vec3f center(panel.pose.position.x, panel.pose.position.y, panel.pose.position.z);
-			Vec3f across = orientation * Vec3f(0.5f * panel.extent.width, 0.f, 0.f);
-			Vec3f up = orientation * Vec3f(0.f, 0.5f * panel.extent.height, 0.f);
-			// OpenGL images start at the bottom
-			float left = float(panel.area.left) / float(m_uiSize.x);
-			float right = float(panel.area.right) / float(m_uiSize.x);
-			float top = 1.f - float(panel.area.top) / float(m_uiSize.y);
-			float bottom = 1.f - float(panel.area.bottom) / float(m_uiSize.y);
-			glBegin(GL_TRIANGLE_STRIP);
-			glTexCoord2f(left, bottom);
-			glVertex3fv(&(center - across - up)[0]);
-			glTexCoord2f(right, bottom);
-			glVertex3fv(&(center + across - up)[0]);
-			glTexCoord2f(left, top);
-			glVertex3fv(&(center - across + up)[0]);
-			glTexCoord2f(right, top);
-			glVertex3fv(&(center + across + up)[0]);
-			glEnd();
+	// The projection of the left eye, zoomed like its cropped image (the depth is not used): OpenXR views look along -z
+	float tanLeft = std::tan(eye.fov.angleLeft);
+	float tanRight = std::tan(eye.fov.angleRight);
+	float tanUp = std::tan(eye.fov.angleUp);
+	float tanDown = std::tan(eye.fov.angleDown);
+	glm::mat4 projection(0.f);
+	projection[0][0] = 2.f / (tanRight - tanLeft) * zoom.x;
+	projection[2][0] = (tanRight + tanLeft) / (tanRight - tanLeft) * zoom.x;
+	projection[1][1] = 2.f / (tanUp - tanDown) * zoom.y;
+	projection[2][1] = (tanUp + tanDown) / (tanUp - tanDown) * zoom.y;
+	projection[2][3] = -1.f;
+	glm::quat eyeOrientation(eye.pose.orientation.w, eye.pose.orientation.x, eye.pose.orientation.y,
+	                         eye.pose.orientation.z);
+	glm::mat4 eyeToTracking = glm::translate(glm::mat4(1.f), Vec3f(eye.pose.position.x, eye.pose.position.y,
+	                                                               eye.pose.position.z))
+	                          * glm::mat4_cast(eyeOrientation);
+	glm::mat4 trackingToClip = projection * glm::inverse(eyeToTracking);
+
+	std::vector<VRWindowQuad> quads;
+	for(const UIPanel & panel : m_uiPanels) {
+		if(panel.hidden) {
+			continue; // Drawn in the world, so in the eye image already
 		}
-	});
-}
-
-void VRSystem::drawToWindow(unsigned texture, const Vec2i & windowSize, bool clear,
-                            const std::function<void()> & draw) {
-
-	if(!isDesktopViewShown()) {
-		return; // Nothing is drawn to the window (see config.vr.desktopView)
+		glm::quat orientation(panel.pose.orientation.w, panel.pose.orientation.x, panel.pose.orientation.y,
+		                      panel.pose.orientation.z);
+		Vec3f center(panel.pose.position.x, panel.pose.position.y, panel.pose.position.z);
+		Vec3f across = orientation * Vec3f(0.5f * panel.extent.width, 0.f, 0.f);
+		Vec3f up = orientation * Vec3f(0.f, 0.5f * panel.extent.height, 0.f);
+		float uvLeft = float(panel.area.left) / float(m_uiSize.x);
+		float uvRight = float(panel.area.right) / float(m_uiSize.x);
+		float uvTop = float(panel.area.top) / float(m_uiSize.y);
+		float uvBottom = float(panel.area.bottom) / float(m_uiSize.y);
+		const Vec3f corners[4] = { center - across - up, center + across - up, center - across + up, center + across + up };
+		const Vec2f uvs[4] = {
+			Vec2f(uvLeft, uvBottom), Vec2f(uvRight, uvBottom), Vec2f(uvLeft, uvTop), Vec2f(uvRight, uvTop)
+		};
+		VRWindowQuad & quad = quads.emplace_back();
+		for(size_t i = 0; i < 4; i++) {
+			quad.position[i] = trackingToClip * Vec4f(corners[i], 1.f);
+			quad.uv[i] = uvs[i];
+		}
 	}
 
-	// Draw with the fixed-function pipeline, saving and restoring all state the renderer caches
-	GLint previousFramebuffer = 0;
-	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
-	GLint previousActiveTexture = 0;
-	glGetIntegerv(GL_ACTIVE_TEXTURE, &previousActiveTexture);
-	GLint textureUnits = 1;
-	glGetIntegerv(GL_MAX_TEXTURE_UNITS, &textureUnits);
-
-	glPushAttrib(GL_ALL_ATTRIB_BITS);
-
-	glMatrixMode(GL_PROJECTION);
-	glPushMatrix();
-	glLoadIdentity();
-	glMatrixMode(GL_MODELVIEW);
-	glPushMatrix();
-	glLoadIdentity();
-
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glViewport(0, 0, windowSize.x, windowSize.y);
-	glDisable(GL_SCISSOR_TEST);
-	glDisable(GL_DEPTH_TEST);
-	glDisable(GL_ALPHA_TEST);
-	glDisable(GL_FOG);
-	glDisable(GL_CULL_FACE);
-	glDisable(GL_LIGHTING);
-
-	if(clear) {
-		glClearColor(0.f, 0.f, 0.f, 1.f);
-		glClear(GL_COLOR_BUFFER_BIT);
-	}
-
-	std::vector<GLint> previousTextures(static_cast<size_t>(textureUnits), 0);
-	for(GLint unit = textureUnits - 1; unit >= 0; unit--) {
-		glActiveTexture(GLenum(GL_TEXTURE0 + unit));
-		glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTextures[size_t(unit)]);
-		glDisable(GL_TEXTURE_2D);
-	}
-
-	glEnable(GL_TEXTURE_2D);
-	glBindTexture(GL_TEXTURE_2D, texture);
-	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
-
-	// Premultiplied alpha
-	glEnable(GL_BLEND);
-	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-
-	draw();
-
-	for(GLint unit = textureUnits - 1; unit >= 0; unit--) {
-		glActiveTexture(GLenum(GL_TEXTURE0 + unit));
-		glBindTexture(GL_TEXTURE_2D, GLuint(previousTextures[size_t(unit)]));
-	}
-
-	glMatrixMode(GL_MODELVIEW);
-	glPopMatrix();
-	glMatrixMode(GL_PROJECTION);
-	glPopMatrix();
-
-	glPopAttrib();
-
-	glActiveTexture(GLenum(previousActiveTexture));
-	glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFramebuffer));
+	m_graphics->drawUIToWindow(windowSize, false, quads);
 
 }
 

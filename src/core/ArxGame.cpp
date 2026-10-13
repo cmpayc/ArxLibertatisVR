@@ -1295,6 +1295,10 @@ void ArxGame::doFrame() {
 	} else {
 		cinematicLaunchWaiting();
 		#if ARX_HAVE_OPENXR
+		if(g_vr && !g_vr->hasSession()) {
+			// After the headset was disconnected, a new session is created once it is back
+			g_vr->recoverSession();
+		}
 		if(g_vr && g_vr->hasSession()) {
 			// Begin the VR frame before updating so that the camera uses the predicted head pose
 			g_vr->pollEvents();
