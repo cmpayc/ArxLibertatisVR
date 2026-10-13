@@ -643,6 +643,7 @@ static void AddFixedObjectHalo(const EERIE_FACE & face, const TransformInfo & t,
 			vert[1] = tvList[first];
 			vert[2] = tvList[second];
 			vert[3] = tvList[second];
+			vert[0].normal = vert[1].normal = vert[2].normal = vert[3].normal = Vec3f(0.f);
 			
 			Vec3f a = tvList[first].p / tvList[first].w;
 			Vec3f b = tvList[second].p / tvList[second].w;
@@ -740,6 +741,8 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 			tvList[n].prevP = previousClipPosition(eobj, face.vid[n]);
 			tvList[n].uv.x = face.u[n];
 			tvList[n].uv.y = face.v[n];
+			float normalLength = glm::length(normal);
+			tvList[n].normal = (normalLength > 0.f) ? normal / normalLength : Vec3f(0.f);
 			
 			// Treat WATER Polys (modify UVs)
 			if(face.facetype & POLY_WATER) {
@@ -990,6 +993,7 @@ static void AddAnimatedObjectHalo(const HaloInfo & haloInfo, const VertexId * pa
 			vert[1] = tvList[first];
 			vert[2] = tvList[second];
 			vert[3] = tvList[second];
+			vert[0].normal = vert[1].normal = vert[2].normal = vert[3].normal = Vec3f(0.f);
 			
 			Vec3f a = tvList[first].p / tvList[first].w;
 			Vec3f b = tvList[second].p / tvList[second].w;
@@ -1035,7 +1039,7 @@ static void AddAnimatedObjectHalo(const HaloInfo & haloInfo, const VertexId * pa
 
 static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
                                 const Vec3f & pos, float invisibility, int segments,
-                                const MeshLighting * lighting) {
+                                const MeshLighting * lighting, bool smoothNormals) {
 	
 	ARX_PROFILE_FUNC();
 	
@@ -1103,6 +1107,16 @@ static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
 			corners[n].prevP = previousClipPosition(eobj, face.vid[n]);
 			corners[n].uv = Vec2f(face.u[n], face.v[n]);
 			corners[n].color = eobj->vertexColors[face.vid[n]];
+			if(smoothNormals) {
+				corners[n].normal = meshSmoothingNormal(*eobj, face.vid[n].handleData());
+			}
+		}
+		if(!smoothNormals) {
+			// Flat normal for the highlights
+			Vec3f normal = glm::cross(eobj->vertexWorldPositions[face.vid[1]].v - eobj->vertexWorldPositions[face.vid[0]].v,
+			                           eobj->vertexWorldPositions[face.vid[2]].v - eobj->vertexWorldPositions[face.vid[0]].v);
+			float length = glm::length(normal);
+			corners[0].normal = corners[1].normal = corners[2].normal = (length > 0.f) ? normal / length : Vec3f(0.f);
 		}
 		
 		if((face.facetype & POLY_TRANS) || invisibility > 0.f) {
@@ -1133,6 +1147,7 @@ static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
 				TexturedVertex * tv2 = PushVertexInTable(TexSpecialColor.m_modelBatch[BatchBucket_Opaque]);
 				std::copy(vertices + t * 3, vertices + t * 3 + 3, tv2);
 				tv2[0].color = tv2[1].color = tv2[2].color = glowColor;
+				tv2[0].normal = tv2[1].normal = tv2[2].normal = Vec3f(0.f);
 			}
 		}
 		
@@ -1184,7 +1199,7 @@ static void Cedric_AnimateDrawEntityRender(EERIE_3DOBJ * eobj, const Vec3f & pos
 	Cedric_ApplyLighting(lights, lightsCount, eobj, obj, colorMod, smooth);
 	
 	MeshLighting lighting = { lights, lightsCount, &colorMod };
-	Cedric_RenderObject(eobj, obj, io, pos, invisibility, segments, &lighting);
+	Cedric_RenderObject(eobj, obj, io, pos, invisibility, segments, &lighting, smooth);
 	
 	// Now we can render Linked Objects
 	for(const EERIE_LINKED & link : eobj->linked) {

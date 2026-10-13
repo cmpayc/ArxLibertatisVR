@@ -55,6 +55,7 @@ struct VSConstants {
 	float transform[16];
 	float jitter[4];
 	float camera[4]; // World position of the camera
+	float modelToWorld[16]; // From pre-transformed model vertices to world space, for per-pixel highlights
 };
 
 struct MotionConstants {
@@ -68,7 +69,7 @@ struct PSConstants {
 	float fogParams[4];
 	float relief[4]; // x = normal map slope scale, y = parallax depth, both 0 without a relief map
 	float specular[4]; // x = highlight strength, y = exponent, z = metallic, all 0 without highlights
-	float surface[4]; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces
+	float surface[4]; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
 };
 
 struct ReflectionConstants {
@@ -314,7 +315,7 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	m_window = window;
 	
 	// Debug view for the scene: 1 = depth, 2 = motion vectors, 3 = per-object motion, 4 = ambient occlusion,
-	// 5 = bloom, 6 = per-pixel dynamic light, 7 = reflections
+	// 5 = bloom, 6 = per-pixel dynamic light, 7 = reflections, 8 = highlights of models
 	{
 		char value[16];
 		DWORD length = GetEnvironmentVariableA("ARX_SCENE_DEBUG", value, sizeof(value));
@@ -585,6 +586,8 @@ bool D3D11Renderer::compileShaders() {
 		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, UINT(offsetof(TexturedVertex, uv)),
 		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
 		{ "PREVPOSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, UINT(offsetof(TexturedVertex, prevP)),
+		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, UINT(offsetof(TexturedVertex, normal)),
 		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
 	};
 	static_assert(offsetof(TexturedVertex, w) == offsetof(TexturedVertex, p) + 3 * sizeof(float),
@@ -1896,8 +1899,8 @@ void D3D11Renderer::setPixelLighting(bool enabled) {
 
 void D3D11Renderer::setPixelLights(const PixelLight * lights, size_t count) {
 	
-	// Debug view 6 shows only the dynamic light
-	bool debugView = (m_sceneDebugView == 6);
+	// Debug views 6 and 8 show only the dynamic light or the highlights of models
+	bool debugView = (m_sceneDebugView == 6 || m_sceneDebugView == 8);
 	
 	if(!m_lightConstants || !m_context || (count == 0 && m_pixelLightCount == 0 && !debugView)) {
 		return;
@@ -1917,7 +1920,7 @@ void D3D11Renderer::setPixelLights(const PixelLight * lights, size_t count) {
 	
 	LightConstants constants = {};
 	constants.count[0] = s32(diffuseCount);
-	constants.count[1] = debugView ? 1 : 0;
+	constants.count[1] = (m_sceneDebugView == 6) ? 1 : (m_sceneDebugView == 8) ? 2 : 0;
 	constants.count[2] = s32(count);
 	for(size_t i = 0; i < count; i++) {
 		const PixelLight & light = lights[i];
@@ -2804,6 +2807,12 @@ void D3D11Renderer::flushState(VertexType type) {
 		constants.camera[1] = camera.y;
 		constants.camera[2] = camera.z;
 		constants.camera[3] = 0.f;
+		// Pre-transformed vertices of models in the 3D scene go back to world space with the scene camera
+		glm::mat4x4 modelToWorld(1.f);
+		if(type == VertexTL && m_inScene) {
+			modelToWorld = glm::mat4x4(glm::inverse(glm::dmat4(m_projection) * glm::dmat4(m_view)) * glm::dmat4(transform));
+		}
+		std::memcpy(constants.modelToWorld, &modelToWorld, sizeof(constants.modelToWorld));
 		static_assert(sizeof(constants) == sizeof(m_vsConstantsData), "unexpected constant buffer size");
 		if(!m_vsConstantsValid || std::memcmp(m_vsConstantsData, &constants, sizeof(constants)) != 0) {
 			std::memcpy(m_vsConstantsData, &constants, sizeof(constants));
@@ -2929,7 +2938,7 @@ void D3D11Renderer::flushState(VertexType type) {
 			}
 			
 			// Highlights from the material of the main texture
-			if(texture && type == VertexWorld && m_specularStrength > 0.f) {
+			if(texture && (type == VertexWorld || (type == VertexTL && m_inScene)) && m_specularStrength > 0.f) {
 				const D3D11Texture::Specular & specular = texture->specular();
 				constants.specular[0] = specular.strength * m_specularStrength * SpecularScale;
 				constants.specular[1] = specular.exponent;
@@ -2960,6 +2969,8 @@ void D3D11Renderer::flushState(VertexType type) {
 	constants.fogParams[2] = m_state.getFog() ? 1.f : 0.f;
 	constants.fogParams[3] = alphaReference;
 	constants.surface[1] = (m_state.getBlendSrc() != BlendOne || m_state.getBlendDst() != BlendZero) ? 1.f : 0.f;
+	// Models are already lit in their vertex colors and only get highlights
+	constants.surface[3] = (type == VertexTL) ? 1.f : 0.f;
 	
 	static_assert(sizeof(constants) <= sizeof(m_psConstantsData), "constant buffer cache too small");
 	if(!m_psConstantsValid || std::memcmp(m_psConstantsData, &constants, sizeof(constants)) != 0) {

@@ -36,6 +36,7 @@ cbuffer VSConstants : register(b0) {
 	float4x4 transform;
 	float4 jitter; // xy = sub-pixel offset in normalized device coordinates
 	float4 camera; // World position of the camera
+	float4x4 modelToWorld; // From pre-transformed model vertices to world space, for per-pixel highlights
 };
 
 cbuffer PSConstants : register(b0) {
@@ -44,7 +45,7 @@ cbuffer PSConstants : register(b0) {
 	float4 fogParams; // x = start, y = end, z = enabled, w = alpha reference (< 0: no test)
 	float4 reliefParams; // x = normal map slope scale, y = parallax depth relative to the texture size
 	float4 specularParams; // x = highlight strength, y = exponent, z = metallic
-	float4 surfaceParams; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces
+	float4 surfaceParams; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
 };
 
 cbuffer ClearConstants : register(b1) {
@@ -124,9 +125,17 @@ VSOutput makeOutput(float4 clip, float4 prevClip, float4 color, float2 uv0, floa
 }
 
 VSOutput vsTL(float4 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0,
-              float4 prevPosition : PREVPOSITION) {
+              float4 prevPosition : PREVPOSITION, float3 normal : NORMAL) {
 	float4 prevClip = prevPosition.w > 0 ? mul(transform, prevPosition) : float4(0, 0, 0, 0);
-	return makeOutput(mul(transform, position), prevClip, color, uv, float2(0, 0), float2(0, 0));
+	VSOutput o = makeOutput(mul(transform, position), prevClip, color, uv, float2(0, 0), float2(0, 0));
+	// Models provide a world space normal for per-pixel highlights
+	if(dot(normal, normal) > 0) {
+		float4 world = mul(modelToWorld, position);
+		o.world = world.xyz / world.w;
+		o.normal = normal;
+		o.view = camera.xyz - o.world;
+	}
+	return o;
 }
 
 VSOutput vsWorld(float3 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0,
@@ -215,6 +224,8 @@ float4 combine(int4 stage, float4 previous, float4 texel) {
 	                       combineAlpha(stage.y, previous.a, texel.a)));
 }
 
+)HLSL"
+R"HLSL(
 // Octahedral encoding of a unit vector into [0, 1]^2
 float2 encodeNormal(float3 n) {
 	n /= abs(n.x) + abs(n.y) + abs(n.z);
@@ -330,8 +341,8 @@ PSOutput psMain(PSInput input
 	float3 specular = float3(0, 0, 0);
 	bool shiny = specularParams.x > 0 && lightCount.z > 0;
 	[branch] if((lightCount.x > 0 || shiny) && normalLength > 0.01) {
-		// Water is only drawn on top of the lit ground, it only gets the highlights
-		int diffuseCount = water ? 0 : lightCount.x;
+		// Water is drawn on top of the lit ground and models are already lit, they only get the highlights
+		int diffuseCount = (water || surfaceParams.w != 0) ? 0 : lightCount.x;
 		pixelLighting(input.world, normal, normalize(input.view), diffuseCount, shiny ? lightCount.z : diffuseCount,
 		              shiny ? specularParams.y : 0, dynamicLight, specular);
 		specular *= specularParams.x;
@@ -367,8 +378,12 @@ PSOutput psMain(PSInput input
 	}
 	
 	// Debug view: only the dynamic light of world geometry lit per pixel
-	if(lightCount.y != 0 && normalLength > 0.01) {
+	if(lightCount.y == 1 && normalLength > 0.01) {
 		color.rgb = saturate(dynamicLight);
+	}
+	// Debug view: only the highlights of models
+	if(lightCount.y == 2) {
+		color.rgb = (surfaceParams.w != 0) ? saturate(specular * 4) : float3(0, 0, 0);
 	}
 	
 	PSOutput o;

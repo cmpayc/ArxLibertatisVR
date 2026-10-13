@@ -440,7 +440,7 @@ private:
 	ID3D11SamplerState * m_currentSamplers[3];
 	ID3D11ShaderResourceView * m_currentNormalView;
 	static constexpr UINT NormalMapSlot = 3;
-	float m_vsConstantsData[24];
+	float m_vsConstantsData[40];
 	bool m_vsConstantsValid;
 	unsigned char m_psConstantsData[128];
 	bool m_psConstantsValid;

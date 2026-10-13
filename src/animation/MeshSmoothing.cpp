@@ -235,12 +235,12 @@ size_t smoothFace(const EERIE_3DOBJ & eobj, size_t faceIndex, const TexturedVert
 			}
 			
 			vertex.uv = a * corners[0].uv + b * corners[1].uv + c * corners[2].uv;
+			Vec3f normal = a * corners[0].normal + b * corners[1].normal + c * corners[2].normal;
+			float normalLength = glm::length(normal);
+			vertex.normal = (normalLength > 0.f) ? normal / normalLength : Vec3f(0.f);
 			
 			if(lighting) {
-				Vec3f normal = a * n[0] + b * n[1] + c * n[2];
-				float length = glm::length(normal);
-				normal = (length > 0.f) ? normal / length : normal;
-				vertex.color = ApplyLight(lighting->lights, lighting->lightsCount, position, normal,
+				vertex.color = ApplyLight(lighting->lights, lighting->lightsCount, position, vertex.normal,
 				                          *lighting->colorMod);
 			} else {
 				Color4f color = Color4f::fromRGBA(corners[0].color) * a
