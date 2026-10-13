@@ -27,6 +27,7 @@
 #include <sstream>
 #include <string>
 
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "Configure.h"
@@ -71,7 +72,11 @@ struct PSConstants {
 	float relief[4]; // x = normal map slope scale, y = parallax depth, z = cavity darkening of models, both 0 without a relief map
 	float specular[4]; // x = highlight strength, y = exponent, z = metallic, all 0 without highlights
 	float surface[4]; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
+	float effect[4]; // x = time in seconds (repeating), y = lava glow, 0 for other surfaces
 };
+
+// The lava animation repeats after this time, the frequencies of its waves are multiples of 0.1
+const float LavaTimePeriod = 20.f * glm::pi<float>();
 
 struct ReflectionConstants {
 	float target[4];     // xy = size, zw = 1 / size
@@ -293,6 +298,7 @@ D3D11Renderer::D3D11Renderer()
 	, m_parallaxStrength(0.f)
 	, m_specularStrength(0.f)
 	, m_waterSurface(false)
+	, m_effectTime(0.f)
 	, m_pixelLightsWarned(false)
 	, m_snapshotTime(0)
 	, m_fpsLogStart(0)
@@ -1707,7 +1713,15 @@ void D3D11Renderer::beginScene() {
 	}
 	
 	m_drawingScene = true;
-	
+
+	{
+		LARGE_INTEGER now, frequency;
+		QueryPerformanceCounter(&now);
+		QueryPerformanceFrequency(&frequency);
+		double seconds = double(now.QuadPart) / double(frequency.QuadPart);
+		m_effectTime = float(std::fmod(seconds, double(LavaTimePeriod)));
+	}
+
 	updateUpscaler();
 	
 	if(!sceneEnabled()) {
@@ -3029,6 +3043,11 @@ void D3D11Renderer::flushState(VertexType type) {
 			}
 			if(texture && type == VertexWorld && m_surfaceView) {
 				constants.surface[0] = texture->specular().reflectivity;
+			}
+			// Lava glows and flows in the 3D scene
+			if(texture && (type == VertexWorld || type == VertexTL) && m_drawingScene && texture->specular().glow > 0.f) {
+				constants.effect[0] = m_effectTime;
+				constants.effect[1] = texture->specular().glow;
 			}
 			// Water is drawn without normals, with an animated texture
 			if(type == VertexWorld3 && m_waterSurface) {

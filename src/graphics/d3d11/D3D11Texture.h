@@ -59,6 +59,7 @@ public:
 		float exponent = 1.f; //!< Larger for sharper highlights
 		float metallic = 0.f; //!< How much the texture color tints the highlights
 		float reflectivity = 0.f; //!< Strength of the screen-space reflections, only water reflects for now
+		float glow = 0.f; //!< Glowing, flowing lava
 	};
 	const Specular & specular() const { return m_specular; }
 	

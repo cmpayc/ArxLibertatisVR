@@ -47,6 +47,7 @@ cbuffer PSConstants : register(b0) {
 	float4 reliefParams; // x = normal map slope scale, y = parallax depth relative to the texture size, z = cavity darkening of models
 	float4 specularParams; // x = highlight strength, y = exponent, z = metallic
 	float4 surfaceParams; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
+	float4 effectParams; // x = time in seconds (repeating), y = lava glow
 };
 
 cbuffer ClearConstants : register(b1) {
@@ -249,6 +250,22 @@ void modelReliefLighting(float3 position, float3 normal, float3 bumped, int coun
 	}
 }
 
+// Lava churns: its texture is slowly pushed around by overlapping waves over the surface (frequencies of the time are
+// multiples of 0.1, see LavaTimePeriod)
+float2 lavaFlow(float3 world, float time) {
+	float2 p = world.xz * 0.01;
+	float2 flow;
+	flow.x = sin(p.y * 1.3 + time * 0.6) + 0.5 * sin(p.x * 2.1 - p.y * 0.7 + time * 0.9);
+	flow.y = cos(p.x * 1.1 - time * 0.5) + 0.5 * cos(p.y * 1.9 + p.x * 0.8 - time * 0.7);
+	return flow * 0.02;
+}
+
+// How hot the lava is at a point, pulsing slowly in large patches
+float lavaPulse(float3 world, float time) {
+	float2 p = world.xz * 0.006;
+	return 0.65 + 0.35 * sin(p.x * 1.7 + p.y * 1.3 + time * 1.2) * sin(p.y * 2.3 - p.x * 0.9 - time * 0.8);
+}
+
 // Octahedral encoding of a unit vector into [0, 1]^2
 float2 encodeNormal(float3 n) {
 	n /= abs(n.x) + abs(n.y) + abs(n.z);
@@ -301,9 +318,14 @@ PSOutput psMain(PSInput input
 	float3 gradU = dp2perp * dx0.x + dp1perp * dy0.x;
 	float3 gradV = dp2perp * dx0.y + dp1perp * dy0.y;
 	
+	float2 uv0 = input.uv0;
+	bool lava = effectParams.y > 0;
+	[branch] if(lava) {
+		uv0 += lavaFlow(input.world, effectParams.x);
+	}
+
 	// Parallax occlusion mapping: march the view ray through the height field below the surface, with the
 	// average height at the surface
-	float2 uv0 = input.uv0;
 	[branch] if(relief && reliefParams.y > 0) {
 		float det = dot(worldDx, dp2perp);
 		float viewDistance = length(input.view);
@@ -402,11 +424,24 @@ PSOutput psMain(PSInput input
 		float3 tint = lerp(saturate(luminance * 2).xxx, texel0.rgb * 1.5, specularParams.z);
 		color.rgb = saturate(color.rgb + specular * tint);
 	}
-	
+
+	// Lava glows on its own: not darkened by the lighting, the bright cracks are hot and pulse, the dark crust cools
+	float3 lavaGlow = float3(0, 0, 0);
+	[branch] if(lava) {
+		float heat = smoothstep(0.3, 0.85, dot(texel0.rgb, float3(0.299, 0.587, 0.114)));
+		float3 lit = lerp(color.rgb, texel0.rgb, 0.7 * effectParams.y);
+		color.rgb = lit * lerp(0.7, 1, heat);
+		lavaGlow = float3(1, 0.45, 0.08) * (heat * heat * lavaPulse(input.world, effectParams.x) * 0.7
+		                                    * effectParams.y);
+	}
+
 	if(fogParams.z != 0) {
 		float f = saturate((fogParams.y - input.fog) / max(fogParams.y - fogParams.x, 0.0001));
 		color.rgb = lerp(fogColor.rgb, color.rgb, f);
 	}
+
+	// The glow shines through the fog
+	color.rgb = saturate(color.rgb + lavaGlow);
 	
 	if(color.a <= fogParams.w) {
 		discard;

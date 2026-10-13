@@ -31,7 +31,7 @@ static const struct {
 	std::string_view tag;
 	D3D11Texture::Specular specular;
 } surfaceMaterials[] = {
-	{ "lava",    { 0.f, 1.f, 0.f, 0.f } },
+	{ "lava",    { 0.f, 1.f, 0.f, 0.f, 1.f } },
 	{ "water",   { 1.f, 96.f, 0.f, 1.f } },
 	{ "wet",     { 0.8f, 64.f, 0.f, 0.f } },
 	{ "blood",   { 0.7f, 64.f, 0.3f, 0.f } },

@@ -452,7 +452,7 @@ private:
 	static constexpr UINT NormalMapSlot = 3;
 	float m_vsConstantsData[56];
 	bool m_vsConstantsValid;
-	unsigned char m_psConstantsData[128];
+	unsigned char m_psConstantsData[160];
 	bool m_psConstantsValid;
 	
 	// Per-pixel lighting of world geometry
@@ -462,6 +462,7 @@ private:
 	float m_parallaxStrength;
 	float m_specularStrength;
 	bool m_waterSurface;
+	float m_effectTime; //!< Seconds for animated surfaces (lava), fixed during a frame
 	ComPtr<ID3D11PixelShader> m_normalMapPixelShader;
 	bool m_pixelLightsWarned;
 	
