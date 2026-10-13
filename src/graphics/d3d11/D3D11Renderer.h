@@ -144,6 +144,8 @@ public:
 	bool supportsReflections() const override { return true; }
 	void setReflections(float strength) override;
 	void setWaterSurface(bool water) override { m_waterSurface = water; m_stateValid = false; }
+	bool supportsModelTessellation() const override;
+	void setModelTessellation(bool enabled) override { m_modelTessellation = enabled; }
 	
 	//! \return true if relief maps are generated for textures, for normal maps or parallax mapping
 	bool reliefMapsEnabled() const {
@@ -249,7 +251,9 @@ private:
 	
 	void flushState(VertexType type);
 	void bindVertexBuffer(VertexType type, ID3D11Buffer * buffer, UINT stride, UINT offset);
-	void setPrimitive(Primitive primitive);
+	//! Model triangle lists are drawn as patches for the hull and domain shaders if tessellation is allowed
+	void setPrimitive(Primitive primitive, bool allowTessellation = true);
+	void bindTessellation(bool enable);
 	bool drawFan(size_t count, size_t baseVertex);
 	bool uploadIndices(const unsigned short * indices, size_t nindices, Primitive primitive, UINT & start,
 	                   size_t & count);
@@ -280,6 +284,7 @@ private:
 	// 3D scene rendered at a lower resolution
 	float m_sceneScale;
 	bool m_inScene;
+	bool m_drawingScene; //!< Between beginScene() and endScene(), also without the scene targets
 	Vec2i m_sceneSize;
 	ComPtr<ID3D11Texture2D> m_sceneColorTarget;
 	ComPtr<ID3D11RenderTargetView> m_sceneColorView;
@@ -372,6 +377,9 @@ private:
 	ComPtr<ID3D11VertexShader> m_clearVertexShader;
 	ComPtr<ID3D11PixelShader> m_clearPixelShader;
 	ComPtr<ID3D11VertexShader> m_blitVertexShader;
+	ComPtr<ID3D11VertexShader> m_modelPatchVertexShader;
+	ComPtr<ID3D11HullShader> m_modelHullShader;
+	ComPtr<ID3D11DomainShader> m_modelDomainShader;
 	ComPtr<ID3D11PixelShader> m_blitPixelShader;
 	ComPtr<ID3D11SamplerState> m_blitSampler;
 	ComPtr<ID3D11PixelShader> m_motionPixelShader;
@@ -429,6 +437,8 @@ private:
 	// Cached device state
 	bool m_stateValid;
 	VertexType m_currentVertexType;
+	bool m_modelTessellation; //!< Set around model batches by setModelTessellation()
+	bool m_tessellationBound; //!< The hull and domain shaders are bound
 	ID3D11Buffer * m_currentVertexBuffer;
 	UINT m_currentVertexOffset;
 	D3D11_PRIMITIVE_TOPOLOGY m_currentTopology;
@@ -440,7 +450,7 @@ private:
 	ID3D11SamplerState * m_currentSamplers[3];
 	ID3D11ShaderResourceView * m_currentNormalView;
 	static constexpr UINT NormalMapSlot = 3;
-	float m_vsConstantsData[40];
+	float m_vsConstantsData[56];
 	bool m_vsConstantsValid;
 	unsigned char m_psConstantsData[128];
 	bool m_psConstantsValid;
@@ -463,6 +473,8 @@ private:
 	std::string m_fpsLogPath;
 	LONGLONG m_fpsLogStart;
 	u32 m_fpsLogFrames;
+	u32 m_fpsLogTessellatedDraws;
+	u32 m_fpsLogModelDraws;
 	
 	friend class D3D11TextureStage;
 	

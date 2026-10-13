@@ -56,6 +56,7 @@ struct VSConstants {
 	float jitter[4];
 	float camera[4]; // World position of the camera
 	float modelToWorld[16]; // From pre-transformed model vertices to world space, for per-pixel highlights
+	float worldToClip[16]; // From world space to clip space in the 3D scene, for tessellated models
 };
 
 struct MotionConstants {
@@ -231,6 +232,7 @@ D3D11Renderer::D3D11Renderer()
 	, m_msaaSamples(1)
 	, m_sceneScale(1.f)
 	, m_inScene(false)
+	, m_drawingScene(false)
 	, m_sceneSize(0)
 	, m_ambientOcclusion(false)
 	, m_ambientOcclusionStrength(0.f)
@@ -269,6 +271,8 @@ D3D11Renderer::D3D11Renderer()
 	, m_fogEnd(1.f)
 	, m_stateValid(false)
 	, m_currentVertexType(VertexTL)
+	, m_modelTessellation(false)
+	, m_tessellationBound(false)
 	, m_currentVertexBuffer(nullptr)
 	, m_currentVertexOffset(0)
 	, m_currentTopology(D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED)
@@ -293,6 +297,8 @@ D3D11Renderer::D3D11Renderer()
 	, m_snapshotTime(0)
 	, m_fpsLogStart(0)
 	, m_fpsLogFrames(0)
+	, m_fpsLogTessellatedDraws(0)
+	, m_fpsLogModelDraws(0)
 { }
 
 D3D11Renderer::~D3D11Renderer() {
@@ -315,7 +321,8 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	m_window = window;
 	
 	// Debug view for the scene: 1 = depth, 2 = motion vectors, 3 = per-object motion, 4 = ambient occlusion,
-	// 5 = bloom, 6 = per-pixel dynamic light, 7 = reflections, 8 = highlights of models
+	// 5 = bloom, 6 = per-pixel dynamic light, 7 = reflections, 8 = highlights of models,
+	// 9 = models as wireframes
 	{
 		char value[16];
 		DWORD length = GetEnvironmentVariableA("ARX_SCENE_DEBUG", value, sizeof(value));
@@ -560,12 +567,13 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 }
 
 static ComPtr<ID3DBlob> compileShader(const char * entry, const char * target,
-                                      const D3D_SHADER_MACRO * defines = nullptr) {
+                                      const D3D_SHADER_MACRO * defines = nullptr,
+                                      std::string_view source = d3d11ShaderSource) {
 	
 	ComPtr<ID3DBlob> code;
 	ComPtr<ID3DBlob> errors;
 	
-	HRESULT hr = D3DCompile(d3d11ShaderSource, sizeof(d3d11ShaderSource) - 1, "arx-d3d11", defines, nullptr,
+	HRESULT hr = D3DCompile(source.data(), source.size(), "arx-d3d11", defines, nullptr,
 	                        entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
 	if(FAILED(hr)) {
 		LogError << "Failed to compile Direct3D 11 shader " << entry << ": "
@@ -588,6 +596,8 @@ bool D3D11Renderer::compileShaders() {
 		{ "PREVPOSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, UINT(offsetof(TexturedVertex, prevP)),
 		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
 		{ "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, UINT(offsetof(TexturedVertex, normal)),
+		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TESSELLATION", 0, DXGI_FORMAT_R32_UINT, 0, UINT(offsetof(TexturedVertex, tessellation)),
 		  D3D11_INPUT_PER_VERTEX_DATA, 0 },
 	};
 	static_assert(offsetof(TexturedVertex, w) == offsetof(TexturedVertex, p) + 3 * sizeof(float),
@@ -732,6 +742,26 @@ bool D3D11Renderer::compileShaders() {
 			                                               nullptr, &*info.shader))) {
 				LogWarning << "Failed to create Direct3D 11 shader " << info.entry;
 			}
+		}
+	}
+	
+	// Models are tessellated with hull and domain shaders, which need feature level 11
+	if(m_featureLevel >= D3D_FEATURE_LEVEL_11_0 && GetEnvironmentVariableA("ARX_D3D11_NO_TESSELLATION", nullptr, 0) == 0) {
+		std::string source = std::string(d3d11ShaderSource) + d3d11ModelPatchSource + d3d11ModelPatchStagesSource;
+		ComPtr<ID3DBlob> vertex = compileShader("vsModelPatch", "vs_5_0", nullptr, source);
+		ComPtr<ID3DBlob> hull = compileShader("hsModelPatch", "hs_5_0", nullptr, d3d11ModelPatchSource);
+		ComPtr<ID3DBlob> domain = compileShader("dsModelPatch", "ds_5_0", nullptr, source);
+		if(!vertex || !hull || !domain
+		   || FAILED(m_device->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr,
+		                                         &m_modelPatchVertexShader))
+		   || FAILED(m_device->CreateHullShader(hull->GetBufferPointer(), hull->GetBufferSize(), nullptr,
+		                                       &m_modelHullShader))
+		   || FAILED(m_device->CreateDomainShader(domain->GetBufferPointer(), domain->GetBufferSize(), nullptr,
+		                                         &m_modelDomainShader))) {
+			LogWarning << "Model tessellation not available";
+			m_modelPatchVertexShader.Reset();
+			m_modelHullShader.Reset();
+			m_modelDomainShader.Reset();
 		}
 	}
 	
@@ -1119,7 +1149,7 @@ void D3D11Renderer::releaseSceneTargets() {
 
 bool D3D11Renderer::sceneEnabled() const {
 	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion || m_bloom
-	       || m_colorGrading != 0;
+	       || m_colorGrading != 0 || m_reflectionStrength > 0.f;
 }
 
 void D3D11Renderer::setColorGrading(std::string_view preset) {
@@ -1551,6 +1581,7 @@ void D3D11Renderer::updateSceneCamera() {
 
 void D3D11Renderer::drawFullscreen(ID3D11PixelShader * shader) {
 	
+	bindTessellation(false);
 	m_context->IASetInputLayout(nullptr);
 	m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	m_currentTopology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
@@ -1675,6 +1706,8 @@ void D3D11Renderer::beginScene() {
 		return;
 	}
 	
+	m_drawingScene = true;
+	
 	updateUpscaler();
 	
 	if(!sceneEnabled()) {
@@ -1718,6 +1751,8 @@ void D3D11Renderer::beginScene() {
 }
 
 void D3D11Renderer::endScene() {
+	
+	m_drawingScene = false;
 	
 	if(!m_inScene) {
 		return;
@@ -2220,6 +2255,7 @@ void D3D11Renderer::Clear(BufferFlags bufferFlags, Color clearColor, float clear
 	m_context->UpdateSubresource(m_clearConstants.Get(), 0, nullptr, &constants, 0, 0);
 	
 	m_context->OMSetRenderTargets(1, &colorView, depthView);
+	bindTessellation(false);
 	m_context->IASetInputLayout(nullptr);
 	m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	m_context->VSSetShader(m_clearVertexShader.Get(), nullptr, 0);
@@ -2369,8 +2405,41 @@ bool D3D11Renderer::uploadIndices(const unsigned short * indices, size_t nindice
 	return true;
 }
 
-void D3D11Renderer::setPrimitive(Primitive primitive) {
-	D3D11_PRIMITIVE_TOPOLOGY topology = arxToD3DPrimitive[primitive];
+bool D3D11Renderer::supportsModelTessellation() const {
+	return m_drawingScene && m_modelHullShader && m_modelDomainShader && m_modelPatchVertexShader;
+}
+
+void D3D11Renderer::bindTessellation(bool enable) {
+	
+	if(enable == m_tessellationBound) {
+		return;
+	}
+	
+	m_context->HSSetShader(enable ? m_modelHullShader.Get() : nullptr, nullptr, 0);
+	m_context->DSSetShader(enable ? m_modelDomainShader.Get() : nullptr, nullptr, 0);
+	if(enable) {
+		m_context->VSSetShader(m_modelPatchVertexShader.Get(), nullptr, 0);
+	} else if(m_currentVertexType < VertexTypeCount) {
+		m_context->VSSetShader(m_vertexShaders[m_currentVertexType].Get(), nullptr, 0);
+	}
+	m_tessellationBound = enable;
+	
+}
+
+void D3D11Renderer::setPrimitive(Primitive primitive, bool allowTessellation) {
+	
+	if(m_modelTessellation) {
+		m_fpsLogModelDraws++;
+	}
+	bool tessellate = allowTessellation && primitive == TriangleList && m_modelTessellation
+	                  && m_currentVertexType == VertexTL && supportsModelTessellation();
+	bindTessellation(tessellate);
+	if(tessellate) {
+		m_fpsLogTessellatedDraws++;
+	}
+	
+	D3D11_PRIMITIVE_TOPOLOGY topology = tessellate ? D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST
+	                                               : arxToD3DPrimitive[primitive];
 	if(topology != m_currentTopology) {
 		m_context->IASetPrimitiveTopology(topology);
 		m_currentTopology = topology;
@@ -2405,7 +2474,7 @@ bool D3D11Renderer::drawFan(size_t count, size_t baseVertex) {
 		return false;
 	}
 	
-	setPrimitive(TriangleList);
+	setPrimitive(TriangleList, false);
 	m_context->DrawIndexed(UINT(nindices), start, INT(baseVertex));
 	
 	return true;
@@ -2580,7 +2649,11 @@ void D3D11Renderer::present() {
 		if(seconds >= 5.0) {
 			double frames = double(m_fpsLogFrames - 1);
 			fs::ofstream log(fs::path(m_fpsLogPath), std::ios_base::app);
-			log << int(frames / seconds + 0.5) << " fps, " << float(seconds * 1000.0 / frames) << " ms" << std::endl;
+			log << int(frames / seconds + 0.5) << " fps, " << float(seconds * 1000.0 / frames) << " ms, "
+			    << float(double(m_fpsLogTessellatedDraws) / frames) << " of " << float(double(m_fpsLogModelDraws) / frames)
+			    << " model draws tessellated" << std::endl;
+			m_fpsLogTessellatedDraws = 0;
+			m_fpsLogModelDraws = 0;
 			m_fpsLogStart = now.QuadPart;
 			m_fpsLogFrames = 1;
 		}
@@ -2765,6 +2838,8 @@ void D3D11Renderer::flushState(VertexType type) {
 		
 		ID3D11Buffer * vsConstants = m_vsConstants.Get();
 		m_context->VSSetConstantBuffers(0, 1, &vsConstants);
+		m_context->HSSetConstantBuffers(0, 1, &vsConstants);
+		m_context->DSSetConstantBuffers(0, 1, &vsConstants);
 		ID3D11Buffer * psConstants = m_psConstants.Get();
 		m_context->PSSetConstantBuffers(0, 1, &psConstants);
 		ID3D11Buffer * lightConstants = m_lightConstants.Get();
@@ -2780,6 +2855,7 @@ void D3D11Renderer::flushState(VertexType type) {
 	if(force || type != m_currentVertexType) {
 		m_context->IASetInputLayout(m_inputLayouts[type].Get());
 		m_context->VSSetShader(m_vertexShaders[type].Get(), nullptr, 0);
+		bindTessellation(false);
 		m_currentVertexType = type;
 	}
 	
@@ -2809,10 +2885,12 @@ void D3D11Renderer::flushState(VertexType type) {
 		constants.camera[3] = 0.f;
 		// Pre-transformed vertices of models in the 3D scene go back to world space with the scene camera
 		glm::mat4x4 modelToWorld(1.f);
-		if(type == VertexTL && m_inScene) {
+		if(type == VertexTL && m_drawingScene) {
 			modelToWorld = glm::mat4x4(glm::inverse(glm::dmat4(m_projection) * glm::dmat4(m_view)) * glm::dmat4(transform));
 		}
 		std::memcpy(constants.modelToWorld, &modelToWorld, sizeof(constants.modelToWorld));
+		glm::mat4x4 worldToClip = m_projection * m_view;
+		std::memcpy(constants.worldToClip, &worldToClip, sizeof(constants.worldToClip));
 		static_assert(sizeof(constants) == sizeof(m_vsConstantsData), "unexpected constant buffer size");
 		if(!m_vsConstantsValid || std::memcmp(m_vsConstantsData, &constants, sizeof(constants)) != 0) {
 			std::memcpy(m_vsConstantsData, &constants, sizeof(constants));
@@ -2881,8 +2959,10 @@ void D3D11Renderer::flushState(VertexType type) {
 		m_currentPixelShader = pixelShader;
 	}
 	
+	// Debug view 9 shows models as wireframes
+	bool wireframe = m_wireframe || (m_sceneDebugView == 9 && m_modelTessellation && type == VertexTL);
 	ID3D11RasterizerState * rasterizer = getRasterizerState(m_state.getCull(), m_state.getDepthOffset(),
-	                                                        m_wireframe, m_scissor.isValid());
+	                                                        wireframe, m_scissor.isValid());
 	if(force || rasterizer != m_currentRasterizer) {
 		m_context->RSSetState(rasterizer);
 		m_currentRasterizer = rasterizer;
@@ -2938,7 +3018,7 @@ void D3D11Renderer::flushState(VertexType type) {
 			}
 			
 			// Highlights from the material of the main texture
-			if(texture && (type == VertexWorld || (type == VertexTL && m_inScene)) && m_specularStrength > 0.f) {
+			if(texture && (type == VertexWorld || (type == VertexTL && m_drawingScene)) && m_specularStrength > 0.f) {
 				const D3D11Texture::Specular & specular = texture->specular();
 				constants.specular[0] = specular.strength * m_specularStrength * SpecularScale;
 				constants.specular[1] = specular.exponent;

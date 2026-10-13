@@ -496,6 +496,15 @@ public:
 	virtual void setWaterSurface(bool water) { ARX_UNUSED(water); }
 	
 	/*!
+	 * \return true if the renderer currently turns model triangles into curved patches itself, using
+	 *         TexturedVertex::tessellation and TexturedVertex::normal, see animation/MeshSmoothing.h
+	 */
+	[[nodiscard]] virtual bool supportsModelTessellation() const { return false; }
+	
+	//! Mark the following triangle lists as model batches that may be tessellated, until reset
+	virtual void setModelTessellation(bool enabled) { ARX_UNUSED(enabled); }
+	
+	/*!
 	 * Set the lights for per-pixel lighting of world vertices with a non-zero normal.
 	 * Lights that only add highlights must come after all other lights.
 	 */

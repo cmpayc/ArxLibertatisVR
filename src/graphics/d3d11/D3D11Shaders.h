@@ -37,6 +37,7 @@ cbuffer VSConstants : register(b0) {
 	float4 jitter; // xy = sub-pixel offset in normalized device coordinates
 	float4 camera; // World position of the camera
 	float4x4 modelToWorld; // From pre-transformed model vertices to world space, for per-pixel highlights
+	float4x4 worldToClip; // From world space to clip space in the 3D scene, for tessellated models
 };
 
 cbuffer PSConstants : register(b0) {
@@ -919,6 +920,153 @@ float4 psNormalMap(float4 position : SV_Position) : SV_Target {
 	float relativeHeight = 0.5 + (coarse - average) * 2;
 	
 	return saturate(float4(du * 0.125 + 0.5, dv * 0.125 + 0.5, relativeHeight, 1));
+}
+
+)HLSL";
+
+// The hull shader is compiled from this part alone, it crashes the shader compiler in the full source
+static const char d3d11ModelPatchSource[] = R"HLSL(
+
+/*
+ * Tessellated models: model triangles from the CPU become curved point-normal triangles (Vlachos et al. 2001)
+ * like in animation/MeshSmoothing.cpp. The corners stay where the CPU put them and the curved surface is
+ * added as an offset, so that tessellated and other triangles of a model meet exactly.
+ */
+
+struct ModelPatchVertex {
+	float3 world : WORLDPOS;
+	float3 normal : NORMAL;
+	float4 color : COLOR0;
+	float2 uv : TEXCOORD0;
+	float4 clip : TEXCOORD4;
+	float4 prevClip : TEXCOORD5;
+	uint tessellation : TESSELLATION;
+};
+
+struct ModelPatchConstants {
+	float edges[3] : SV_TessFactor;
+	float inside : SV_InsideTessFactor;
+	// Control points of the cubic Bezier triangle, bijk has the weight a^i b^j c^k
+	float3 b210 : CONTROLPOINT0;
+	float3 b120 : CONTROLPOINT1;
+	float3 b021 : CONTROLPOINT2;
+	float3 b012 : CONTROLPOINT3;
+	float3 b102 : CONTROLPOINT4;
+	float3 b201 : CONTROLPOINT5;
+	float3 b111 : CONTROLPOINT6;
+};
+
+// Control point next to corner p on the edge towards q, projected onto the tangent plane at p if curve is 1
+float3 modelEdgeControlPoint(float3 p, float3 q, float3 n, float curve) {
+	return (2 * p + q - dot(q - p, n) * n * curve) / 3;
+}
+
+ModelPatchConstants hsModelPatchConstants(InputPatch<ModelPatchVertex, 3> patch) {
+	
+	// All corners have the same tessellation value
+	uint tessellation = patch[0].tessellation;
+	float segments = max(float(tessellation >> 3), 1);
+	
+	// The shader compiler crashes for conditionally straight edges, use weights instead
+	float curve01 = 1 - float(tessellation & 1);
+	float curve12 = 1 - float((tessellation >> 1) & 1);
+	float curve20 = 1 - float((tessellation >> 2) & 1);
+	
+	float3 p0 = patch[0].world;
+	float3 p1 = patch[1].world;
+	float3 p2 = patch[2].world;
+	float3 n0 = patch[0].normal;
+	float3 n1 = patch[1].normal;
+	float3 n2 = patch[2].normal;
+	float3 b210 = modelEdgeControlPoint(p0, p1, n0, curve01);
+	float3 b120 = modelEdgeControlPoint(p1, p0, n1, curve01);
+	float3 b021 = modelEdgeControlPoint(p1, p2, n1, curve12);
+	float3 b012 = modelEdgeControlPoint(p2, p1, n2, curve12);
+	float3 b102 = modelEdgeControlPoint(p2, p0, n2, curve20);
+	float3 b201 = modelEdgeControlPoint(p0, p2, n0, curve20);
+	float3 e = (b210 + b120 + b021 + b012 + b102 + b201) / 6;
+	float3 v = (p0 + p1 + p2) / 3;
+	
+	ModelPatchConstants c;
+	c.edges[0] = segments;
+	c.edges[1] = segments;
+	c.edges[2] = segments;
+	c.inside = segments;
+	c.b210 = b210;
+	c.b120 = b120;
+	c.b021 = b021;
+	c.b012 = b012;
+	c.b102 = b102;
+	c.b201 = b201;
+	c.b111 = e + (e - v) * 0.5;
+	
+	return c;
+}
+
+[domain("tri")]
+[partitioning("integer")]
+[outputtopology("triangle_ccw")]
+[outputcontrolpoints(3)]
+[patchconstantfunc("hsModelPatchConstants")]
+ModelPatchVertex hsModelPatch(InputPatch<ModelPatchVertex, 3> patch, uint id : SV_OutputControlPointID) {
+	return patch[id];
+}
+
+)HLSL";
+
+// Compiled after d3d11ShaderSource and d3d11ModelPatchSource
+static const char d3d11ModelPatchStagesSource[] = R"HLSL(
+
+ModelPatchVertex vsModelPatch(float4 position : POSITION, float4 color : COLOR, float2 uv : TEXCOORD0,
+                              float4 prevPosition : PREVPOSITION, float3 normal : NORMAL,
+                              uint tessellation : TESSELLATION) {
+	ModelPatchVertex o;
+	float4 world = mul(modelToWorld, position);
+	o.world = world.xyz / world.w;
+	o.normal = normal;
+	o.color = color;
+	o.uv = uv;
+	o.clip = mul(transform, position);
+	o.prevClip = prevPosition.w > 0 ? mul(transform, prevPosition) : float4(0, 0, 0, 0);
+	o.tessellation = tessellation;
+	return o;
+}
+
+[domain("tri")]
+VSOutput dsModelPatch(ModelPatchConstants c, float3 location : SV_DomainLocation,
+                      const OutputPatch<ModelPatchVertex, 3> patch) {
+	
+	float a = location.x;
+	float b = location.y;
+	float d = location.z;
+	
+	float3 flat = a * patch[0].world + b * patch[1].world + d * patch[2].world;
+	float3 world = a * a * a * patch[0].world + b * b * b * patch[1].world + d * d * d * patch[2].world
+	               + 3 * a * a * b * c.b210 + 3 * a * b * b * c.b120
+	               + 3 * b * b * d * c.b021 + 3 * b * d * d * c.b012
+	               + 3 * d * d * a * c.b102 + 3 * d * a * a * c.b201
+	               + 6 * a * b * d * c.b111;
+	
+	// The curved surface is an offset to the flat triangle, which moves with it between frames
+	float4 offset = mul(worldToClip, float4(world - flat, 0));
+	float4 clip = a * patch[0].clip + b * patch[1].clip + d * patch[2].clip + offset;
+	float4 prevClip = float4(0, 0, 0, 0);
+	if(patch[0].prevClip.w > 0 && patch[1].prevClip.w > 0 && patch[2].prevClip.w > 0) {
+		prevClip = a * patch[0].prevClip + b * patch[1].prevClip + d * patch[2].prevClip + offset;
+	}
+	
+	float4 color = a * patch[0].color + b * patch[1].color + d * patch[2].color;
+	float2 uv = a * patch[0].uv + b * patch[1].uv + d * patch[2].uv;
+	VSOutput o = makeOutput(clip, prevClip, color, uv, float2(0, 0), float2(0, 0));
+	
+	float3 normal = a * patch[0].normal + b * patch[1].normal + d * patch[2].normal;
+	if(dot(normal, normal) > 0) {
+		o.world = world;
+		o.normal = normalize(normal);
+		o.view = camera.xyz - world;
+	}
+	
+	return o;
 }
 
 )HLSL";

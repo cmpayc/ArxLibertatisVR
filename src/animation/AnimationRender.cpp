@@ -192,6 +192,8 @@ void PopAllTriangleListOpaque(RenderState baseState, bool clear) {
 	
 	ARX_PROFILE_FUNC();
 	
+	GRenderer->setModelTessellation(true);
+	
 	// TODO sort texture list according to material properties to reduce state changes
 	TextureContainer * pTex = GetTextureList();
 	while(pTex) {
@@ -199,11 +201,15 @@ void PopAllTriangleListOpaque(RenderState baseState, bool clear) {
 		pTex = pTex->m_pNext;
 	}
 	
+	GRenderer->setModelTessellation(false);
+	
 }
 
 void PopAllTriangleListTransparency() {
 	
 	ARX_PROFILE_FUNC();
+	
+	GRenderer->setModelTessellation(true);
 	
 	GRenderer->SetFogColor(Color());
 	
@@ -216,6 +222,8 @@ void PopAllTriangleListTransparency() {
 	}
 	
 	GRenderer->SetFogColor(g_fogColor);
+	
+	GRenderer->setModelTessellation(false);
 	
 }
 
@@ -795,7 +803,11 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 		TexturedVertex smoothed[MeshSmoothingMaxSegments * MeshSmoothingMaxSegments * 3];
 		size_t triangles = 1;
 		const TexturedVertex * vertices = tvList;
-		if(segments > 1) {
+		if(segments > 1 && GRenderer->supportsModelTessellation()) {
+			// The renderer curves the triangle itself
+			u32 tessellation = (u32(segments) << 3) | eobj->smoothing.creases[i];
+			tvList[0].tessellation = tvList[1].tessellation = tvList[2].tessellation = tessellation;
+		} else if(segments > 1) {
 			// The corners are already lit with the smooth normals, interpolating their colors is good enough for
 			// objects and much faster than lighting every new vertex
 			triangles = smoothFace(*eobj, i, tvList, segments, nullptr, smoothed);
@@ -1126,7 +1138,11 @@ static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
 		TexturedVertex smoothed[MeshSmoothingMaxSegments * MeshSmoothingMaxSegments * 3];
 		size_t triangles = 1;
 		const TexturedVertex * vertices = corners;
-		if(segments > 1) {
+		if(segments > 1 && GRenderer->supportsModelTessellation()) {
+			// The renderer curves the triangle itself
+			u32 tessellation = (u32(segments) << 3) | eobj->smoothing.creases[i];
+			corners[0].tessellation = corners[1].tessellation = corners[2].tessellation = tessellation;
+		} else if(segments > 1) {
 			bool fixedColor = (face.facetype & POLY_TRANS) || invisibility > 0.f;
 			triangles = smoothFace(*eobj, i, corners, segments, fixedColor ? nullptr : lighting, smoothed);
 			vertices = smoothed;
