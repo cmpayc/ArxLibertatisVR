@@ -143,48 +143,37 @@ VSOutput vsWorld(float3 position : POSITION, float4 color : COLOR, float2 uv : T
 static const float ParallaxFadeStart = 1200;
 static const float ParallaxFadeEnd = 2000;
 
-// Same falloff as ApplyTileLights(), evaluated per pixel
-float3 pixelLighting(float3 position, float3 normal) {
-	float3 sum = float3(0, 0, 0);
-	[loop] for(int i = 0; i < lightCount.x; i++) {
+// Diffuse light of the first diffuseCount lights and Blinn-Phong highlights of all lights if the exponent is not
+// zero, with the same falloff as ApplyTileLights()
+void pixelLighting(float3 position, float3 normal, float3 view, int diffuseCount, int count, float exponent,
+                   out float3 diffuse, out float3 specular) {
+	diffuse = float3(0, 0, 0);
+	specular = float3(0, 0, 0);
+	[loop] for(int i = 0; i < count; i++) {
 		float4 a = lights[i * 2];
 		float4 b = lights[i * 2 + 1];
 		float3 toLight = a.xyz - position;
-		float distance = length(toLight);
-		if(distance >= b.w) {
+		float distance2 = dot(toLight, toLight);
+		if(distance2 >= b.w * b.w) {
 			continue;
 		}
-		float cosAngle = dot(normal, toLight / max(distance, 0.0001));
+		float distance = sqrt(distance2);
+		float3 direction = toLight / max(distance, 0.0001);
+		float cosAngle = dot(normal, direction);
 		if(cosAngle <= 0) {
 			continue;
 		}
 		float falloff = (distance <= a.w) ? 1 : saturate((b.w - distance) / max(b.w - a.w, 0.0001));
-		sum += b.rgb * (cosAngle * falloff);
-	}
-	return sum;
-}
-
-// Blinn-Phong highlights of all lights, with the same falloff as the diffuse light
-float3 specularLighting(float3 position, float3 normal, float3 view, float exponent) {
-	float3 sum = float3(0, 0, 0);
-	[loop] for(int i = 0; i < lightCount.z; i++) {
-		float4 a = lights[i * 2];
-		float4 b = lights[i * 2 + 1];
-		float3 toLight = a.xyz - position;
-		float distance = length(toLight);
-		if(distance >= b.w) {
-			continue;
+		if(i < diffuseCount) {
+			diffuse += b.rgb * (cosAngle * falloff);
 		}
-		float3 direction = toLight / max(distance, 0.0001);
-		if(dot(normal, direction) <= 0) {
-			continue;
+		if(exponent > 0) {
+			float cosHalf = saturate(dot(normal, normalize(direction + view)));
+			specular += b.rgb * (pow(cosHalf, exponent) * falloff);
 		}
-		float falloff = (distance <= a.w) ? 1 : saturate((b.w - distance) / max(b.w - a.w, 0.0001));
-		float cosHalf = saturate(dot(normal, normalize(direction + view)));
-		sum += b.rgb * (pow(cosHalf, exponent) * falloff);
 	}
 	// Sharper highlights are brighter so that they keep about the same energy
-	return sum * ((exponent + 8) / 32);
+	specular *= (exponent + 8) / 32;
 }
 
 VSOutput vsWorld3(float3 position : POSITION, float4 color : COLOR, float2 uv0 : TEXCOORD0,
@@ -292,7 +281,7 @@ PSOutput psMain(PSInput input
 			// Texture coordinate change from the surface to the full depth along the view ray
 			float depth = reliefParams.y * fade / uvPerWorld;
 			float2 offset = -float2(dot(gradU, view), dot(gradV, view)) / det * (depth / max(cosView, 0.2));
-			int steps = int(lerp(32, 8, cosView));
+			int steps = int(lerp(16, 6, cosView));
 			float stepSize = 1.0 / steps;
 			float2 uv = uv0 - offset * 0.5;
 			float2 delta = offset * stepSize;
@@ -310,7 +299,7 @@ PSOutput psMain(PSInput input
 			float startLayer = layer - stepSize;
 			float2 endUV = uv;
 			float endLayer = layer;
-			[unroll] for(int j = 0; j < 5; j++) {
+			[unroll] for(int j = 0; j < 4; j++) {
 				float2 middleUV = (startUV + endUV) * 0.5;
 				float middleLayer = (startLayer + endLayer) * 0.5;
 				if(middleLayer < 1 - reliefMap.SampleGrad(sampler0, middleUV, dx0, dy0).b) {
@@ -341,14 +330,12 @@ PSOutput psMain(PSInput input
 	float3 specular = float3(0, 0, 0);
 	bool shiny = specularParams.x > 0 && lightCount.z > 0;
 	[branch] if((lightCount.x > 0 || shiny) && normalLength > 0.01) {
-		[branch] if(lightCount.x > 0 && !water) {
-			dynamicLight = pixelLighting(input.world, normal);
-			color.rgb = saturate(color.rgb + dynamicLight);
-		}
-		[branch] if(shiny) {
-			float3 view = normalize(input.view);
-			specular = specularLighting(input.world, normal, view, specularParams.y) * specularParams.x;
-		}
+		// Water is only drawn on top of the lit ground, it only gets the highlights
+		int diffuseCount = water ? 0 : lightCount.x;
+		pixelLighting(input.world, normal, normalize(input.view), diffuseCount, shiny ? lightCount.z : diffuseCount,
+		              shiny ? specularParams.y : 0, dynamicLight, specular);
+		specular *= specularParams.x;
+		color.rgb = saturate(color.rgb + dynamicLight);
 	}
 	
 	float4 texel0 = float4(1, 1, 1, 1);
@@ -511,6 +498,13 @@ cbuffer AmbientOcclusionConstants : register(b3) {
 Texture2D<float> aoDepth : register(t0);
 Texture2D<float> aoInput : register(t1);
 
+// The ambient occlusion is computed at half the scene size from every second depth pixel
+static const int AoScale = 2;
+
+int2 aoHalfSize() {
+	return (int2(aoTarget.xy) + AoScale - 1) / AoScale;
+}
+
 float aoViewDistance(float depth) {
 	return aoProjection.z * aoProjection.w / (aoProjection.w - depth * (aoProjection.w - aoProjection.z));
 }
@@ -524,7 +518,7 @@ float3 aoViewPosition(int2 pixel) {
 
 float psAmbientOcclusion(float4 position : SV_Position) : SV_Target {
 	
-	int2 pixel = int2(position.xy);
+	int2 pixel = int2(position.xy) * AoScale;
 	float depth = aoDepth.Load(int3(pixel, 0));
 	if(depth >= 0.99999) {
 		return 1; // Sky or nothing rendered
@@ -585,12 +579,12 @@ float psAmbientOcclusionBlur(float4 position : SV_Position) : SV_Target {
 	int2 axis = int2(1, 0);
 	#endif
 	
-	float centerDistance = aoViewDistance(aoDepth.Load(int3(pixel, 0)));
+	float centerDistance = aoViewDistance(aoDepth.Load(int3(pixel * AoScale, 0)));
 	float sum = 0;
 	float weights = 0;
 	[unroll] for(int i = -4; i <= 4; i++) {
-		int2 p = clamp(pixel + axis * i, int2(0, 0), int2(aoTarget.xy) - 1);
-		float distance = aoViewDistance(aoDepth.Load(int3(p, 0)));
+		int2 p = clamp(pixel + axis * i, int2(0, 0), aoHalfSize() - 1);
+		float distance = aoViewDistance(aoDepth.Load(int3(p * AoScale, 0)));
 		float weight = exp(-float(i * i) / 12) * exp(-abs(distance - centerDistance) / (centerDistance * 0.02 + 1));
 		sum += aoInput.Load(int3(p, 0)) * weight;
 		weights += weight;
@@ -599,9 +593,26 @@ float psAmbientOcclusionBlur(float4 position : SV_Position) : SV_Target {
 	return sum / weights;
 }
 
-// Multiplied into the scene color by the blend state
+// Upsampled from the four nearest half size values with similar depth, multiplied into the scene color by the
+// blend state
 float4 psApplyAmbientOcclusion(float4 position : SV_Position) : SV_Target {
-	float ao = lerp(1, aoInput.Load(int3(int2(position.xy), 0)), aoParams.y);
+	int2 pixel = int2(position.xy);
+	float centerDistance = aoViewDistance(aoDepth.Load(int3(pixel, 0)));
+	float2 halfPosition = (float2(pixel) + 0.5) / AoScale - 0.5;
+	int2 base = int2(floor(halfPosition));
+	float2 f = halfPosition - float2(base);
+	float sum = 0;
+	float weights = 0;
+	[unroll] for(int i = 0; i < 4; i++) {
+		int2 offset = int2(i & 1, i >> 1);
+		int2 p = clamp(base + offset, int2(0, 0), aoHalfSize() - 1);
+		float2 bilinear = lerp(1 - f, f, float2(offset));
+		float distance = aoViewDistance(aoDepth.Load(int3(p * AoScale, 0)));
+		float weight = bilinear.x * bilinear.y * exp(-abs(distance - centerDistance) / (centerDistance * 0.02 + 1)) + 1e-4;
+		sum += aoInput.Load(int3(p, 0)) * weight;
+		weights += weight;
+	}
+	float ao = lerp(1, sum / weights, aoParams.y);
 	return float4(ao.xxx, 1);
 }
 
@@ -609,6 +620,8 @@ float4 psDebugAmbientOcclusion(BlitOutput input) : SV_Target {
 	return float4(texture0.Sample(sampler0, input.uv).rrr, 1);
 }
 
+)HLSL"
+R"HLSL(
 /*
  * Screen-space reflections: the reflected view ray of reflective pixels is marched through the scene depth and the
  * scene color where it hits is blended in, blurrier for rougher surfaces. Positions are reconstructed like for the

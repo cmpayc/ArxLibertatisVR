@@ -264,8 +264,10 @@ void PrecalcDynamicLighting(const Vec3f & camPos, float camDepth) {
 }
 
 // Static lights for highlights: at most this many, at most this far from the camera beyond their range
-static const size_t MaxSpecularLights = 48;
+static const size_t MaxSpecularLights = 24;
 static const float SpecularLightDistance = 1000.f;
+// Lights outside of a cone with this half angle around the view direction cannot light visible pixels
+static const float SpecularLightCone = glm::radians(65.f);
 
 void UploadPixelLights() {
 	
@@ -295,6 +297,7 @@ void UploadPixelLights() {
 	// Static lights are already in the vertex colors but can add highlights to shiny surfaces
 	static std::vector<std::pair<float, const EERIE_LIGHT *>> nearby;
 	nearby.clear();
+	Vec3f forward = angleToVector(g_camera->angle);
 	for(const EERIE_LIGHT & light : g_staticLights) {
 		if(!light.m_ignitionStatus || (light.extras & EXTRAS_SEMIDYNAMIC) || light.rgb == Color3f::black) {
 			continue;
@@ -302,6 +305,14 @@ void UploadPixelLights() {
 		float distance = fdist(light.pos, g_camera->m_pos) - light.fallend;
 		if(distance > SpecularLightDistance) {
 			continue;
+		}
+		Vec3f offset = light.pos - g_camera->m_pos;
+		float center = glm::length(offset);
+		if(center > light.fallend) {
+			float angle = std::acos(glm::clamp(glm::dot(offset / center, forward), -1.f, 1.f));
+			if(angle - std::asin(light.fallend / center) > SpecularLightCone) {
+				continue;
+			}
 		}
 		nearby.emplace_back(distance, &light);
 	}

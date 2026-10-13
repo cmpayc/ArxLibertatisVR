@@ -703,8 +703,10 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 	if(level > 0) {
 		updateMeshSmoothing(*eobj);
 		segments = meshSmoothingSegments(level, fdist(t.pos, g_camera->m_pos));
+		// Small objects on the screen do not need many more triangles
+		Vec2f size = io->bbox2D.max - io->bbox2D.min;
+		segments = std::min(segments, meshSmoothingSegmentsForSize(std::max(size.x, size.y)));
 	}
-	MeshLighting lighting = { lights, lightsCount, &colorMod };
 	
 	for(size_t i = 0; i < eobj->facelist.size(); i++) {
 		const EERIE_FACE & face = eobj->facelist[i];
@@ -791,9 +793,9 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 		size_t triangles = 1;
 		const TexturedVertex * vertices = tvList;
 		if(segments > 1) {
-			bool fixedColor = (face.facetype & (POLY_TRANS | POLY_GLOW)) || invisibility > 0.f
-			                  || (io && player.m_improve) || halo;
-			triangles = smoothFace(*eobj, i, tvList, segments, fixedColor ? nullptr : &lighting, smoothed);
+			// The corners are already lit with the smooth normals, interpolating their colors is good enough for
+			// objects and much faster than lighting every new vertex
+			triangles = smoothFace(*eobj, i, tvList, segments, nullptr, smoothed);
 			vertices = smoothed;
 		}
 		

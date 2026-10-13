@@ -48,6 +48,19 @@ int meshSmoothingSegments(int level, float distance) {
 	return segments;
 }
 
+int meshSmoothingSegmentsForSize(float pixels) {
+	
+	if(pixels < 48.f) {
+		return 1;
+	} else if(pixels < 128.f) {
+		return 2;
+	} else if(pixels < 256.f) {
+		return 3;
+	}
+	
+	return MeshSmoothingMaxSegments;
+}
+
 static Vec3f faceNormal(const Vec3f & a, const Vec3f & b, const Vec3f & c) {
 	return glm::cross(b - a, c - a);
 }

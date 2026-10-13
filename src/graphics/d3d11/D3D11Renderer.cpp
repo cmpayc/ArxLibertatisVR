@@ -41,6 +41,7 @@
 #include "graphics/d3d11/D3D11Upscaler.h"
 #include "graphics/d3d11/D3D11VertexBuffer.h"
 #include "graphics/image/Image.h"
+#include "io/fs/FileStream.h"
 #include "io/log/Logger.h"
 #include "platform/CrashHandler.h"
 #include "platform/WindowsUtils.h"
@@ -289,6 +290,8 @@ D3D11Renderer::D3D11Renderer()
 	, m_waterSurface(false)
 	, m_pixelLightsWarned(false)
 	, m_snapshotTime(0)
+	, m_fpsLogStart(0)
+	, m_fpsLogFrames(0)
 { }
 
 D3D11Renderer::~D3D11Renderer() {
@@ -317,6 +320,15 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		DWORD length = GetEnvironmentVariableA("ARX_SCENE_DEBUG", value, sizeof(value));
 		if(length > 0 && length < sizeof(value)) {
 			m_sceneDebugView = std::atoi(value);
+		}
+	}
+	
+	// Debug log of the average frame rate every few seconds to a file, for measuring the cost of the effects
+	{
+		WCHAR path[MAX_PATH];
+		DWORD length = GetEnvironmentVariableW(L"ARX_D3D11_FPS_LOG", path, MAX_PATH);
+		if(length > 0 && length < MAX_PATH) {
+			m_fpsLogPath = platform::WideString::toUTF8(path, length);
 		}
 	}
 	
@@ -1003,10 +1015,12 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		m_reflectionColorLevels = colorDesc.MipLevels;
 	}
 	
-	// Ambient occlusion and the intermediate blur result
+	// Ambient occlusion and the intermediate blur result, at half the scene size
 	if(m_ambientOcclusion) {
 		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 		desc.Format = DXGI_FORMAT_R8_UNORM;
+		desc.Width = UINT((size.x + 1) / 2);
+		desc.Height = UINT((size.y + 1) / 2);
 		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_aoTarget))
 		   || FAILED(m_device->CreateRenderTargetView(m_aoTarget.Get(), nullptr, &m_aoView))
 		   || FAILED(m_device->CreateShaderResourceView(m_aoTarget.Get(), nullptr, &m_aoResource))
@@ -1365,8 +1379,9 @@ void D3D11Renderer::renderAmbientOcclusion(bool apply) {
 	ID3D11Buffer * buffer = m_aoConstants.Get();
 	m_context->PSSetConstantBuffers(3, 1, &buffer);
 	
-	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
-	m_context->RSSetViewports(1, &viewport);
+	// The ambient occlusion is computed at half the size and upsampled when it is applied
+	D3D11_VIEWPORT halfViewport = { 0.f, 0.f, float((m_sceneSize.x + 1) / 2), float((m_sceneSize.y + 1) / 2), 0.f, 1.f };
+	m_context->RSSetViewports(1, &halfViewport);
 	m_context->RSSetState(getRasterizerState(false, 0, false, false));
 	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
 	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, true), nullptr, 0xffffffff);
@@ -1387,6 +1402,8 @@ void D3D11Renderer::renderAmbientOcclusion(bool apply) {
 	
 	if(apply) {
 		// Darken the scene by multiplying it with the ambient occlusion
+		D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
+		m_context->RSSetViewports(1, &viewport);
 		m_context->OMSetBlendState(getBlendState(BlendZero, BlendSrcColor, false, true), nullptr, 0xffffffff);
 		pass(m_sceneResolvedTargetView.Get(), m_aoResource.Get(), m_aoApplyPixelShader.Get());
 	}
@@ -2546,6 +2563,24 @@ void D3D11Renderer::present() {
 	if(SUCCEEDED(m_swapChain->GetDesc1(&swapChainDesc))
 	   && (swapChainDesc.Width != UINT(m_size.x) || swapChainDesc.Height != UINT(m_size.y))) {
 		m_swapChain->ResizeBuffers(0, UINT(m_size.x), UINT(m_size.y), DXGI_FORMAT_UNKNOWN, swapChainDesc.Flags);
+	}
+	
+	if(!m_fpsLogPath.empty()) {
+		LARGE_INTEGER now, frequency;
+		QueryPerformanceCounter(&now);
+		QueryPerformanceFrequency(&frequency);
+		if(m_fpsLogFrames == 0) {
+			m_fpsLogStart = now.QuadPart;
+		}
+		m_fpsLogFrames++;
+		double seconds = double(now.QuadPart - m_fpsLogStart) / double(frequency.QuadPart);
+		if(seconds >= 5.0) {
+			double frames = double(m_fpsLogFrames - 1);
+			fs::ofstream log(fs::path(m_fpsLogPath), std::ios_base::app);
+			log << int(frames / seconds + 0.5) << " fps, " << float(seconds * 1000.0 / frames) << " ms" << std::endl;
+			m_fpsLogStart = now.QuadPart;
+			m_fpsLogFrames = 1;
+		}
 	}
 	
 	if(!m_snapshotPath.empty()) {

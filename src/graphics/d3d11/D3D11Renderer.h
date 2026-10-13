@@ -459,6 +459,11 @@ private:
 	std::string m_snapshotPath;
 	LONGLONG m_snapshotTime;
 	
+	// Debug log of the average frame rate, see ARX_D3D11_FPS_LOG
+	std::string m_fpsLogPath;
+	LONGLONG m_fpsLogStart;
+	u32 m_fpsLogFrames;
+	
 	friend class D3D11TextureStage;
 	
 };

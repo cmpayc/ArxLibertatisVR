@@ -53,6 +53,9 @@ const int MeshSmoothingMaxSegments = 4;
 //! Number of segments each edge is split into for a smoothing level (0 = off to 3) and a distance
 int meshSmoothingSegments(int level, float distance);
 
+//! Largest number of segments that is worth it for a model of this size on the screen in pixels
+int meshSmoothingSegmentsForSize(float pixels);
+
 //! Update the smooth normals of an animated object after its vertices have been transformed
 void updateMeshSmoothing(EERIE_3DOBJ & eobj);
 
