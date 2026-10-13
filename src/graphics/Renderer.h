@@ -22,6 +22,8 @@
 
 #include <stddef.h>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "graphics/Color.h"
@@ -328,6 +330,9 @@ public:
 	void addListener(Listener * listener);
 	void removeListener(Listener * listener);
 	
+	//! Move all listeners to another renderer, used when falling back to a different backend.
+	void transferListeners(Renderer & renderer);
+	
 	// Matrices
 	virtual void SetViewMatrix(const glm::mat4x4 & matView) = 0;
 	virtual void SetProjectionMatrix(const glm::mat4x4 & matProj) = 0;
@@ -380,6 +385,130 @@ public:
 	
 	virtual bool getSnapshot(Image & image) = 0;
 	virtual bool getSnapshot(Image & image, size_t width, size_t height) = 0;
+	
+	// Scene rendering
+	
+	//! \return true if the 3D scene can be rendered at a lower resolution than the window
+	[[nodiscard]] virtual bool supportsSceneScale() const { return false; }
+	
+	//! Set the fraction of the window resolution used for the 3D scene
+	virtual void setSceneScale(float scale) { ARX_UNUSED(scale); }
+	
+	/*!
+	 * Following draw calls render the 3D scene, which may use a lower resolution than the window.
+	 * Coordinates are still specified in window pixels.
+	 */
+	virtual void beginScene() { }
+	
+	//! Upscale the 3D scene to the window, following draw calls render at the window resolution
+	virtual void endScene() { }
+	
+	//! \return true if the named temporal upscaler (e.g. "dlss") is built into this renderer
+	[[nodiscard]] virtual bool supportsUpscaler(std::string_view name) const { ARX_UNUSED(name); return false; }
+	
+	/*!
+	 * Check if a supported upscaler can actually be used.
+	 * \return an empty string if the upscaler is available, otherwise the reason as an identifier:
+	 *         "dll_missing" if a required library was not found or "unsupported"
+	 */
+	[[nodiscard]] virtual std::string getUpscalerError(std::string_view name) const {
+		ARX_UNUSED(name);
+		return "unsupported";
+	}
+	
+	/*!
+	 * Select the temporal upscaler for the 3D scene.
+	 * \param name "off" or an upscaler supported by \ref supportsUpscaler()
+	 * \param preset upscaler-specific quality preset
+	 */
+	virtual void setUpscaler(std::string_view name, std::string_view preset) {
+		ARX_UNUSED(name), ARX_UNUSED(preset);
+	}
+	
+	//! Set the strength of the upscaler's sharpening pass in [0, 1], 0 disables it (only used by FSR)
+	virtual void setUpscalerSharpness(float sharpness) { ARX_UNUSED(sharpness); }
+	
+	//! \return true if this renderer supports screen-space ambient occlusion for the 3D scene
+	[[nodiscard]] virtual bool supportsAmbientOcclusion() const { return false; }
+	
+	//! Set the strength of screen-space ambient occlusion for the 3D scene in [0, 1], 0 disables it
+	virtual void setAmbientOcclusion(float strength) { ARX_UNUSED(strength); }
+	
+	//! \return true if this renderer supports bloom for the 3D scene
+	[[nodiscard]] virtual bool supportsBloom() const { return false; }
+	
+	//! Set the strength of the bloom for the 3D scene in [0, 1], 0 disables it
+	virtual void setBloom(float strength) { ARX_UNUSED(strength); }
+	
+	//! \return true if this renderer supports color grading for the 3D scene
+	[[nodiscard]] virtual bool supportsColorGrading() const { return false; }
+	
+	//! Select the color grading preset for the 3D scene: "off", "natural", "warm" or "cinematic"
+	virtual void setColorGrading(std::string_view preset) { ARX_UNUSED(preset); }
+	
+	//! A light for per-pixel lighting, see ApplyTileLights()
+	struct PixelLight {
+		Vec3f position = Vec3f(0.f);
+		float fallStart = 0.f;
+		Color3f color = Color3f::black; //!< In [0, 1]
+		float fallEnd = 0.f;
+		float intensity = 0.f;          //!< Factor for the light color at full strength
+		bool specularOnly = false;      //!< Only adds highlights, the diffuse light is already in the vertex colors
+	};
+	
+	//! \return true if this renderer can light world geometry per pixel
+	[[nodiscard]] virtual bool supportsPixelLighting() const { return false; }
+	
+	//! Enable or disable per-pixel lighting of world geometry, if supported
+	virtual void setPixelLighting(bool enabled) { ARX_UNUSED(enabled); }
+	
+	/*!
+	 * \return true if world geometry is lit per pixel with the lights from \ref setPixelLights().
+	 *         The vertex colors of world geometry then only contain the static lighting.
+	 */
+	[[nodiscard]] virtual bool usesPixelLighting() const { return false; }
+	
+	//! \return true if this renderer supports normal maps for per-pixel lighting
+	[[nodiscard]] virtual bool supportsNormalMaps() const { return false; }
+	
+	//! Set the strength of the normal maps generated from the textures in [0, 1], 0 disables them
+	virtual void setNormalMaps(float strength) { ARX_UNUSED(strength); }
+	
+	//! \return true if this renderer supports parallax occlusion mapping
+	[[nodiscard]] virtual bool supportsParallaxMapping() const { return false; }
+	
+	//! Set the depth of the parallax occlusion mapping of world geometry in [0, 1], 0 disables it
+	virtual void setParallaxMapping(float strength) { ARX_UNUSED(strength); }
+	
+	//! \return true if this renderer supports specular highlights on world geometry
+	[[nodiscard]] virtual bool supportsSpecular() const { return false; }
+	
+	//! Set the strength of the specular highlights of world geometry in [0, 1], 0 disables them
+	virtual void setSpecular(float strength) { ARX_UNUSED(strength); }
+	
+	//! \return true if this renderer supports screen-space reflections on world geometry
+	[[nodiscard]] virtual bool supportsReflections() const { return false; }
+	
+	//! Set the strength of the screen-space reflections of world geometry in [0, 1], 0 disables them
+	virtual void setReflections(float strength) { ARX_UNUSED(strength); }
+	
+	//! Mark the following draws as horizontal water surfaces for highlights and reflections, until reset
+	virtual void setWaterSurface(bool water) { ARX_UNUSED(water); }
+	
+	/*!
+	 * \return true if the renderer currently turns model triangles into curved patches itself, using
+	 *         TexturedVertex::tessellation and TexturedVertex::normal, see animation/MeshSmoothing.h
+	 */
+	[[nodiscard]] virtual bool supportsModelTessellation() const { return false; }
+	
+	//! Mark the following triangle lists as model batches that may be tessellated, until reset
+	virtual void setModelTessellation(bool enabled) { ARX_UNUSED(enabled); }
+	
+	/*!
+	 * Set the lights for per-pixel lighting of world vertices with a non-zero normal.
+	 * Lights that only add highlights must come after all other lights.
+	 */
+	virtual void setPixelLights(const PixelLight * lights, size_t count) { ARX_UNUSED(lights), ARX_UNUSED(count); }
 	
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }

@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include "Configure.h"
+
 #include "audio/Audio.h"
 
 #include "core/Application.h"
@@ -921,9 +923,40 @@ public:
 	RenderOptionsMenuPage()
 		: MenuPage(Page_OptionsRender)
 		, m_alphaCutoutAntialiasingCycleText(nullptr)
+		, m_renderScaleCycleText(nullptr)
+		, m_upscalerCycleText(nullptr)
+		, m_dlssPresetCycleText(nullptr)
+		, m_fsrSharpnessCycleText(nullptr)
+		, m_ambientOcclusionCycleText(nullptr)
+		, m_bloomCycleText(nullptr)
+		, m_colorGradingCycleText(nullptr)
+		, m_pixelLightingCheckbox(nullptr)
+		, m_normalMapsCycleText(nullptr)
+		, m_parallaxMappingCycleText(nullptr)
+		, m_specularCycleText(nullptr)
+		, m_reflectionsCycleText(nullptr)
+		, m_dlssAvailable(false)
+		, m_fsrAvailable(false)
+		, m_anyUpscalerAvailable(false)
 	{ }
 	
 	CycleTextWidget * m_alphaCutoutAntialiasingCycleText;
+	CycleTextWidget * m_renderScaleCycleText;
+	CycleTextWidget * m_upscalerCycleText;
+	CycleTextWidget * m_dlssPresetCycleText;
+	CycleTextWidget * m_fsrSharpnessCycleText;
+	CycleTextWidget * m_ambientOcclusionCycleText;
+	CycleTextWidget * m_bloomCycleText;
+	CycleTextWidget * m_colorGradingCycleText;
+	CheckboxWidget * m_pixelLightingCheckbox;
+	CycleTextWidget * m_normalMapsCycleText;
+	CycleTextWidget * m_parallaxMappingCycleText;
+	CycleTextWidget * m_specularCycleText;
+	CycleTextWidget * m_reflectionsCycleText;
+	bool m_dlssAvailable;
+	bool m_fsrAvailable;
+	bool m_anyUpscalerAvailable;
+	std::vector<std::string_view> m_upscalerValues; //!< Config value for each upscaler entry
 	
 	void init() override {
 		
@@ -933,12 +966,16 @@ public:
 		{
 			std::string_view label = getLocalised("system_menus_options_video_renderer");
 			auto slider = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
-			slider->valueChanged = [](int pos, std::string_view /* string */) {
+			slider->valueChanged = [this](int pos, std::string_view /* string */) {
 				switch(pos) {
 					case 0:  config.video.renderer = "auto"; break;
 					case 1:  config.video.renderer = "OpenGL";  break;
+					#if ARX_HAVE_D3D11
+					case 2:  config.video.renderer = "Direct3D 11";  break;
+					#endif
 					default: arx_unreachable();
 				}
+				setUpscalerState();
 			};
 			slider->addEntry("Auto-Select");
 			slider->selectLast();
@@ -946,6 +983,12 @@ public:
 			if(config.video.renderer == "OpenGL") {
 				slider->selectLast();
 			}
+			#if ARX_HAVE_D3D11
+			slider->addEntry("DirectX 11");
+			if(config.video.renderer == "Direct3D 11") {
+				slider->selectLast();
+			}
+			#endif
 			addCenter(std::move(slider));
 		}
 		
@@ -1015,6 +1058,186 @@ public:
 			addCenter(std::move(cb));
 		}
 		
+		if(GRenderer->supportsSceneScale()) {
+			std::string_view label = getLocalised("system_menus_options_video_render_scale");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int /* pos */, std::string_view string) {
+				float scale = float(util::toInt(string.substr(0, string.size() - 1)).value_or(100)) / 100.f;
+				config.video.renderScale = scale;
+				GRenderer->setSceneScale(scale);
+			};
+			for(int percent : { 100, 75, 67, 58, 50, 33 }) {
+				cb->addEntry(std::to_string(percent) + "%");
+				if(int(config.video.renderScale * 100.f + 0.5f) <= percent) {
+					cb->selectLast();
+				}
+			}
+			m_renderScaleCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		if(GRenderer->supportsUpscaler("dlss") || GRenderer->supportsUpscaler("fsr")) {
+			// Upscalers built into the renderer, unavailable ones show why they can't be used
+			struct Upscaler {
+				std::string_view value;
+				std::string_view name;
+			};
+			static constexpr Upscaler upscalers[] = {
+				{ "dlss", "DLSS" },
+				{ "fsr", "FSR" },
+			};
+			std::string_view label = getLocalised("system_menus_options_video_upscaler");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [this](int pos, std::string_view /* string */) {
+				arx_assert(pos >= 0 && size_t(pos) < m_upscalerValues.size());
+				config.video.upscaler = m_upscalerValues[pos];
+				GRenderer->setUpscaler(config.video.upscaler, config.video.dlssPreset);
+				setUpscalerState();
+			};
+			m_upscalerValues.clear();
+			m_upscalerValues.push_back("off");
+			m_anyUpscalerAvailable = false;
+			m_dlssAvailable = false;
+			m_fsrAvailable = false;
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+			cb->selectLast();
+			for(const Upscaler & upscaler : upscalers) {
+				if(!GRenderer->supportsUpscaler(upscaler.value)) {
+					continue;
+				}
+				m_upscalerValues.push_back(upscaler.value);
+				std::string error = GRenderer->getUpscalerError(upscaler.value);
+				if(error.empty()) {
+					cb->addEntry(upscaler.name);
+					m_anyUpscalerAvailable = true;
+					if(upscaler.value == "dlss") {
+						m_dlssAvailable = true;
+					} else if(upscaler.value == "fsr") {
+						m_fsrAvailable = true;
+					}
+				} else {
+					std::string reason = "system_menus_options_video_upscaler_" + error;
+					cb->addEntry(std::string(upscaler.name) + ": " + std::string(getLocalised(reason)));
+				}
+				if(config.video.upscaler == upscaler.value) {
+					cb->selectLast();
+				}
+			}
+			m_upscalerCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		if(GRenderer->supportsUpscaler("dlss")) {
+			// DLSS render presets: J and K use the DLSS 4 transformer model,
+			// L and M the DLSS 4.5 second generation transformer model
+			struct Preset {
+				std::string_view value;
+				std::string_view name;
+			};
+			static constexpr Preset presets[] = {
+				{ "", "" }, // localised
+				{ "J", "J (DLSS 4)" },
+				{ "K", "K (DLSS 4)" },
+				{ "L", "L (DLSS 4.5)" },
+				{ "M", "M (DLSS 4.5)" },
+			};
+			std::string_view label = getLocalised("system_menus_options_video_dlss_preset");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				arx_assert(pos >= 0 && size_t(pos) < std::size(presets));
+				config.video.dlssPreset = presets[pos].value;
+				GRenderer->setUpscaler(config.video.upscaler, config.video.dlssPreset);
+			};
+			for(const Preset & preset : presets) {
+				if(preset.value.empty()) {
+					cb->addEntry(getLocalised("system_menus_options_video_dlss_preset_default"));
+				} else {
+					cb->addEntry(preset.name);
+				}
+				if(preset.value == config.video.dlssPreset || preset.value.empty()) {
+					cb->selectLast();
+				}
+			}
+			m_dlssPresetCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		if(GRenderer->supportsUpscaler("fsr")) {
+			std::string_view label = getLocalised("system_menus_options_video_fsr_sharpness");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				config.video.fsrSharpness = float(pos) * 0.25f;
+				GRenderer->setUpscalerSharpness(config.video.fsrSharpness);
+			};
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+			cb->selectLast();
+			for(int percent : { 25, 50, 75, 100 }) {
+				cb->addEntry(std::to_string(percent) + "%");
+				if(int(config.video.fsrSharpness * 100.f + 0.5f) >= percent) {
+					cb->selectLast();
+				}
+			}
+			m_fsrSharpnessCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		m_ambientOcclusionCycleText = addEffectStrength(getLocalised("system_menus_options_video_ambient_occlusion"),
+		                                                &config.video.ambientOcclusion, &Renderer::setAmbientOcclusion);
+		
+		m_bloomCycleText = addEffectStrength(getLocalised("system_menus_options_video_bloom"), &config.video.bloom,
+		                                     &Renderer::setBloom);
+		
+		{
+			static const char * const presets[] = { "off", "natural", "warm", "cinematic" };
+			std::string_view label = getLocalised("system_menus_options_video_color_grading");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				config.video.colorGrading = presets[pos];
+				GRenderer->setColorGrading(config.video.colorGrading);
+			};
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+			cb->addEntry(getLocalised("system_menus_options_video_color_grading_natural"));
+			cb->addEntry(getLocalised("system_menus_options_video_color_grading_warm"));
+			cb->addEntry(getLocalised("system_menus_options_video_color_grading_cinematic"));
+			int selected = 0;
+			for(int i = 0; i < int(std::size(presets)); i++) {
+				if(config.video.colorGrading == presets[i]) {
+					selected = i;
+				}
+			}
+			cb->setValue(selected);
+			m_colorGradingCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		{
+			std::string_view label = getLocalised("system_menus_options_video_pixel_lighting");
+			auto cb = std::make_unique<CheckboxWidget>(checkboxSize(), hFontMenu, label);
+			cb->setChecked(config.video.pixelLighting);
+			cb->stateChanged = [](bool checked) {
+				config.video.pixelLighting = checked;
+				GRenderer->setPixelLighting(checked);
+			};
+			m_pixelLightingCheckbox = cb.get();
+			addCenter(std::move(cb));
+		}
+		
+		m_normalMapsCycleText = addEffectStrength(getLocalised("system_menus_options_video_normal_maps"),
+		                                          &config.video.normalMaps, &Renderer::setNormalMaps);
+		m_parallaxMappingCycleText = addEffectStrength(getLocalised("system_menus_options_video_parallax_mapping"),
+		                                               &config.video.parallaxMapping, &Renderer::setParallaxMapping);
+		m_specularCycleText = addEffectStrength(getLocalised("system_menus_options_video_specular"),
+		                                       &config.video.specular, &Renderer::setSpecular);
+		m_reflectionsCycleText = addEffectStrength(getLocalised("system_menus_options_video_reflections"),
+		                                          &config.video.reflections, &Renderer::setReflections);
+		
+		addSmoothingLevel(getLocalised("system_menus_options_video_character_smoothing"),
+		                  &config.video.characterSmoothing);
+		addSmoothingLevel(getLocalised("system_menus_options_video_object_smoothing"),
+		                  &config.video.objectSmoothing);
+		
+		setUpscalerState();
+		
 		{
 			std::string_view label = getLocalised("system_menus_options_video_texture_filter_anisotropic");
 			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
@@ -1074,6 +1297,96 @@ public:
 	}
 	
 private:
+	
+	//! Add an Off / Low / Medium / High entry for the strength of an effect in [0, 1]
+	CycleTextWidget * addEffectStrength(std::string_view label, float * value, void (Renderer::*setter)(float)) {
+		
+		static const float strengths[] = { 0.f, 0.3f, 0.5f, 0.75f };
+		
+		auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+		cb->valueChanged = [value, setter](int pos, std::string_view /* string */) {
+			*value = strengths[pos];
+			(GRenderer->*setter)(*value);
+		};
+		cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+		cb->addEntry(getLocalised("system_menus_options_video_texture_low"));
+		cb->addEntry(getLocalised("system_menus_options_video_texture_med"));
+		cb->addEntry(getLocalised("system_menus_options_video_texture_high"));
+		
+		// Select the closest strength
+		int selected = 0;
+		for(int i = 0; i < int(std::size(strengths)); i++) {
+			if(std::abs(strengths[i] - *value) < std::abs(strengths[selected] - *value)) {
+				selected = i;
+			}
+		}
+		cb->setValue(selected);
+		
+		CycleTextWidget * widget = cb.get();
+		addCenter(std::move(cb));
+		
+		return widget;
+	}
+	
+	//! Add an Off / Low / Medium / High entry for the number of curved triangles in models
+	void addSmoothingLevel(std::string_view label, int * value) {
+		
+		auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+		cb->valueChanged = [value](int pos, std::string_view /* string */) {
+			*value = pos;
+		};
+		cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+		cb->addEntry(getLocalised("system_menus_options_video_texture_low"));
+		cb->addEntry(getLocalised("system_menus_options_video_texture_med"));
+		cb->addEntry(getLocalised("system_menus_options_video_texture_high"));
+		cb->setValue(*value);
+		addCenter(std::move(cb));
+		
+	}
+	
+	// Scene scaling and upscalers are only available with the Direct3D 11 renderer
+	void setUpscalerState() {
+		
+		bool direct3D = (config.video.renderer == "Direct3D 11");
+		
+		if(m_renderScaleCycleText) {
+			m_renderScaleCycleText->setEnabled(direct3D);
+		}
+		if(m_upscalerCycleText) {
+			m_upscalerCycleText->setEnabled(direct3D && m_anyUpscalerAvailable);
+		}
+		if(m_dlssPresetCycleText) {
+			m_dlssPresetCycleText->setEnabled(direct3D && m_dlssAvailable && config.video.upscaler == "dlss");
+		}
+		if(m_fsrSharpnessCycleText) {
+			m_fsrSharpnessCycleText->setEnabled(direct3D && m_fsrAvailable && config.video.upscaler == "fsr");
+		}
+		if(m_bloomCycleText) {
+			m_bloomCycleText->setEnabled(direct3D);
+		}
+		if(m_colorGradingCycleText) {
+			m_colorGradingCycleText->setEnabled(direct3D);
+		}
+		if(m_ambientOcclusionCycleText) {
+			m_ambientOcclusionCycleText->setEnabled(direct3D);
+		}
+		if(m_normalMapsCycleText) {
+			m_normalMapsCycleText->setEnabled(direct3D);
+		}
+		if(m_parallaxMappingCycleText) {
+			m_parallaxMappingCycleText->setEnabled(direct3D);
+		}
+		if(m_specularCycleText) {
+			m_specularCycleText->setEnabled(direct3D);
+		}
+		if(m_reflectionsCycleText) {
+			m_reflectionsCycleText->setEnabled(direct3D);
+		}
+		if(m_pixelLightingCheckbox) {
+			m_pixelLightingCheckbox->setEnabled(direct3D);
+		}
+		
+	}
 	
 	void setAlphaCutoutAntialisingState() {
 		

@@ -95,6 +95,14 @@ Vec3f EE_RT(const Vec3f & in);
 Vec4f worldToClipSpace(const Vec3f & in);
 void worldToClipSpace(const Vec3f & in, TexturedVertex & out);
 
+//! Incremented for each frame that renders the 3D scene, used to track per-object motion
+extern u64 g_sceneFrameIndex;
+/*!
+ * True from setting up the scene camera until the 3D scene has been rendered, while entities are projected
+ * for the scene (and not for the interface, e.g. book or inventory previews)
+ */
+extern bool g_renderingScene;
+
 
 // FAST SAVE LOAD
 bool FastSceneLoad(const res::path & path, Vec3f & trans);

@@ -74,6 +74,16 @@ struct TexturedVertex {
 	
 	Vec2f uv = Vec2f(0.f);
 	
+	//! Position in the previous frame (same space as p and w) for motion vectors, unused if w <= 0
+	Vec4f prevP = Vec4f(0.f);
+	
+	//! World space normal of models for per-pixel highlights, zero if not used
+	Vec3f normal = Vec3f(0.f);
+	
+	//! Segments per edge << 3 | straight edges (bit k = corner k to k + 1) for renderers that tessellate models,
+	//! see Renderer::supportsModelTessellation(), 0 if not tessellated
+	u32 tessellation = 0;
+	
 	constexpr TexturedVertex() arx_noexcept_default
 	
 	constexpr TexturedVertex(const Vec3f & _p, float _w, ColorRGBA _color, Vec2f _uv) noexcept
@@ -100,6 +110,7 @@ struct SMY_VERTEX {
 	Vec3f p = Vec3f(0.f);
 	ColorRGBA color;
 	Vec2f uv = Vec2f(0.f);
+	Vec3f normal = Vec3f(0.f); //!< Zero if the vertex is not affected by per-pixel lighting
 	
 	constexpr SMY_VERTEX() arx_noexcept_default
 	

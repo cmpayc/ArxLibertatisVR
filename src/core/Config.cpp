@@ -70,6 +70,10 @@ constexpr const std::string_view
 	realtimeOverride,
 	bufferUpload,
 	extensionOverride,
+	upscaler = "off",
+	colorGrading = "off",
+	dlssPreset = "K",
+	upscalerPath,
 	thumbnailSize = BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_WIDTH) "x"
 	                BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_HEIGHT),
 	vrRuntime = "auto",
@@ -82,6 +86,8 @@ constexpr const int
 	vsync = -1,
 	fpsLimit = -1,
 	maxAnisotropicFiltering = 9001,
+	characterSmoothing = 2,
+	objectSmoothing = 2,
 	alphaCutoutAntialiasing = 2,
 	cinematicWidescreenMode = CinematicFadeEdges,
 	hudScaleFilter = UIFilterBilinear,
@@ -104,6 +110,7 @@ constexpr const bool
 	showCrosshair = true,
 	antialiasing = true,
 	colorkeyAntialiasing = true,
+	pixelLighting = true,
 	limitSpeechWidth = true,
 	hudScaleInteger = true,
 	bookScaleInteger = false,
@@ -138,6 +145,14 @@ constexpr const float
 	fogDistance = 10.f,
 	gamma = 5.f,
 	fov = 75.f,
+	renderScale = 1.f,
+	fsrSharpness = 0.f,
+	ambientOcclusion = 0.5f,
+	bloom = 0.5f,
+	normalMaps = 0.5f,
+	parallaxMapping = 0.5f,
+	specular = 0.5f,
+	reflections = 0.5f,
 	hudScale = 0.5f,
 	bookScale = 1.f,
 	cursorScale = 0.5f,
@@ -244,6 +259,21 @@ constexpr const std::string_view
 	screenShake = "screen_shake",
 	antialiasing = "antialiasing",
 	maxAnisotropicFiltering = "max_anisotropic_filtering",
+	renderScale = "render_scale",
+	fsrSharpness = "fsr_sharpness",
+	ambientOcclusion = "ambient_occlusion",
+	bloom = "bloom",
+	normalMaps = "normal_maps",
+	parallaxMapping = "parallax_mapping",
+	specular = "specular_highlights",
+	reflections = "reflections",
+	characterSmoothing = "character_smoothing",
+	objectSmoothing = "object_smoothing",
+	upscaler = "upscaler",
+	colorGrading = "color_grading",
+	dlssPreset = "dlss_preset",
+	upscalerPath = "upscaler_path",
+	pixelLighting = "pixel_lighting",
 	colorkeyAntialiasing = "colorkey_antialiasing",
 	alphaCutoutAntialiasing = "alpha_cutout_antialiasing",
 	bufferSize = "buffer_size",
@@ -529,6 +559,21 @@ bool Config::save() {
 	writer.writeKey(Key::screenShake, video.screenShake);
 	writer.writeKey(Key::antialiasing, video.antialiasing);
 	writer.writeKey(Key::maxAnisotropicFiltering, video.maxAnisotropicFiltering);
+	writer.writeKey(Key::renderScale, video.renderScale);
+	writer.writeKey(Key::upscaler, video.upscaler);
+	writer.writeKey(Key::dlssPreset, video.dlssPreset);
+	writer.writeKey(Key::upscalerPath, video.upscalerPath);
+	writer.writeKey(Key::fsrSharpness, video.fsrSharpness);
+	writer.writeKey(Key::ambientOcclusion, video.ambientOcclusion);
+	writer.writeKey(Key::bloom, video.bloom);
+	writer.writeKey(Key::normalMaps, video.normalMaps);
+	writer.writeKey(Key::parallaxMapping, video.parallaxMapping);
+	writer.writeKey(Key::specular, video.specular);
+	writer.writeKey(Key::reflections, video.reflections);
+	writer.writeKey(Key::characterSmoothing, video.characterSmoothing);
+	writer.writeKey(Key::objectSmoothing, video.objectSmoothing);
+	writer.writeKey(Key::colorGrading, video.colorGrading);
+	writer.writeKey(Key::pixelLighting, video.pixelLighting);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
 	writer.writeKey(Key::alphaCutoutAntialiasing, video.alphaCutoutAntialiasing);
 	writer.writeKey(Key::bufferSize, video.bufferSize);
@@ -692,6 +737,31 @@ bool Config::init(const fs::path & file) {
 	video.antialiasing = reader.getKey(Section::Video, Key::antialiasing, Default::antialiasing);
 	int anisoFiltering = reader.getKey(Section::Video, Key::maxAnisotropicFiltering, Default::maxAnisotropicFiltering);
 	video.maxAnisotropicFiltering = std::max(anisoFiltering, 1);
+	float renderScale = reader.getKey(Section::Video, Key::renderScale, Default::renderScale);
+	video.renderScale = glm::clamp(renderScale, 0.25f, 1.f);
+	video.upscaler = reader.getKey(Section::Video, Key::upscaler, Default::upscaler);
+	video.dlssPreset = reader.getKey(Section::Video, Key::dlssPreset, Default::dlssPreset);
+	video.upscalerPath = reader.getKey(Section::Video, Key::upscalerPath, Default::upscalerPath);
+	float fsrSharpness = reader.getKey(Section::Video, Key::fsrSharpness, Default::fsrSharpness);
+	video.fsrSharpness = glm::clamp(fsrSharpness, 0.f, 1.f);
+	float ambientOcclusion = reader.getKey(Section::Video, Key::ambientOcclusion, Default::ambientOcclusion);
+	video.ambientOcclusion = glm::clamp(ambientOcclusion, 0.f, 1.f);
+	float bloom = reader.getKey(Section::Video, Key::bloom, Default::bloom);
+	video.bloom = glm::clamp(bloom, 0.f, 1.f);
+	float normalMaps = reader.getKey(Section::Video, Key::normalMaps, Default::normalMaps);
+	video.normalMaps = glm::clamp(normalMaps, 0.f, 1.f);
+	float parallaxMapping = reader.getKey(Section::Video, Key::parallaxMapping, Default::parallaxMapping);
+	video.parallaxMapping = glm::clamp(parallaxMapping, 0.f, 1.f);
+	float specular = reader.getKey(Section::Video, Key::specular, Default::specular);
+	video.specular = glm::clamp(specular, 0.f, 1.f);
+	float reflections = reader.getKey(Section::Video, Key::reflections, Default::reflections);
+	video.reflections = glm::clamp(reflections, 0.f, 1.f);
+	int characterSmoothing = reader.getKey(Section::Video, Key::characterSmoothing, Default::characterSmoothing);
+	video.characterSmoothing = glm::clamp(characterSmoothing, 0, 3);
+	int objectSmoothing = reader.getKey(Section::Video, Key::objectSmoothing, Default::objectSmoothing);
+	video.objectSmoothing = glm::clamp(objectSmoothing, 0, 3);
+	video.colorGrading = reader.getKey(Section::Video, Key::colorGrading, Default::colorGrading);
+	video.pixelLighting = reader.getKey(Section::Video, Key::pixelLighting, Default::pixelLighting);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);
 	int alphaCutoutAA = reader.getKey(Section::Video, Key::alphaCutoutAntialiasing, Default::alphaCutoutAntialiasing);
 	video.alphaCutoutAntialiasing = glm::clamp(alphaCutoutAA, 0, 2);

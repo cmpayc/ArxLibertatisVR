@@ -53,6 +53,9 @@
 #cmakedefine01 ARX_HAVE_GLX
 #cmakedefine01 ARX_HAVE_EGL
 #cmakedefine01 ARX_HAVE_GL_STATIC
+#cmakedefine01 ARX_HAVE_D3D11
+#cmakedefine01 ARX_HAVE_DLSS
+#cmakedefine01 ARX_HAVE_FSR
 
 // VR backend
 #cmakedefine01 ARX_HAVE_OPENXR

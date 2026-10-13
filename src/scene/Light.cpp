@@ -42,7 +42,10 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 */
 // Copyright (c) 1999-2000 ARKANE Studios SA. All rights reserved
 
+#include <algorithm>
 #include <array>
+#include <utility>
+#include <vector>
 
 #include "scene/Light.h"
 
@@ -50,6 +53,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "core/GameTime.h"
 #include "core/Core.h"
 
+#include "game/Camera.h"
 #include "game/Entity.h"
 #include "game/EntityManager.h"
 #include "game/Inventory.h"
@@ -58,6 +62,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "graphics/Math.h"
 #include "graphics/Draw.h"
 #include "graphics/DrawLine.h"
+#include "graphics/Renderer.h"
 
 #include "platform/profiler/Profiler.h"
 
@@ -255,6 +260,77 @@ void PrecalcDynamicLighting(const Vec3f & camPos, float camDepth) {
 			}
 		}
 	}
+	
+}
+
+// Static lights for highlights: at most this many, at most this far from the camera beyond their range
+static const size_t MaxSpecularLights = 24;
+static const float SpecularLightDistance = 1000.f;
+// Lights outside of a cone with this half angle around the view direction cannot light visible pixels
+static const float SpecularLightCone = glm::radians(65.f);
+
+void UploadPixelLights() {
+	
+	if(!GRenderer->usesPixelLighting()) {
+		return;
+	}
+	
+	// Improve vision recolors the world on the CPU
+	if(player.m_improve) {
+		GRenderer->setPixelLights(nullptr, 0);
+		return;
+	}
+	
+	// Same parameters as ApplyTileLights()
+	std::array<Renderer::PixelLight, g_dynamicLightsMax> lights;
+	size_t count = 0;
+	for(size_t i = 0; i < g_culledDynamicLightsCount; i++) {
+		const EERIE_LIGHT & light = *g_culledDynamicLights[i];
+		Renderer::PixelLight & pixelLight = lights[count++];
+		pixelLight.position = light.pos;
+		pixelLight.fallStart = light.fallstart;
+		pixelLight.fallEnd = light.fallend;
+		pixelLight.color = light.rgb255 * (1.f / 255.f);
+		pixelLight.intensity = light.intensity * GLOBAL_LIGHT_FACTOR * 0.5f;
+	}
+	
+	// Static lights are already in the vertex colors but can add highlights to shiny surfaces
+	static std::vector<std::pair<float, const EERIE_LIGHT *>> nearby;
+	nearby.clear();
+	Vec3f forward = angleToVector(g_camera->angle);
+	for(const EERIE_LIGHT & light : g_staticLights) {
+		if(!light.m_ignitionStatus || (light.extras & EXTRAS_SEMIDYNAMIC) || light.rgb == Color3f::black) {
+			continue;
+		}
+		float distance = fdist(light.pos, g_camera->m_pos) - light.fallend;
+		if(distance > SpecularLightDistance) {
+			continue;
+		}
+		Vec3f offset = light.pos - g_camera->m_pos;
+		float center = glm::length(offset);
+		if(center > light.fallend) {
+			float angle = std::acos(glm::clamp(glm::dot(offset / center, forward), -1.f, 1.f));
+			if(angle - std::asin(light.fallend / center) > SpecularLightCone) {
+				continue;
+			}
+		}
+		nearby.emplace_back(distance, &light);
+	}
+	std::sort(nearby.begin(), nearby.end(),
+	          [](const auto & a, const auto & b) { return a.first < b.first; });
+	size_t nearbyCount = std::min(nearby.size(), std::min(MaxSpecularLights, lights.size() - count));
+	for(size_t i = 0; i < nearbyCount; i++) {
+		const EERIE_LIGHT & light = *nearby[i].second;
+		Renderer::PixelLight & pixelLight = lights[count++];
+		pixelLight.position = light.pos;
+		pixelLight.fallStart = light.fallstart;
+		pixelLight.fallEnd = light.fallend;
+		pixelLight.color = light.rgb;
+		pixelLight.intensity = light.intensity * GLOBAL_LIGHT_FACTOR * 0.5f;
+		pixelLight.specularOnly = true;
+	}
+	
+	GRenderer->setPixelLights(lights.data(), count);
 	
 }
 

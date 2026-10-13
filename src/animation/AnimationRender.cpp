@@ -47,13 +47,17 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <utility>
 
 #include "animation/Animation.h"
+#include "animation/MeshSmoothing.h"
 
 #include "core/Application.h"
+#include "core/Config.h"
 #include "core/GameTime.h"
 #include "core/Core.h"
 
+#include "game/Camera.h"
 #include "game/Damage.h"
 #include "game/Equipment.h"
 #include "game/EntityManager.h"
@@ -188,6 +192,8 @@ void PopAllTriangleListOpaque(RenderState baseState, bool clear) {
 	
 	ARX_PROFILE_FUNC();
 	
+	GRenderer->setModelTessellation(true);
+	
 	// TODO sort texture list according to material properties to reduce state changes
 	TextureContainer * pTex = GetTextureList();
 	while(pTex) {
@@ -195,11 +201,15 @@ void PopAllTriangleListOpaque(RenderState baseState, bool clear) {
 		pTex = pTex->m_pNext;
 	}
 	
+	GRenderer->setModelTessellation(false);
+	
 }
 
 void PopAllTriangleListTransparency() {
 	
 	ARX_PROFILE_FUNC();
+	
+	GRenderer->setModelTessellation(true);
 	
 	GRenderer->SetFogColor(Color());
 	
@@ -212,6 +222,8 @@ void PopAllTriangleListTransparency() {
 	}
 	
 	GRenderer->SetFogColor(g_fogColor);
+	
+	GRenderer->setModelTessellation(false);
 	
 }
 
@@ -462,7 +474,8 @@ static bool Cedric_IO_Visible(const Vec3f & pos) {
 }
 
 /* Object dynamic lighting */
-static void Cedric_ApplyLighting(ShaderLight lights[], size_t lightsCount, EERIE_3DOBJ * eobj, Skeleton * obj, const ColorMod & colorMod) {
+static void Cedric_ApplyLighting(ShaderLight lights[], size_t lightsCount, EERIE_3DOBJ * eobj, Skeleton * obj,
+                                 const ColorMod & colorMod, bool smoothNormals) {
 	
 	ARX_PROFILE_FUNC();
 	
@@ -476,7 +489,8 @@ static void Cedric_ApplyLighting(ShaderLight lights[], size_t lightsCount, EERIE
 		/* Get light value for each vertex */
 		for(VertexId vertex : eobj->m_boneVertices[group]) {
 			const Vec3f & position = eobj->vertexWorldPositions[vertex].v;
-			Vec3f normal = quat * eobj->vertexlist[vertex].norm;
+			Vec3f normal = smoothNormals ? meshSmoothingNormal(*eobj, vertex.handleData())
+			                             : quat * eobj->vertexlist[vertex].norm;
 			eobj->vertexColors[vertex] = ApplyLight(lights, lightsCount, position, normal, colorMod);
 		}
 	}
@@ -534,6 +548,27 @@ void DrawEERIEInter_ViewProjectTransform(EERIE_3DOBJ * eobj) {
 		eobj->vertexClipPositions[vertex] = worldToClipSpace(eobj->vertexWorldPositions[vertex].v);
 	}
 	
+	// Remember the clip positions of the 3D scene for motion vectors in the next frame
+	if(g_renderingScene) {
+		if(eobj->sceneClipFrame != g_sceneFrameIndex) {
+			eobj->hasPreviousClipPositions = (eobj->sceneClipFrame + 1 == g_sceneFrameIndex
+			                                  && eobj->vertexSceneClipPositions.size() == eobj->vertexClipPositions.size());
+			std::swap(eobj->vertexPreviousClipPositions, eobj->vertexSceneClipPositions);
+			eobj->sceneClipFrame = g_sceneFrameIndex;
+		}
+		eobj->vertexSceneClipPositions = eobj->vertexClipPositions;
+	}
+	
+}
+
+//! \return the clip position of a vertex in the previous frame, or zero if not known
+static Vec4f previousClipPosition(const EERIE_3DOBJ * eobj, VertexId vertex) {
+	
+	if(!g_renderingScene || !eobj->hasPreviousClipPositions || eobj->sceneClipFrame != g_sceneFrameIndex) {
+		return Vec4f(0.f);
+	}
+	
+	return eobj->vertexPreviousClipPositions[vertex];
 }
 
 // Set while drawing an object mirrored (negative scale, see g_playerLinkedTransformHook): its faces turn the other way
@@ -619,6 +654,7 @@ static void AddFixedObjectHalo(const EERIE_FACE & face, const TransformInfo & t,
 			vert[1] = tvList[first];
 			vert[2] = tvList[second];
 			vert[3] = tvList[second];
+			vert[0].normal = vert[1].normal = vert[2].normal = vert[3].normal = Vec3f(0.f);
 			
 			Vec3f a = tvList[first].p / tvList[first].w;
 			Vec3f b = tvList[second].p / tvList[second].w;
@@ -672,7 +708,18 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 	UpdateLlights(lights, lightsCount, tv, false);
 	
 	arx_assert(eobj->vertexColors.size() == eobj->vertexWorldPositions.size());
-		
+	
+	// Objects are drawn with curved triangles and smooth shading unless they should look faceted
+	int level = (io && !useFaceNormal) ? config.video.objectSmoothing : 0;
+	int segments = 1;
+	if(level > 0) {
+		updateMeshSmoothing(*eobj);
+		segments = meshSmoothingSegments(level, fdist(t.pos, g_camera->m_pos));
+		// Small objects on the screen do not need many more triangles
+		Vec2f size = io->bbox2D.max - io->bbox2D.min;
+		segments = std::min(segments, meshSmoothingSegmentsForSize(std::max(size.x, size.y)));
+	}
+	
 	for(size_t i = 0; i < eobj->facelist.size(); i++) {
 		const EERIE_FACE & face = eobj->facelist[i];
 		
@@ -686,20 +733,27 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 		}
 		
 		float fTransp = 0.f;
-		TexturedVertex * tvList = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
+		TexturedVertex * output = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
 		
+		TexturedVertex tvList[3];
 		for(size_t n = 0; n < 3; n++) {
 			
 			const Vec3f & position = eobj->vertexWorldPositions[face.vid[n]].v;
 			Vec3f normal = t.rotation * (useFaceNormal ? face.norm : eobj->vertexlist[face.vid[n]].norm);
+			if(level > 0) {
+				normal = meshSmoothingNormal(*eobj, face.vid[n].handleData());
+			}
 			float diffuse = useFaceNormal ? 0.5f : 1.f;
 			
 			eobj->vertexColors[face.vid[n]] = ApplyLight(lights, lightsCount, position, normal, colorMod, diffuse);
 			
 			tvList[n].p = Vec3f(eobj->vertexClipPositions[face.vid[n]]);
 			tvList[n].w = eobj->vertexClipPositions[face.vid[n]].w;
+			tvList[n].prevP = previousClipPosition(eobj, face.vid[n]);
 			tvList[n].uv.x = face.u[n];
 			tvList[n].uv.y = face.v[n];
+			float normalLength = glm::length(normal);
+			tvList[n].normal = (normalLength > 0.f) ? normal / normalLength : Vec3f(0.f);
 			
 			// Treat WATER Polys (modify UVs)
 			if(face.facetype & POLY_WATER) {
@@ -744,10 +798,31 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 		}
 
 		// HALO HANDLING START
-		if(io && (io->halo.flags & HALO_ACTIVE)) {
-			const IO_HALO & halo = io->halo;
-			AddFixedObjectHalo(face, t, halo, tvList, eobj);
+		bool halo = io && (io->halo.flags & HALO_ACTIVE);
+		if(halo) {
+			AddFixedObjectHalo(face, t, io->halo, tvList, eobj);
 		}
+		
+		TexturedVertex smoothed[MeshSmoothingMaxSegments * MeshSmoothingMaxSegments * 3];
+		size_t triangles = 1;
+		const TexturedVertex * vertices = tvList;
+		if(segments > 1 && GRenderer->supportsModelTessellation()) {
+			// The renderer curves the triangle itself
+			u32 tessellation = (u32(segments) << 3) | eobj->smoothing.creases[i];
+			tvList[0].tessellation = tvList[1].tessellation = tvList[2].tessellation = tessellation;
+		} else if(segments > 1) {
+			// The corners are already lit with the smooth normals, interpolating their colors is good enough for
+			// objects and much faster than lighting every new vertex
+			triangles = smoothFace(*eobj, i, tvList, segments, nullptr, smoothed);
+			vertices = smoothed;
+		}
+		
+		std::copy(vertices, vertices + 3, output);
+		for(size_t n = 1; n < triangles; n++) {
+			output = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
+			std::copy(vertices + n * 3, vertices + n * 3 + 3, output);
+		}
+		
 	}
 }
 
@@ -940,6 +1015,7 @@ static void AddAnimatedObjectHalo(const HaloInfo & haloInfo, const VertexId * pa
 			vert[1] = tvList[first];
 			vert[2] = tvList[second];
 			vert[3] = tvList[second];
+			vert[0].normal = vert[1].normal = vert[2].normal = vert[3].normal = Vec3f(0.f);
 			
 			Vec3f a = tvList[first].p / tvList[first].w;
 			Vec3f b = tvList[second].p / tvList[second].w;
@@ -984,7 +1060,8 @@ static void AddAnimatedObjectHalo(const HaloInfo & haloInfo, const VertexId * pa
 }
 
 static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
-                                const Vec3f & pos, float invisibility) {
+                                const Vec3f & pos, float invisibility, int segments,
+                                const MeshLighting * lighting, bool smoothNormals) {
 	
 	ARX_PROFILE_FUNC();
 	
@@ -1045,25 +1122,59 @@ static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
 		
 		TexturedVertex * tvList = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
 		
+		TexturedVertex corners[3];
 		for(size_t n = 0; n < 3; n++) {
-			tvList[n].p = Vec3f(eobj->vertexClipPositions[face.vid[n]]);
-			tvList[n].w = eobj->vertexClipPositions[face.vid[n]].w;
-			tvList[n].uv = Vec2f(face.u[n], face.v[n]);
-			tvList[n].color = eobj->vertexColors[face.vid[n]];
+			corners[n].p = Vec3f(eobj->vertexClipPositions[face.vid[n]]);
+			corners[n].w = eobj->vertexClipPositions[face.vid[n]].w;
+			corners[n].prevP = previousClipPosition(eobj, face.vid[n]);
+			corners[n].uv = Vec2f(face.u[n], face.v[n]);
+			corners[n].color = eobj->vertexColors[face.vid[n]];
+			if(smoothNormals) {
+				corners[n].normal = meshSmoothingNormal(*eobj, face.vid[n].handleData());
+			}
+		}
+		if(!smoothNormals) {
+			// Flat normal for the highlights
+			Vec3f normal = glm::cross(eobj->vertexWorldPositions[face.vid[1]].v - eobj->vertexWorldPositions[face.vid[0]].v,
+			                           eobj->vertexWorldPositions[face.vid[2]].v - eobj->vertexWorldPositions[face.vid[0]].v);
+			float length = glm::length(normal);
+			corners[0].normal = corners[1].normal = corners[2].normal = (length > 0.f) ? normal / length : Vec3f(0.f);
 		}
 		
 		if((face.facetype & POLY_TRANS) || invisibility > 0.f) {
-			tvList[0].color = tvList[1].color = tvList[2].color = Color::gray(fTransp).toRGB();
+			corners[0].color = corners[1].color = corners[2].color = Color::gray(fTransp).toRGB();
+		}
+		
+		TexturedVertex smoothed[MeshSmoothingMaxSegments * MeshSmoothingMaxSegments * 3];
+		size_t triangles = 1;
+		const TexturedVertex * vertices = corners;
+		if(segments > 1 && GRenderer->supportsModelTessellation()) {
+			// The renderer curves the triangle itself
+			u32 tessellation = (u32(segments) << 3) | eobj->smoothing.creases[i];
+			corners[0].tessellation = corners[1].tessellation = corners[2].tessellation = tessellation;
+		} else if(segments > 1) {
+			bool fixedColor = (face.facetype & POLY_TRANS) || invisibility > 0.f;
+			triangles = smoothFace(*eobj, i, corners, segments, fixedColor ? nullptr : lighting, smoothed);
+			vertices = smoothed;
+		}
+		
+		std::copy(vertices, vertices + 3, tvList);
+		for(size_t t = 1; t < triangles; t++) {
+			tvList = GetNewVertexList(pTex->m_modelBatch, face, invisibility, fTransp);
+			std::copy(vertices + t * 3, vertices + t * 3 + 3, tvList);
 		}
 		
 		if(haloInfo.size) {
-			AddAnimatedObjectHalo(haloInfo, face.vid, invisibility, eobj, io, tvList);
+			AddAnimatedObjectHalo(haloInfo, face.vid, invisibility, eobj, io, corners);
 		}
 		
 		if(glow) {
-			TexturedVertex * tv2 = PushVertexInTable(TexSpecialColor.m_modelBatch[BatchBucket_Opaque]);
-			std::copy(tvList, tvList + 3, tv2);
-			tv2[0].color = tv2[1].color = tv2[2].color = glowColor;
+			for(size_t t = 0; t < triangles; t++) {
+				TexturedVertex * tv2 = PushVertexInTable(TexSpecialColor.m_modelBatch[BatchBucket_Opaque]);
+				std::copy(vertices + t * 3, vertices + t * 3 + 3, tv2);
+				tv2[0].color = tv2[1].color = tv2[2].color = glowColor;
+				tv2[0].normal = tv2[1].normal = tv2[2].normal = Vec3f(0.f);
+			}
 		}
 		
 	}
@@ -1093,9 +1204,28 @@ static void Cedric_AnimateDrawEntityRender(EERIE_3DOBJ * eobj, const Vec3f & pos
 	size_t lightsCount;
 	UpdateLlights(lights, lightsCount, tv, false);
 	
-	Cedric_ApplyLighting(lights, lightsCount, eobj, obj, colorMod);
+	// Models are drawn with curved triangles and smooth shading
+	Entity * character = io;
+	if(!io && IN_BOOK_DRAW && eobj == entities.player()->obj) {
+		character = entities.player();
+	}
+	int level = 0;
+	if(character && (character == entities.player() || (character->ioflags & IO_NPC))) {
+		level = config.video.characterSmoothing;
+	} else if(io && !(io->ioflags & IO_ANGULAR)) {
+		level = config.video.objectSmoothing;
+	}
+	bool smooth = level > 0;
+	int segments = 1;
+	if(smooth) {
+		updateMeshSmoothing(*eobj);
+		segments = meshSmoothingSegments(level, IN_BOOK_DRAW ? 0.f : glm::distance(pos, g_camera->m_pos));
+	}
 	
-	Cedric_RenderObject(eobj, obj, io, pos, invisibility);
+	Cedric_ApplyLighting(lights, lightsCount, eobj, obj, colorMod, smooth);
+	
+	MeshLighting lighting = { lights, lightsCount, &colorMod };
+	Cedric_RenderObject(eobj, obj, io, pos, invisibility, segments, &lighting, smooth);
 	
 	// Now we can render Linked Objects
 	for(const EERIE_LINKED & link : eobj->linked) {

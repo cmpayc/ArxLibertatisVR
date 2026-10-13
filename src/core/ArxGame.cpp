@@ -1867,6 +1867,10 @@ void ArxGame::updateLevel() {
 
 	updateActiveCamera();
 
+	// Entities are animated and projected with the scene camera from here until the scene is rendered
+	g_sceneFrameIndex++;
+	g_renderingScene = true;
+	
 	ARX_GLOBALMODS_Apply();
 	
 	// Set Listener Position
@@ -1958,7 +1962,10 @@ void ArxGame::renderLevel() {
 	// The 3D scene is drawn once and every draw call is replicated into both eyes by the renderer
 	bool vrStereo = g_vr && g_vr->beginStereoRender();
 	#endif
-
+	
+	// The 3D scene may be rendered at a lower resolution and is upscaled before drawing the interface
+	GRenderer->beginScene();
+	
 	// Clear screen & Z buffers
 	GRenderer->Clear(Renderer::ColorBuffer | Renderer::DepthBuffer, g_fogColor);
 
@@ -2014,6 +2021,9 @@ void ArxGame::renderLevel() {
 
 	updateLightFlares();
 	renderLightFlares();
+	
+	g_renderingScene = false;
+	GRenderer->endScene();
 	
 	// Manage Death visual & Launch menu...
 	ARX_PLAYER_Manage_Death();
@@ -2246,6 +2256,18 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	float fogStart = fogEnd * 0.65f;
 	renderer.SetFogParams(fogStart, fogEnd);
 	renderer.SetFogColor(g_fogColor);
+	
+	renderer.setSceneScale(config.video.renderScale);
+	renderer.setUpscaler(config.video.upscaler, config.video.dlssPreset);
+	renderer.setUpscalerSharpness(config.video.fsrSharpness);
+	renderer.setAmbientOcclusion(config.video.ambientOcclusion);
+	renderer.setBloom(config.video.bloom);
+	renderer.setNormalMaps(config.video.normalMaps);
+	renderer.setParallaxMapping(config.video.parallaxMapping);
+	renderer.setSpecular(config.video.specular);
+	renderer.setReflections(config.video.reflections);
+	renderer.setColorGrading(config.video.colorGrading);
+	renderer.setPixelLighting(config.video.pixelLighting);
 	
 	ComputePortalVertexBuffer();
 	std::unique_ptr<VertexBuffer<SMY_VERTEX3>> vb3 = renderer.createVertexBuffer3(4000, Renderer::Stream);

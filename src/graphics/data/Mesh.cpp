@@ -416,6 +416,9 @@ Vec3f EE_RT(const Vec3f & in) {
 	return Vec3f(g_preparedCamera.m_worldToView * Vec4f(in, 1.0f));
 }
 
+u64 g_sceneFrameIndex = 0;
+bool g_renderingScene = false;
+
 Vec4f worldToClipSpace(const Vec3f & in) {
 	return g_preparedCamera.m_worldToScreen * Vec4f(in, 1.0f);
 }
@@ -1137,11 +1140,15 @@ void ComputePortalVertexBuffer() {
 					continue;
 				}
 				
+				// Transparent and glowing polygons are not affected by dynamic lights
+				bool lit = !(poly.type & (POLY_TRANS | POLY_GLOW));
+				
 				vertex->p.x = poly.v[0].p.x;
 				vertex->p.y = poly.v[0].p.y;
 				vertex->p.z = poly.v[0].p.z;
 				vertex->color = poly.v[0].color;
 				vertex->uv = poly.v[0].uv + texture->hd;
+				vertex->normal = lit ? poly.nrml[0] : Vec3f(0.f);
 				vertex++;
 				poly.uslInd[0] = index++;
 				
@@ -1150,6 +1157,7 @@ void ComputePortalVertexBuffer() {
 				vertex->p.z = poly.v[1].p.z;
 				vertex->color = poly.v[1].color;
 				vertex->uv = poly.v[1].uv + texture->hd;
+				vertex->normal = lit ? poly.nrml[1] : Vec3f(0.f);
 				vertex++;
 				poly.uslInd[1] = index++;
 				
@@ -1158,6 +1166,7 @@ void ComputePortalVertexBuffer() {
 				vertex->p.z = poly.v[2].p.z;
 				vertex->color = poly.v[2].color;
 				vertex->uv = poly.v[2].uv + texture->hd;
+				vertex->normal = lit ? poly.nrml[2] : Vec3f(0.f);
 				vertex++;
 				poly.uslInd[2] = index++;
 				
@@ -1167,6 +1176,7 @@ void ComputePortalVertexBuffer() {
 					vertex->p.z = poly.v[3].p.z;
 					vertex->color = poly.v[3].color;
 					vertex->uv = poly.v[3].uv + texture->hd;
+					vertex->normal = lit ? poly.nrml[3] : Vec3f(0.f);
 					vertex++;
 					poly.uslInd[3] = index++;
 				}

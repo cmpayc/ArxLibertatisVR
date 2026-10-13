@@ -45,6 +45,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #define ARX_GUI_MENU_MENUPAGE_H
 
 #include <memory>
+#include <vector>
 
 #include "gui/widget/Widget.h"
 #include "gui/widget/WidgetContainer.h"
@@ -105,7 +106,16 @@ protected:
 private:
 	
 	Rectf m_content;
-	
+
+	//! Widgets added with addCenter(), they can be scrolled if they do not fit into the content area
+	std::vector<Widget *> m_centered;
+	float m_scroll;
+	float m_scrollMax;
+
+	//! Scrolled widgets are only shown and usable while they are fully inside the content area
+	bool isVisible(const Widget & widget) const;
+	void scrollTo(float scroll);
+
 	const MENUSTATE m_id;
 	
 	bool m_initialized;

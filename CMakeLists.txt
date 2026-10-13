@@ -73,6 +73,9 @@ option(INSTALL_SCRIPTS "Install the data install script" ON)
 option(USE_OPENAL "Build the OpenAL audio backend" ON)
 option(USE_OPENGL "Build the OpenGL renderer backend" ON)
 option(USE_OPENXR "Build VR support using OpenXR" ON)
+option(USE_D3D11 "Build the Direct3D 11 renderer backend (Windows only)" ON)
+option(USE_DLSS "Build NVIDIA DLSS support for the Direct3D 11 renderer (needs the DLSS SDK)" ON)
+option(USE_FSR "Build AMD FidelityFX Super Resolution support for the Direct3D 11 renderer (needs the FidelityFX API headers)" ON)
 option(USE_WINHTTP "Use the native WinHTTP API instead of CURL on Windows" ON)
 option(USE_NATIVE_FS "Use the native filesystem backend directly instead of boost" ON)
 set(default_USE_X11 OFF)
@@ -917,6 +920,7 @@ set(AI_SOURCES
 set(ANIMATION_SOURCES
 	src/animation/Animation.cpp
 	src/animation/AnimationRender.cpp
+	src/animation/MeshSmoothing.cpp
 	src/animation/Skeleton.cpp
 )
 
@@ -1068,6 +1072,13 @@ set(VR_OPENXR_SOURCES
 	src/vr/VRKeyboard.cpp
 	src/vr/VRSystem.cpp
 	src/vr/VRText.cpp
+)
+
+set(GRAPHICS_D3D11_SOURCES
+	src/graphics/d3d11/D3D11Renderer.cpp
+	src/graphics/d3d11/D3D11Texture.cpp
+	src/graphics/d3d11/D3D11TextureStage.cpp
+	src/graphics/d3d11/D3D12Bridge.cpp
 )
 
 set(GUI_SOURCES
@@ -1316,6 +1327,38 @@ else()
 	unset(ARX_HAVE_SDL)
 	unset(ARX_HAVE_SDL1)
 	unset(ARX_HAVE_SDL2)
+endif()
+if(USE_D3D11 AND WIN32 AND ARX_HAVE_SDL2)
+	set(ARX_HAVE_D3D11 1)
+	list(APPEND GRAPHICS_SOURCES ${GRAPHICS_D3D11_SOURCES})
+	# The Direct3D headers define macros such as 'interface' that break other code in the unity build
+	set_source_files_properties(${GRAPHICS_D3D11_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
+	list(APPEND ARX_LIBRARIES d3d11 d3d12 dxgi d3dcompiler)
+	if(USE_DLSS AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+		# NVIDIA DLSS SDK (https://github.com/NVIDIA/DLSS), nvngx_dlss.dll is loaded at runtime
+		find_path(DLSS_INCLUDE_DIR nvsdk_ngx.h PATH_SUFFIXES include)
+		find_library(DLSS_LIBRARY nvsdk_ngx_d PATH_SUFFIXES lib/x64)
+		if(DLSS_INCLUDE_DIR AND DLSS_LIBRARY)
+			set(ARX_HAVE_DLSS 1)
+			set(GRAPHICS_DLSS_SOURCES src/graphics/d3d11/D3D11DLSS.cpp)
+			list(APPEND GRAPHICS_SOURCES ${GRAPHICS_DLSS_SOURCES})
+			set_source_files_properties(${GRAPHICS_DLSS_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
+			include_directories(SYSTEM ${DLSS_INCLUDE_DIR})
+			list(APPEND ARX_LIBRARIES ${DLSS_LIBRARY})
+		endif()
+	endif()
+	if(USE_FSR)
+		# AMD FidelityFX API headers (https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK),
+		# the FidelityFX libraries are loaded at runtime
+		find_path(FIDELITYFX_INCLUDE_DIR upscalers/include/ffx_upscale.h)
+		if(FIDELITYFX_INCLUDE_DIR)
+			set(ARX_HAVE_FSR 1)
+			set(GRAPHICS_FSR_SOURCES src/graphics/d3d11/D3D11FSR.cpp)
+			list(APPEND GRAPHICS_SOURCES ${GRAPHICS_FSR_SOURCES})
+			set_source_files_properties(${GRAPHICS_FSR_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
+			include_directories(SYSTEM ${FIDELITYFX_INCLUDE_DIR})
+		endif()
+	endif()
 endif()
 
 # VR
@@ -2002,6 +2045,9 @@ print_configuration("Renderer"
 	ARX_HAVE_EPOXY "OpenGL (libepoxy)"
 	ARX_HAVE_EPOXY "OpenGL ES (libepoxy)"
 	ARX_HAVE_GLEW  "OpenGL (GLEW)"
+	ARX_HAVE_D3D11 "Direct3D 11"
+	ARX_HAVE_DLSS  "DLSS"
+	ARX_HAVE_FSR   "FSR"
 )
 print_configuration("Audio features"
 	ARX_HAVE_OPENAL_EFX  "EFX"

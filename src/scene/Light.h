@@ -169,6 +169,9 @@ void resetDynLights();
 void ClearDynLights();
 void PrecalcDynamicLighting(const Vec3f & camPos, float camDepth);
 
+//! Pass the lights from \ref PrecalcDynamicLighting() to the renderer if it lights world geometry per pixel
+void UploadPixelLights();
+
 
 struct ShaderLight {
 	

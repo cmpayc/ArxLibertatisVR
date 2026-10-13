@@ -183,6 +183,23 @@ struct EERIE_FASTACCESS {
 	
 };
 
+//! Data for drawing an animated model as curved PN triangles, see animation/MeshSmoothing.h
+struct MeshSmoothingData {
+	
+	size_t faceCount = 0;
+	size_t vertexCount = 0;
+	
+	//! First vertex with the same bind pose position, for each vertex
+	std::vector<u16> weld;
+	
+	//! Per face: bit k is set if the edge from corner k to corner k + 1 is a crease
+	std::vector<u8> creases;
+	
+	//! Smooth world space normal of each welded vertex in this frame
+	std::vector<Vec3f> normals;
+	
+};
+
 struct EERIE_3DOBJ {
 	
 	res::path file;
@@ -192,6 +209,12 @@ struct EERIE_3DOBJ {
 	util::HandleVector<VertexId, EERIE_VERTEX> vertexWorldPositions;
 	util::HandleVector<VertexId, Vec4f> vertexClipPositions;
 	util::HandleVector<VertexId, ColorRGBA> vertexColors;
+	
+	// Clip positions from the 3D scene in this and the previous frame, for motion vectors
+	util::HandleVector<VertexId, Vec4f> vertexSceneClipPositions;
+	util::HandleVector<VertexId, Vec4f> vertexPreviousClipPositions;
+	u64 sceneClipFrame = 0;
+	bool hasPreviousClipPositions = false;
 	
 	std::vector<EERIE_FACE> facelist;
 	util::HandleVector<VertexGroupId, VertexGroup> grouplist;
@@ -207,6 +230,8 @@ struct EERIE_3DOBJ {
 	
 	std::unique_ptr<Skeleton> m_skeleton;
 	util::HandleVector<VertexGroupId, std::vector<VertexId>> m_boneVertices;
+	
+	MeshSmoothingData smoothing;
 	
 };
 

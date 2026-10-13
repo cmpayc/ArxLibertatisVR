@@ -76,6 +76,12 @@ void Renderer::removeListener(Listener * listener) {
 	                  m_listeners.end());
 }
 
+void Renderer::transferListeners(Renderer & renderer) {
+	arx_assert(!isInitialized() && !renderer.isInitialized());
+	renderer.m_listeners.insert(renderer.m_listeners.end(), m_listeners.begin(), m_listeners.end());
+	m_listeners.clear();
+}
+
 void Renderer::onRendererInit() {
 	m_initialized = true;
 	for(Listener * listener : m_listeners) {
