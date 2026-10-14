@@ -27,6 +27,8 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include "Configure.h"
+
 #include "input/Input.h"
 #include "input/Keyboard.h"
 #include "input/Mouse.h"
@@ -60,7 +62,11 @@ namespace Default {
 constexpr const std::string_view
 	language,
 	audio,
+	#if ARX_HAVE_D3D11
+	renderer = "Direct3D 11",
+	#else
 	renderer = "auto",
+	#endif
 	resolution = "auto",
 	audioBackend = "auto",
 	audioDevice = "auto",
