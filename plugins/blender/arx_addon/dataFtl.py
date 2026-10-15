@@ -407,17 +407,17 @@ class FtlSerializer(object):
             face.vid = (c_uint16 * 3)(*f.vids)
             face.u, face.v = zip(*f.uvs)
             
-            if f[2] < len(data.mats):
-                face.texid = f[2]
+            if f.texid < len(data.mats):
+                face.texid = f.texid
             else:
                 face.texid = -1
             
-            #face.texid = f[2]
-            face.facetype.asUInt = f[3]
-            face.transval = f[4]
-            # face.norm.x = f.normal[0]
-            # face.norm.y = f.normal[1]
-            # face.norm.z = f.normal[2]
+            #face.texid = f.texid
+            face.facetype.asUInt = f.facetype
+            face.transval = f.transval
+            face.norm.x = f.normal[0]
+            face.norm.y = f.normal[1]
+            face.norm.z = f.normal[2]
             result += bytearray(face)
 
         self.log.debug("Mats start: %s" % hex(len(result)))
@@ -431,35 +431,35 @@ class FtlSerializer(object):
 
         for g in data.groups:
             group = EERIE_GROUPLIST_FTL()
-            group.name = g[0].encode('iso-8859-1')
-            group.origin = g[1]
-            group.nb_index = len(g[2])
+            group.name = g.name.encode('iso-8859-1')
+            group.origin = g.origin
+            group.nb_index = len(g.indices)
             result += bytearray(group)
 
         for g in data.groups:
-            VertArray = c_int32 * len(g[2])
-            array = (VertArray)(*g[2])
+            VertArray = c_int32 * len(g.indices)
+            array = (VertArray)(*g.indices)
             result += bytearray(array)
 
         self.log.debug("Actions start: %s" % hex(len(result)))
 
         for a in data.actions:
             action = EERIE_ACTIONLIST_FTL()
-            action.name = a[0].encode('iso-8859-1')
-            action.idx = a[1]
+            action.name = a.name.encode('iso-8859-1')
+            action.idx = a.vidx
             result += bytearray(action)
 
         self.log.debug("Sels start: %s" % hex(len(result)))
 
         for s in data.sels:
             selection = EERIE_SELECTIONS_FTL()
-            selection.name = s[0].encode('iso-8859-1')
-            selection.nb_selected = len(s[1])
+            selection.name = s.name.encode('iso-8859-1')
+            selection.nb_selected = len(s.indices)
             result += bytearray(selection)
 
         for s in data.sels:
-            VertArray = c_int32 * len(s[1])
-            array = (VertArray)(*s[1])
+            VertArray = c_int32 * len(s.indices)
+            array = (VertArray)(*s.indices)
             result += bytearray(array)
 
         return result

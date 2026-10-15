@@ -29,18 +29,14 @@ bl_info = {
     "support": "COMMUNITY",
 }
 
-import imp
+import importlib
+import importlib.util
 
-try:
-    imp.find_module('bpy')
-    blenderFound = True
-except ImportError:
-    blenderFound = False
+blenderFound = importlib.util.find_spec('bpy') is not None
 
 print("Running inside blender: " + str(blenderFound))
 
 if blenderFound:
-    import importlib
     if "main" in locals():
         importlib.reload(main)
 

@@ -20,6 +20,7 @@ import logging
 import bpy
 from mathutils import Vector, Quaternion
 
+from .arx_io_util import ArxException
 from .dataTea import TeaSerializer
 
 
@@ -32,6 +33,8 @@ class ArxAnimationManager(object):
         data = self.teaSerializer.read(path)
         
         selectedObj = bpy.context.active_object
+        if not selectedObj:
+            raise ArxException("Select the armature of the model to animate")
 
         #Walk up object tree to amature
         walkObj = selectedObj
@@ -39,8 +42,7 @@ class ArxAnimationManager(object):
             walkObj = walkObj.parent
 
         if not walkObj.name.endswith('-amt'):
-            self.log.warning("Amature object nof found for: {}".format(obj.name))
-            return
+            raise ArxException("Armature object not found for: {}".format(selectedObj.name))
 
         armatureObj = walkObj
         obj = walkObj.children[0]

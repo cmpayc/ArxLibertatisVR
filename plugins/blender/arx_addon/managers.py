@@ -121,7 +121,7 @@ class ArxAddon(object):
             if not allowLibFallback:
                 raise e
             else:
-                self.log.error("Failed to load native io library, using slow fallback. Exception: " + str(e));
+                self.log.warning("Failed to load native io library, using slow fallback. Exception: " + str(e));
                 
                 from .naivePkware import decompress_ftl
                 class ArxIOFallback(object):

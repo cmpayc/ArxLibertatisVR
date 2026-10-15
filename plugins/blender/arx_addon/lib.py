@@ -58,8 +58,14 @@ class ArxIO(object):
 
     def __init__(self):
         if platform.system() == "Windows":
-            libPaths = [ os.path.realpath(__file__ + "\..\ArxIO.dll") ]
+            libPaths = [ os.path.join(os.path.dirname(os.path.realpath(__file__)), "ArxIO.dll") ]
             checkDll(libPaths[0])
+        elif platform.system() == "Darwin":
+            libPaths = [
+                os.path.realpath(__file__ + "/../libArxIO.0.dylib"),
+                os.path.realpath(__file__ + "/../libArxIO.dylib"),
+                "libArxIO.0.dylib"
+            ]
         else:
             libPaths = [
                 os.path.realpath(__file__ + "/../libArxIO.so.0"),

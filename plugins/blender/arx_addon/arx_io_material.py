@@ -57,7 +57,11 @@ def arx_create_material_nodes(material, image):
             continue
 
     # Remove default principled bsdf node
-    tree.nodes.remove(n_principled)
+    if n_principled:
+        tree.nodes.remove(n_principled)
+
+    if not n_output:
+        n_output = tree.nodes.new('ShaderNodeOutputMaterial')
 
     n_output.location = (0, 0)
 
@@ -90,6 +94,8 @@ def createMaterial(rootDirectory, textureName) -> bpy.types.Material:
     image = arx_create_image(rootDirectory, relativePath)
 
     mat = bpy.data.materials.new(matName)
+    # Original texture path, written back on export
+    mat['arx.texture'] = textureName
     mat.use_nodes = True
     mat.blend_method = 'HASHED'
     arx_create_material_nodes(mat, image)
@@ -138,8 +144,13 @@ def arx_get_material_node_group():
 
     group = bpy.data.node_groups.new(arx_material_node_group_name, 'ShaderNodeTree')
 
-    group.outputs.new('NodeSocketShader', 'Shader')
-    group.inputs.new('NodeSocketColor', 'Color')
+    if hasattr(group, 'interface'):
+        # Blender 4.0+
+        group.interface.new_socket('Shader', in_out='OUTPUT', socket_type='NodeSocketShader')
+        group.interface.new_socket('Color', in_out='INPUT', socket_type='NodeSocketColor')
+    else:
+        group.outputs.new('NodeSocketShader', 'Shader')
+        group.inputs.new('NodeSocketColor', 'Color')
 
     n_out = group.nodes.new('NodeGroupOutput')
     n_out.name = 'n_out'

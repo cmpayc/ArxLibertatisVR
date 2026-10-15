@@ -60,62 +60,41 @@ class ArxObjectManager(object):
         if len(name.encode('utf-8')) > 63:
             raise ArxException("Name ["+name+"] too long to be used as blender object name")
 
-    def analyzeFaceData(self, faceData):
-        # find weird face data
-        facesToDrop = []
-
-        seenFaceVerts = {}
-        for i, face in enumerate(faceData):
-            for foo in itertools.permutations(face.vids):
-                if foo in seenFaceVerts:
-                    seen = seenFaceVerts[foo]
-                    facesToDrop.append(seen)
-                    break
-
-            seenFaceVerts[face.vids] = i
-
-        if len(facesToDrop) > 0:
-            self.log.debug("Dropping faces: " + str(facesToDrop))
-
-        return facesToDrop
-
-    def createBmesh(self, context, vertData, faceData) -> bmesh.types.BMesh:
-
-        facesToDrop = self.analyzeFaceData(faceData)
+    def createBmesh(self, context, vertData, faceData, matCount) -> bmesh.types.BMesh:
 
         bm = bmesh.new()
 
         arxFaceType = bm.faces.layers.int.new('arx_facetype')
         arxTransVal = bm.faces.layers.float.new('arx_transval')
+        # Original FTL vertex index + 1, so the export can merge copies again and keep the vertex order.
+        # New vertices made in Blender get 0.
+        arxVertex = bm.verts.layers.int.new('arx_vertex')
 
         uvData = bm.loops.layers.uv.verify()
+        bmVerts = []
         for i, v in enumerate(vertData):
             vertex = bm.verts.new(arx_pos_to_blender_for_model(v.xyz))
-            vertex.normal = v.n
-            vertex.index = i
-
-        bm.verts.ensure_lookup_table()
+            vertex[arxVertex] = i + 1
+            bmVerts.append(vertex)
 
         for i, f in enumerate(faceData):
 
-            if i in facesToDrop:
+            faceVerts = [bmVerts[v] for v in f.vids]
+            if len(set(faceVerts)) != len(faceVerts):
+                self.log.warning("Skipping degenerate face %i" % i)
                 continue
 
-            # if f.texid < 0:
-            #    continue
+            if bm.faces.get(faceVerts) is not None:
+                # Blender can not have two faces with the same vertices (back faces in the original models):
+                # use copies of the vertices
+                faceVerts = [bm.verts.new(v.co) for v in faceVerts]
+                for j, v in enumerate(faceVerts):
+                    v[arxVertex] = f.vids[j] + 1
 
-            faceVerts = [bm.verts[v] for v in f.vids]
-            evDict = {}
-            try:
-                face = bm.faces.new(faceVerts)
-                face.index = i
-            except ValueError:
-                self.log.debug("Extra face")
+            face = bm.faces.new(faceVerts)
 
-            face.normal = Vector(f.normal)
-
-            if f.texid >= 0:
-                face.material_index = f.texid
+            # Untextured faces use an empty material slot after the textures
+            face.material_index = f.texid if f.texid >= 0 else matCount
 
             face[arxFaceType] = f.facetype
             face[arxTransVal] = f.transval
@@ -149,19 +128,25 @@ class ArxObjectManager(object):
         #armatureObj.parent = obj # this created a dependency recursion, so i commented it
 
         obj['arx.ftl.name'] = data.metadata.name
+        # Original FTL vertex indices (see the arx_vertex attribute)
         obj['arx.ftl.org'] = data.metadata.org
+        obj['arx.ftl.group_origins'] = [g.origin for g in data.groups]
+
+        # Blender vertices for each FTL vertex, more than one for copies made for back faces
+        copies = [[] for _ in data.verts]
+        for v in mesh.vertices:
+            copies[mesh.attributes['arx_vertex'].data[v.index].value - 1].append(v.index)
 
         for i, g in enumerate(data.groups):
             grp = obj.vertex_groups.new(name="grp:" + str(i).zfill(2) + ":" + g.name)
-            # XXX add the origin to the group ?
             for v in g.indices:
-                grp.add([v], 0.0, 'ADD')
+                grp.add(copies[v], 1.0, 'ADD')
 
         for i, s in enumerate(data.sels):
             grp = obj.vertex_groups.new(name="sel:" + str(i).zfill(2) + ":" + s.name)
 
             for v in s.indices:
-                grp.add([v], 0.0, 'ADD')
+                grp.add(copies[v], 1.0, 'ADD')
 
         for a in data.actions:
             action = bpy.data.objects.new(a.name, None)
@@ -205,7 +190,10 @@ class ArxObjectManager(object):
         for m in data.mats:
             mat = createMaterial(self.dataPath, m)
             obj.data.materials.append(mat)
-            
+
+        if any(f.texid < 0 for f in data.faces):
+            obj.data.materials.append(None)
+
         #bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
         return obj
 
@@ -259,9 +247,6 @@ class ArxObjectManager(object):
                 self.log.debug("Loaded %i unpacked bytes from file %s" % (len(data), filePath))
             else:
                 unpacked = self.ioLib.unpack(data)
-                with open(filePath + ".unpack", "wb") as f:
-                    f.write(unpacked)
-                    self.log.debug("Written unpacked ftl")
                 self.log.debug("Loaded %i packed bytes from file %s" % (len(data), filePath))
 
         ftlData = self.ftlSerializer.read(unpacked)
@@ -297,17 +282,19 @@ class ArxObjectManager(object):
         #collection = bpy.data.collections.new(object_id_string)
         #context.scene.collection.children.link(collection)
 
-        bm = self.createBmesh(context, ftlData.verts, ftlData.faces)
+        bm = self.createBmesh(context, ftlData.verts, ftlData.faces, len(ftlData.mats))
         obj = self.createObject(context, bm, ftlData, canonicalId, parent_collection)
 
         if import_tweaks:
             file_dir = os.path.dirname(filePath)
             tweak_dir = os.path.join(file_dir, 'tweaks')
             if os.path.isdir(tweak_dir):
-                for rel_tweak_file in os.listdir(tweak_dir):
+                for rel_tweak_file in sorted(os.listdir(tweak_dir)):
+                    if not rel_tweak_file.lower().endswith('.ftl'):
+                        continue
                     abs_tweak_file = os.path.join(tweak_dir, rel_tweak_file)
                     tweak_data = self.loadFile_data(abs_tweak_file)
-                    tweak_mesh = self.createBmesh(context, tweak_data.verts, tweak_data.faces)
+                    tweak_mesh = self.createBmesh(context, tweak_data.verts, tweak_data.faces, len(tweak_data.mats))
 
                     tweak_obj_id = canonicalId.copy()
                     tweak_obj_id.append(os.path.splitext(rel_tweak_file)[0])
@@ -360,142 +347,121 @@ class ArxObjectManager(object):
             if len(f.loops) > 3:
                 raise ArxException("Face with more than 3 vertices found")
 
-        for o in bpy.data.objects:
-            for ms in o.material_slots:
-                if not ms.material.name.endswith('-mat'):
-                    raise ArxException("Material slot names must end with: " + '-mat')
-                    
-        
-        # Validate child empties representing action points
-        for child in bpy.data.objects:
-            if child.type == 'EMPTY' and child.parent == obj:
-                nameParts = child.name.split(".")
-                name = nameParts[0].lower()
-                print(nameParts)
-                if name.startswith("hit_"):
-                    pass
-                elif name == "view_attach":
-                    pass
-                elif name == "primary_attach":
-                    pass
-                elif name == "left_attach":
-                    pass
-                elif name == "weapon_attach":
-                    pass
-                elif name == "secondary_attach":
-                    pass
-                elif name == "fire":
-                    pass
-                else:
-                    self.log.warn("Unexpected child empty: {}".format(nameParts))
-                    
-        
-        # TODO validate the mesh
+        # Material slots → FTL textures, an empty slot means an untextured face
+        matNames = []
+        slotTexture = []
+        for ms in obj.material_slots:
+            mat = ms.material
+            if mat is None:
+                slotTexture.append(-1)
+                continue
+            texture = mat.get('arx.texture')
+            if texture is None:
+                if not mat.name.endswith('-mat'):
+                    raise ArxException("Material names must end with -mat: " + mat.name)
+                texture = 'GRAPH\\OBJ3D\\TEXTURES\\' + mat.name[:-4] + '.BMP'
+            slotTexture.append(len(matNames))
+            matNames.append(texture)
 
-        verts = []
-        
-        # First add all mesh vertices
+        # Vertices: copies of one original vertex (made on import for back faces) are merged again and the original
+        # vertex order is kept. Vertices without an original index, or moved away from it, are appended.
+        arxVertex = bm.verts.layers.int.get('arx_vertex')
+        bm.verts.ensure_lookup_table()
+        firstCopy = {}
         for v in bm.verts:
-            vertexNormals = [sc.normal for sc in bm.verts if sc.co == v.co]
-            normal = Vector((0.0, 0.0, 0.0))
-            for n in vertexNormals:
-                normal += v.normal
-            normal.normalize()
-            verts.append(FtlVertex(
-                blender_pos_to_arx(v.co[:]),
-                blender_pos_to_arx(normal)
-            ))
-        
-        originVertexIndex = -1
-        for index, vert in enumerate(verts):
-            if vert.xyz == (0.0, 0.0, 0.0):
-                #self.log.info("Origin vertex found at index {}".format(index))
-                originVertexIndex = index
-        
-        if originVertexIndex == -1:
+            key = v[arxVertex] if arxVertex else 0
+            if key > 0 and key not in firstCopy:
+                firstCopy[key] = v
+        vertexKeys = []
+        for v in bm.verts:
+            key = v[arxVertex] if arxVertex else 0
+            if key > 0 and firstCopy[key].co == v.co:
+                vertexKeys.append(key)
+            else:
+                vertexKeys.append(-1 - v.index)
+        order = sorted(set(k for k in vertexKeys if k > 0)) + [k for k in vertexKeys if k < 0]
+        keyIndex = {k: i for i, k in enumerate(order)}
+        vertexIndex = [keyIndex[k] for k in vertexKeys]
+        originalIndex = {k - 1: i for k, i in keyIndex.items() if k > 0}
+
+        verts = [None] * len(order)
+        for v in bm.verts:
+            i = vertexIndex[v.index]
+            if verts[i] is None:
+                verts[i] = FtlVertex(blender_pos_to_arx(v.co[:]), blender_pos_to_arx(v.normal[:]))
+
+        org = originalIndex.get(obj.get('arx.ftl.org', -1))
+        if org is None:
+            for index, vert in enumerate(verts):
+                if vert.xyz == (0.0, 0.0, 0.0):
+                    org = index
+        if org is None:
             self.log.info("Origin vertex not found, adding new one")
-            originVertexIndex = len(verts)
+            org = len(verts)
             verts.append(FtlVertex((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
-        
-        metadata = FtlMetadata(name=obj.get('arx.ftl.name', ''), org=originVertexIndex)
-        
-        # Add action point vertices
+
+        metadata = FtlMetadata(name=obj.get('arx.ftl.name', ''), org=org)
+
+        # Action points: empties parented to the mesh
         actions = []
         for o in bpy.data.objects:
             if o.type == 'EMPTY' and o.parent == obj:
-                nameParts = o.name.split(".")
-                name = nameParts[0]
+                name = o.name.split(".")[0]
                 if o.parent_type == 'VERTEX':
-                    actionVertexIndex = o.parent_vertices[0]
-                    actions.append(FtlAction(name, actionVertexIndex))
+                    if o.parent_vertices[0] >= len(bm.verts):
+                        raise ArxException("Action point {} is parented to a deleted vertex".format(name))
+                    actions.append(FtlAction(name, vertexIndex[o.parent_vertices[0]]))
                 elif o.parent_type == 'OBJECT':
-                    actionVertexIndex = len(verts)
-                    verts.append(FtlVertex((o.location[0], o.location[1], o.location[2]), (0.0, 0.0, 0.0)))
-                    actions.append(FtlAction(name, actionVertexIndex))
+                    actions.append(FtlAction(name, len(verts)))
+                    verts.append(FtlVertex(blender_pos_to_arx(o.location[:]), (0.0, 0.0, 0.0)))
                 else:
-                    self.log.warn("Unhandled empty parent type {}".format(o.parent_type))
+                    self.log.warning("Unhandled empty parent type {}".format(o.parent_type))
 
         uvData = bm.loops.layers.uv.verify()
 
-        allXYZ = [v.xyz for v in verts]
         faces = []
-
         for f in bm.faces:
-            vertexIndices = []
-            vertexUvs = []
-            vertexNormals = []
-            for c in f.loops:
-                vertexIndices.append(allXYZ.index(blender_pos_to_arx(c.vert.co[:])))
-                vertexUvs.append((c[uvData].uv[0], 1 - c[uvData].uv[1]))
-                vertexNormals.append((c.vert.normal[0], c.vert.normal[1], c.vert.normal[2]))
-            mat = f.material_index
-
-            faceType = f[arxFaceType]
-            transval = f[arxTransVal]
-
+            if f.material_index >= len(slotTexture):
+                raise ArxException("Face uses a missing material slot")
             faces.append(FtlFace(
-                vids=tuple(vertexIndices),
-                uvs=vertexUvs,
-                texid=mat,
-                facetype=faceType,
-                transval=transval,
-                normal=vertexNormals
+                vids=tuple(vertexIndex[c.vert.index] for c in f.loops),
+                uvs=[(c[uvData].uv[0], 1 - c[uvData].uv[1]) for c in f.loops],
+                texid=slotTexture[f.material_index],
+                facetype=f[arxFaceType],
+                transval=f[arxTransVal],
+                normal=blender_pos_to_arx(f.normal[:])
             ))
 
         grps = []
         sels = []
 
         dvert_lay = bm.verts.layers.deform.active
+        groupOrigins = obj.get('arx.ftl.group_origins')
 
         for grp in obj.vertex_groups:
-            v = []
+            members = set()
             if dvert_lay is not None:
                 for vert in bm.verts:
-                    dvert = vert[dvert_lay]
-                    if grp.index in dvert:
-                        v.append(vert.index)
+                    if grp.index in vert[dvert_lay]:
+                        members.add(vertexIndex[vert.index])
+            v = sorted(members)
 
-            s = grp.name.split(":")
+            s = grp.name.split(":", 2)
             if s[0] == "grp":
-                armature = bpy.data.armatures.get("/".join(canonicalId))
-                if armature:
-                    origin = armature.bones[grp.name]["OriginVertex"]
-                else:
-                    # TODO hardcoded use of mesh vertex at index 0
-                    origin = 0
-                
-                # TODO get the real data from armature
-                parentIndex = -1
-                grps.append(FtlGroup(s[2], origin, v, parentIndex))
-            else:
-                sels.append(FtlSelection(s[2], v))
+                groupNumber = int(s[1])
+                if groupOrigins is None or groupNumber >= len(groupOrigins):
+                    raise ArxException("No origin (pivot) vertex for group " + grp.name)
+                origin = originalIndex.get(groupOrigins[groupNumber])
+                if origin is None:
+                    raise ArxException("The origin (pivot) vertex of group {} was deleted".format(grp.name))
+                # The parent is not stored, the game finds it from the group vertices
+                grps.append((groupNumber, FtlGroup(s[2], origin, v, -1)))
+            elif s[0] == "sel":
+                sels.append((int(s[1]), FtlSelection(s[2], v)))
 
-        matNames = []
-        for o in bpy.data.objects:
-            for ms in o.material_slots:
-                mat = ms.material
-                # strip -mat suffix and decorate with bullshit
-                matNames.append('GRAPH\\OBJ3D\\TEXTURES\\' + mat.name[:-4] + ".FOO")
+        # Animations address groups by index
+        grps = [g for n, g in sorted(grps, key=lambda x: x[0])]
+        sels = [s for n, s in sorted(sels, key=lambda x: x[0])]
 
         bm.free()
 
@@ -511,7 +477,14 @@ class ArxObjectManager(object):
 
     def saveFile(self, path):
 
-        data = self.toFtlData()
+        obj = bpy.context.active_object
+        if not obj or obj.type != 'MESH':
+            meshes = [o for o in bpy.context.selected_objects if o.type == 'MESH']
+            if len(meshes) != 1:
+                raise ArxException("Select the mesh object to export")
+            obj = meshes[0]
+
+        data = self.toFtlData(obj)
 
         binData = self.ftlSerializer.write(data)
 
