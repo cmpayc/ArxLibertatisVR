@@ -973,7 +973,44 @@ void EERIE_PORTAL_ReleaseOnlyVertexBuffer() {
 		room.indexBuffer.clear();
 		room.ppTextureContainer.clear();
 	}
-	
+
+	if(GRenderer) {
+		GRenderer->setShadowOccluders(nullptr, 0);
+	}
+	ClearShadowLights();
+
+}
+
+//! Pass the opaque world polygons to the renderer, they block the light of the shadow casting lights
+static void updateShadowOccluders() {
+
+	std::vector<Vec3f> vertices;
+
+	for(const Room & room : g_rooms->rooms) {
+		for(const EP_DATA & epd : room.epdata) {
+			const EERIEPOLY & poly = g_tiles->get(epd.tile).polygons()[epd.idx];
+			// Polygons with alpha cutouts (grates, plants) would cast solid shadows
+			if((poly.type & (POLY_IGNORE | POLY_HIDE | POLY_NODRAW | POLY_TRANS | POLY_WATER | POLY_LAVA
+			                 | POLY_NO_SHADOW))
+			   || !poly.tex || (poly.tex->m_pTexture && poly.tex->m_pTexture->hasAlpha())) {
+				continue;
+			}
+			vertices.push_back(poly.v[0].p);
+			vertices.push_back(poly.v[1].p);
+			vertices.push_back(poly.v[2].p);
+			// Same triangles as the room index buffers
+			if(poly.type & POLY_QUAD) {
+				vertices.push_back(poly.v[3].p);
+				vertices.push_back(poly.v[2].p);
+				vertices.push_back(poly.v[1].p);
+			}
+		}
+	}
+
+	LogDebug("Shadow occluders: " << vertices.size() / 3 << " triangles");
+
+	GRenderer->setShadowOccluders(vertices.data(), vertices.size());
+
 }
 
 namespace {
@@ -1219,9 +1256,11 @@ void ComputePortalVertexBuffer() {
 		}
 		
 		room->pVertexBuffer->unlock();
-		
+
 		std::partition(room->ppTextureContainer.begin(), room->ppTextureContainer.end(), HasAlphaChannel());
-		
+
 	}
-	
+
+	updateShadowOccluders();
+
 }

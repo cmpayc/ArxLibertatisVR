@@ -31,17 +31,21 @@ static const struct {
 	std::string_view tag;
 	D3D11Texture::Specular specular;
 } surfaceMaterials[] = {
-	{ "lava",    { 0.f, 1.f, 0.f, 0.f } },
+	{ "lava",    { 0.f, 1.f, 0.f, 0.f, 1.f } },
 	{ "water",   { 1.f, 96.f, 0.f, 1.f } },
 	{ "wet",     { 0.8f, 64.f, 0.f, 0.f } },
 	{ "blood",   { 0.7f, 64.f, 0.3f, 0.f } },
 	{ "mud",     { 0.5f, 48.f, 0.f, 0.f } },
+	// Crystals and gems reflect (only level geometry) and look clear and deep, before "glass" for "[glass]_quartz"
+	{ "quartz",  { 0.6f, 128.f, 0.f, 0.3f, 0.f, 0.f, 1.f } },
+	{ "crystal", { 0.6f, 128.f, 0.f, 0.3f, 0.f, 0.f, 1.f } },
+	{ "diamond", { 0.6f, 128.f, 0.f, 0.3f, 0.f, 0.f, 1.f } },
+	{ "gems",    { 0.6f, 128.f, 0.f, 0.3f, 0.f, 0.f, 1.f } },
+	// The crystal mirrors of the temple of illusion ("[glass]_mirror"), polished: sharper reflections
+	{ "mirror",  { 0.6f, 128.f, 0.f, 0.6f, 0.f, 0.f, 1.f } },
 	{ "glass",   { 1.f, 128.f, 0.f, 0.f } },
 	{ "vitrail", { 1.f, 128.f, 0.f, 0.f } },
-	{ "mirror",  { 1.f, 128.f, 0.f, 0.f } },
-	{ "quartz",  { 1.f, 128.f, 0.f, 0.f } },
-	{ "crystal", { 1.f, 128.f, 0.f, 0.f } },
-	{ "ice",     { 0.9f, 96.f, 0.f, 0.f } },
+	{ "ice",     { 0.3f, 96.f, 0.f, 0.2f, 0.f, 1.f } },
 	{ "marble",  { 0.6f, 64.f, 0.f, 0.f } },
 	{ "rust",    { 0.3f, 16.f, 1.f, 0.f } },
 	{ "metal",   { 0.9f, 40.f, 1.f, 0.f } },

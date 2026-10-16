@@ -509,7 +509,42 @@ public:
 	 * Lights that only add highlights must come after all other lights.
 	 */
 	virtual void setPixelLights(const PixelLight * lights, size_t count) { ARX_UNUSED(lights), ARX_UNUSED(count); }
-	
+
+	//! A point light that casts dynamic shadows, with the same falloff as a \ref PixelLight
+	struct ShadowLight {
+		Vec3f position = Vec3f(0.f);
+		float fallStart = 0.f;
+		float fallEnd = 0.f;
+		Color3f color = Color3f::black; //!< In [0, 1]
+		float intensity = 0.f;          //!< Factor for the light color at full strength
+		float strength = 0.f;           //!< In [0, 1], for fading the shadows in and out
+		bool baked = false;             //!< The light is in the static lighting, which already has the world's shadows
+	};
+
+	//! \return true if this renderer supports dynamic shadows
+	[[nodiscard]] virtual bool supportsShadows() const { return false; }
+
+	//! Set the dynamic shadow quality: 0 = off (blob shadows), 1 to 3 = more lights and sharper shadows
+	virtual void setShadows(int quality) { ARX_UNUSED(quality); }
+
+	//! \return the maximum number of lights for \ref setShadowLights(), 0 if dynamic shadows are off
+	[[nodiscard]] virtual size_t getShadowLightLimit() const { return 0; }
+
+	//! Set the lights that cast dynamic shadows in the next 3D scene, at most \ref getShadowLightLimit()
+	virtual void setShadowLights(const ShadowLight * lights, size_t count) { ARX_UNUSED(lights), ARX_UNUSED(count); }
+
+	/*!
+	 * Set the static world geometry that blocks the light of shadow casting lights.
+	 * \param vertices world space triangle list, nullptr to remove the geometry of the previous level
+	 */
+	virtual void setShadowOccluders(const Vec3f * vertices, size_t count) { ARX_UNUSED(vertices), ARX_UNUSED(count); }
+
+	/*!
+	 * Add moving geometry that casts shadows in the current 3D scene.
+	 * \param vertices world space triangle list, with the faces that the camera does not see
+	 */
+	virtual void addShadowCasters(const Vec3f * vertices, size_t count) { ARX_UNUSED(vertices), ARX_UNUSED(count); }
+
 	void setRenderState(RenderState state) noexcept { m_state = state; }
 	[[nodiscard]] RenderState getRenderState() const noexcept { return m_state; }
 	

@@ -48,6 +48,7 @@ cbuffer PSConstants : register(b0) {
 	float4 reliefParams; // x = normal map slope scale, y = parallax depth relative to the texture size, z = cavity darkening of models
 	float4 specularParams; // x = highlight strength, y = exponent, z = metallic
 	float4 surfaceParams; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
+	float4 effectParams; // x = time in seconds (repeating), y = lava glow
 };
 
 cbuffer ClearConstants : register(b1) {
@@ -107,6 +108,7 @@ struct PSOutput {
 	float4 color : SV_Target0;
 	float4 motion : SV_Target1; // xy = previous - current position in NDC, w = 1 if valid
 	float4 surface : SV_Target2; // xy = encoded normal, z = reflectivity, w = 1 to replace the old value
+	float4 shading : SV_Target3; // x = brightness of the light at the surface, y = 1 if shadows can darken it, w = 1 to replace
 };
 
 VSOutput makeOutput(float4 clip, float4 prevClip, float4 color, float2 uv0, float2 uv1, float2 uv2) {
@@ -250,6 +252,22 @@ void modelReliefLighting(float3 position, float3 normal, float3 bumped, int coun
 	}
 }
 
+// Lava churns: its texture is slowly pushed around by overlapping waves over the surface (frequencies of the time are
+// multiples of 0.1, see LavaTimePeriod)
+float2 lavaFlow(float3 world, float time) {
+	float2 p = world.xz * 0.01;
+	float2 flow;
+	flow.x = sin(p.y * 1.3 + time * 0.6) + 0.5 * sin(p.x * 2.1 - p.y * 0.7 + time * 0.9);
+	flow.y = cos(p.x * 1.1 - time * 0.5) + 0.5 * cos(p.y * 1.9 + p.x * 0.8 - time * 0.7);
+	return flow * 0.02;
+}
+
+// How hot the lava is at a point, pulsing slowly in large patches
+float lavaPulse(float3 world, float time) {
+	float2 p = world.xz * 0.006;
+	return 0.65 + 0.35 * sin(p.x * 1.7 + p.y * 1.3 + time * 1.2) * sin(p.y * 2.3 - p.x * 0.9 - time * 0.8);
+}
+
 // Octahedral encoding of a unit vector into [0, 1]^2
 float2 encodeNormal(float3 n) {
 	n /= abs(n.x) + abs(n.y) + abs(n.z);
@@ -302,9 +320,14 @@ PSOutput psMain(PSInput input
 	float3 gradU = dp2perp * dx0.x + dp1perp * dy0.x;
 	float3 gradV = dp2perp * dx0.y + dp1perp * dy0.y;
 	
+	float2 uv0 = input.uv0;
+	bool lava = effectParams.y > 0;
+	[branch] if(lava) {
+		uv0 += lavaFlow(input.world, effectParams.x);
+	}
+
 	// Parallax occlusion mapping: march the view ray through the height field below the surface, with the
 	// average height at the surface
-	float2 uv0 = input.uv0;
 	[branch] if(relief && reliefParams.y > 0) {
 		float det = dot(worldDx, dp2perp);
 		float viewDistance = length(input.view);
@@ -385,6 +408,8 @@ PSOutput psMain(PSInput input
 		float height = reliefMap.SampleGrad(sampler0, uv0, dx0, dy0).b;
 		color.rgb *= 1 - saturate((0.5 - height) * 2) * 0.5 * reliefParams.z;
 	}
+	// The light that reaches the surface, which the dynamic shadows take away from
+	float incidentLight = dot(saturate(color.rgb), float3(0.299, 0.587, 0.114));
 	float4 texel0 = float4(1, 1, 1, 1);
 	[branch] if(stages[0].z != 0) {
 		texel0 = texture0.SampleGrad(sampler0, uv0, dx0, dy0);
@@ -397,17 +422,67 @@ PSOutput psMain(PSInput input
 		color = combine(stages[2], color, texture2.SampleGrad(sampler2, input.uv2, dx2, dy2));
 	}
 	
+	// Ice: its icy (bluish, not brown earth) parts look deep and cold, with cold light at grazing angles and twinkling
+	// frost, and reflect the scene (see the surface output)
+	float iceMask = 0;
+	// Crystals and gems get the same look on the whole texture, clear instead of blue
+	bool crystal = effectParams.w > 0;
+	[branch] if((effectParams.z > 0 || crystal) && stages[0].z != 0) {
+		iceMask = crystal ? effectParams.w : smoothstep(-0.08, 0.02, texel0.b - texel0.r) * effectParams.z;
+		float3 view = input.view / max(length(input.view), 0.0001);
+		float cosView = saturate(dot(view, flatNormal));
+		// How much light the surface gets, from its color and its texture
+		float3 luma = float3(0.299, 0.587, 0.114);
+		float lighting = clamp(dot(color.rgb, luma) / max(dot(texel0.rgb, luma), 0.05), 0, 2);
+		// A deeper layer of the ice seen through the surface, shifted with the view like the parallax mapping
+		float det = dot(worldDx, dp2perp);
+		float uvPerWorld = sqrt(length(gradU) * length(gradV)) / max(abs(det), 1e-20);
+		[branch] if(abs(det) > 1e-20 && uvPerWorld > 0 && iceMask > 0) {
+			float depth = 0.08 / uvPerWorld;
+			float2 offset = -float2(dot(gradU, view), dot(gradV, view)) / det * (depth / max(cosView, 0.25));
+			float3 inner = texture0.SampleGrad(sampler0, uv0 + offset, dx0, dy0).rgb;
+			float3 deep = inner * (crystal ? float3(0.7, 0.75, 0.8) : float3(0.35, 0.52, 0.7)) * min(lighting, 1);
+			color.rgb = lerp(color.rgb, deep, 0.4 * iceMask);
+		}
+		// Cold tint
+		color.rgb = lerp(color.rgb, color.rgb * float3(0.75, 0.88, 1), (crystal ? 0.15 : 0.6) * iceMask);
+		// Cold light at grazing angles, where ice reflects most
+		float fresnel = pow(1 - cosView, 4);
+		color.rgb += float3(0.35, 0.5, 0.65) * (fresnel * 0.08 * iceMask * saturate(lighting));
+		// Frost twinkles as the view moves, close by only
+		float3 cell = floor(input.world * 0.5 + view * 6);
+		float hash = frac(sin(dot(cell, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+		float fade = saturate(1 - length(input.view) / 800);
+		color.rgb += step(0.997, hash) * (0.25 * iceMask * fade * saturate(lighting * 2));
+		color.rgb = saturate(color.rgb);
+		// The earth between the ice is not shiny
+		specular *= lerp(0.3, 1, iceMask);
+	}
+
 	// Metals tint the highlights with their color, darker parts of other surfaces are less shiny
 	[branch] if(any(specular > 0)) {
 		float luminance = dot(texel0.rgb, float3(0.299, 0.587, 0.114));
 		float3 tint = lerp(saturate(luminance * 2).xxx, texel0.rgb * 1.5, specularParams.z);
 		color.rgb = saturate(color.rgb + specular * tint);
 	}
-	
+
+	// Lava glows on its own: not darkened by the lighting, the bright cracks are hot and pulse, the dark crust cools
+	float3 lavaGlow = float3(0, 0, 0);
+	[branch] if(lava) {
+		float heat = smoothstep(0.3, 0.85, dot(texel0.rgb, float3(0.299, 0.587, 0.114)));
+		float3 lit = lerp(color.rgb, texel0.rgb, 0.7 * effectParams.y);
+		color.rgb = lit * lerp(0.7, 1, heat);
+		lavaGlow = float3(1, 0.45, 0.08) * (heat * heat * lavaPulse(input.world, effectParams.x) * 0.7
+		                                    * effectParams.y);
+	}
+
 	if(fogParams.z != 0) {
 		float f = saturate((fogParams.y - input.fog) / max(fogParams.y - fogParams.x, 0.0001));
 		color.rgb = lerp(fogColor.rgb, color.rgb, f);
 	}
+
+	// The glow shines through the fog
+	color.rgb = saturate(color.rgb + lavaGlow);
 	
 	if(color.a <= fogParams.w) {
 		discard;
@@ -432,7 +507,14 @@ PSOutput psMain(PSInput input
 	// Normal and reflectivity for the screen-space reflections: opaque draws always replace them, blended draws
 	// only for reflective surfaces like water
 	float reflectivity = (normalLength > 0.01) ? surfaceParams.x : 0;
+	// Only the icy parts of ice textures reflect
+	if(effectParams.z > 0 || effectParams.w > 0) {
+		reflectivity *= iceMask;
+	}
 	o.surface = float4(encodeNormal(normal), reflectivity, (surfaceParams.y == 0 || reflectivity > 0) ? 1 : 0);
+	// Lit opaque surfaces receive shadows, but not water, which has no normal of its own, or glowing lava
+	bool receiver = normalLength > 0.01 && !water && !lava;
+	o.shading = float4(incidentLight, receiver ? 1 : 0, 0, (surfaceParams.y == 0) ? 1 : 0);
 	return o;
 }
 
@@ -981,6 +1063,164 @@ float4 psNormalMap(float4 position : SV_Position) : SV_Target {
 	float relativeHeight = 0.5 + (coarse - average) * 2;
 	
 	return saturate(float4(du * 0.125 + 0.5, dv * 0.125 + 0.5, relativeHeight, 1));
+}
+
+)HLSL"
+R"HLSL(
+/*
+ * Dynamic shadows of point lights. Each shadow casting light has two cube maps: one with the static world geometry
+ * and one with the models of the current frame. After the scene is drawn, the light of each shadow casting light is
+ * taken away from the pixels it does not reach, relative to the light that reached the surface (written by psMain).
+ * Lights in the static lighting already have the shadows of the world, so only the models shadow them.
+ */
+
+cbuffer ShadowPassConstants : register(b8) {
+	float4x4 shadowFace; // From the position relative to the light to the clip space of a cube map face
+	float4 shadowLight;  // xyz = light position, w = model triangles closer than this to the light are ignored
+};
+
+struct ShadowVSOutput {
+	float4 position : SV_Position;
+	float3 offset : TEXCOORD0; // From the light to the vertex
+};
+
+ShadowVSOutput vsShadow(float3 position : POSITION) {
+	ShadowVSOutput o;
+	o.offset = position - shadowLight.xyz;
+	o.position = mul(shadowFace, float4(o.offset, 1));
+	return o;
+}
+
+// Lights carried by characters (or at the player's eyes) are inside their models, which would shadow everything
+void psShadowCaster(ShadowVSOutput input) {
+	if(dot(input.offset, input.offset) < shadowLight.w * shadowLight.w) {
+		discard;
+	}
+}
+
+static const int MaxShadowLights = 6;
+
+// Shadows never take away more than this part of the light
+static const float ShadowMaximum = 0.7;
+
+cbuffer ShadowConstants : register(b9) {
+	float4 shadowTarget;     // xy = size, zw = 1 / size
+	float4 shadowProjection; // x = 1 / projection[0][0], y = 1 / projection[1][1], z = near, w = far
+	float4 shadowView[3];    // Rows of the rotation from the reconstructed view space to world space
+	float4 shadowParams;     // x = light count, y = filter taps, z = shadow map size
+	float4 shadowFog;        // x = fog start, y = fog end
+	float4 shadowRegion;     // The view in the target (one eye in VR): xy = first pixel, zw = size
+	float4 shadowCenter;     // xy = projection[2][0], projection[2][1]: the center of off-center projections (VR)
+	// Per light: position relative to the camera + fall start, brightness + fall end + strength + 1 if baked,
+	// near plane + far plane + cube index
+	float4 shadowLights[MaxShadowLights * 3];
+};
+
+Texture2D<float> shadowDepth : register(t0);
+Texture2D<float4> shadowSurface : register(t1);
+Texture2D<float4> shadowShading : register(t2);
+TextureCubeArray<float> shadowWorldMaps : register(t5);
+TextureCubeArray<float> shadowModelMaps : register(t6);
+SamplerComparisonState shadowSampler : register(s3);
+
+// Depth of a point relative to the light in the cube map face that contains it
+float shadowMapDepth(float3 offset, float nearPlane, float farPlane) {
+	float3 a = abs(offset);
+	float z = max(a.x, max(a.y, a.z));
+	return farPlane / (farPlane - nearPlane) - farPlane * nearPlane / ((farPlane - nearPlane) * z);
+}
+
+// How much of a disk around a point relative to the light the light reaches, past the world and past the models
+void shadowVisibility(float3 offset, float3 tangent, float3 bitangent, float radius, float cube, float nearPlane,
+                      float farPlane, float angle, int taps, out float world, out float model) {
+	world = 0;
+	model = 0;
+	[loop] for(int i = 0; i < taps; i++) {
+		// Vogel disk, rotated per pixel
+		float r = sqrt((float(i) + 0.5) / float(taps)) * radius;
+		float a = float(i) * 2.39996323 + angle;
+		float3 p = offset + (tangent * cos(a) + bitangent * sin(a)) * r;
+		float depth = shadowMapDepth(p, nearPlane, farPlane);
+		float4 location = float4(p, cube);
+		world += shadowWorldMaps.SampleCmpLevelZero(shadowSampler, location, depth);
+		model += shadowModelMaps.SampleCmpLevelZero(shadowSampler, location, depth);
+	}
+	world /= float(taps);
+	model /= float(taps);
+}
+
+// Factor for the scene color, multiplied into it by the blend state
+float4 psShadow(float4 position : SV_Position) : SV_Target {
+
+	int2 pixel = int2(position.xy);
+	float depth = shadowDepth.Load(int3(pixel, 0));
+	float4 shading = shadowShading.Load(int3(pixel, 0));
+	if(depth >= 0.99999 || shading.y < 0.5) {
+		return float4(1, 1, 1, 1);
+	}
+
+	// See psAmbientOcclusion() for the reconstruction of the view position
+	float nearPlane = shadowProjection.z;
+	float farPlane = shadowProjection.w;
+	float distance = nearPlane * farPlane / (farPlane - depth * (farPlane - nearPlane));
+	float2 ndc = (float2(pixel) - shadowRegion.xy + 0.5) / shadowRegion.zw * float2(2, -2) + float2(-1, 1);
+	float3 view = float3((ndc - shadowCenter.xy) * shadowProjection.xy * distance, distance);
+	// Relative to the camera, the world coordinates are too large for single precision
+	float3 world = float3(dot(shadowView[0].xyz, view), dot(shadowView[1].xyz, view), dot(shadowView[2].xyz, view));
+	float3 normal = decodeNormal(shadowSurface.Load(int3(pixel, 0)).xy);
+
+	// Interleaved gradient noise rotates the filter disk per pixel
+	float noise = frac(52.9829189 * frac(dot(position.xy, float2(0.06711056, 0.00583715))));
+	float angle = noise * 6.28318531;
+
+	float total = max(shading.x, 0.02);
+	float removed = 0;
+	int count = int(shadowParams.x);
+	[loop] for(int i = 0; i < count; i++) {
+		float4 a = shadowLights[i * 3];
+		float4 b = shadowLights[i * 3 + 1];
+		float4 c = shadowLights[i * 3 + 2];
+		// The light at the surface, see pixelLighting()
+		float3 toLight = a.xyz - world;
+		float distance2 = dot(toLight, toLight);
+		if(distance2 >= b.y * b.y) {
+			continue;
+		}
+		float lightDistance = sqrt(distance2);
+		float3 direction = toLight / max(lightDistance, 0.0001);
+		float cosAngle = dot(normal, direction);
+		if(cosAngle <= 0) {
+			continue;
+		}
+		float falloff = (lightDistance <= a.w) ? 1 : saturate((b.y - lightDistance) / max(b.y - a.w, 0.0001));
+		float light = b.x * cosAngle * falloff * b.z;
+		if(light < 0.002) {
+			continue;
+		}
+		// The size of a shadow map texel at the surface, which is moved off the surface and towards the light by
+		// about that much so that it does not shadow itself
+		float3 offset = -toLight;
+		float3 axes = abs(offset);
+		float texel = 2 * max(axes.x, max(axes.y, axes.z)) / shadowParams.z;
+		offset += normal * (texel * 1.5) + direction * texel;
+		float3 tangent = normalize(cross(direction, (abs(direction.y) < 0.9) ? float3(0, 1, 0) : float3(1, 0, 0)));
+		float3 bitangent = cross(direction, tangent);
+		float worldVisible;
+		float modelVisible;
+		shadowVisibility(offset, tangent, bitangent, texel * 2.5, c.z, c.x, c.y, angle, int(shadowParams.y),
+		                 worldVisible, modelVisible);
+		// Baked lights only lose the light that models block where the world does not already block it
+		float occlusion = (b.w > 0) ? (1 - modelVisible) * worldVisible : 1 - worldVisible * modelVisible;
+		removed += light * occlusion;
+	}
+
+	float factor = max(1 - removed / total, 1 - ShadowMaximum);
+
+	// Shadows disappear in the fog like the surfaces
+	float fog = saturate((shadowFog.y - distance) / max(shadowFog.y - shadowFog.x, 0.0001));
+	factor = lerp(1, factor, fog);
+
+	return float4(factor.xxx, 1);
 }
 
 )HLSL";

@@ -153,6 +153,7 @@ public:
 		float reflections; //!< Strength of the screen-space reflections in [0, 1], 0 = off
 		int characterSmoothing; //!< Curved character triangles: 0 = off, 1 to 3 = more triangles
 		int objectSmoothing; //!< Curved triangles for other models: 0 = off, 1 to 3 = more triangles
+		int shadows; //!< Dynamic shadows: 0 = off (blob shadows), 1 to 3 = more lights and sharper shadows
 		std::string colorGrading; //!< "off", "natural", "warm" or "cinematic"
 		bool pixelLighting;
 		bool colorkeyAntialiasing;

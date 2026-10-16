@@ -27,6 +27,8 @@
 
 #include <boost/preprocessor/stringize.hpp>
 
+#include "Configure.h"
+
 #include "input/Input.h"
 #include "input/Keyboard.h"
 #include "input/Mouse.h"
@@ -60,7 +62,11 @@ namespace Default {
 constexpr const std::string_view
 	language,
 	audio,
+	#if ARX_HAVE_D3D11
+	renderer = "Direct3D 11",
+	#else
 	renderer = "auto",
+	#endif
 	resolution = "auto",
 	audioBackend = "auto",
 	audioDevice = "auto",
@@ -88,6 +94,7 @@ constexpr const int
 	maxAnisotropicFiltering = 9001,
 	characterSmoothing = 2,
 	objectSmoothing = 2,
+	shadows = 2,
 	alphaCutoutAntialiasing = 2,
 	cinematicWidescreenMode = CinematicFadeEdges,
 	hudScaleFilter = UIFilterBilinear,
@@ -270,6 +277,7 @@ constexpr const std::string_view
 	reflections = "reflections",
 	characterSmoothing = "character_smoothing",
 	objectSmoothing = "object_smoothing",
+	shadows = "shadows",
 	upscaler = "upscaler",
 	colorGrading = "color_grading",
 	dlssPreset = "dlss_preset",
@@ -574,6 +582,7 @@ bool Config::save() {
 	writer.writeKey(Key::reflections, video.reflections);
 	writer.writeKey(Key::characterSmoothing, video.characterSmoothing);
 	writer.writeKey(Key::objectSmoothing, video.objectSmoothing);
+	writer.writeKey(Key::shadows, video.shadows);
 	writer.writeKey(Key::colorGrading, video.colorGrading);
 	writer.writeKey(Key::pixelLighting, video.pixelLighting);
 	writer.writeKey(Key::colorkeyAntialiasing, video.colorkeyAntialiasing);
@@ -763,6 +772,8 @@ bool Config::init(const fs::path & file) {
 	video.characterSmoothing = glm::clamp(characterSmoothing, 0, 3);
 	int objectSmoothing = reader.getKey(Section::Video, Key::objectSmoothing, Default::objectSmoothing);
 	video.objectSmoothing = glm::clamp(objectSmoothing, 0, 3);
+	int shadows = reader.getKey(Section::Video, Key::shadows, Default::shadows);
+	video.shadows = glm::clamp(shadows, 0, 3);
 	video.colorGrading = reader.getKey(Section::Video, Key::colorGrading, Default::colorGrading);
 	video.pixelLighting = reader.getKey(Section::Video, Key::pixelLighting, Default::pixelLighting);
 	video.colorkeyAntialiasing = reader.getKey(Section::Video, Key::colorkeyAntialiasing, Default::colorkeyAntialiasing);

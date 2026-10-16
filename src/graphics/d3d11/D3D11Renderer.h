@@ -148,7 +148,13 @@ public:
 	void setWaterSurface(bool water) override { m_waterSurface = water; m_stateValid = false; }
 	bool supportsModelTessellation() const override;
 	void setModelTessellation(bool enabled) override { m_modelTessellation = enabled; }
-	
+	bool supportsShadows() const override { return true; }
+	void setShadows(int quality) override;
+	size_t getShadowLightLimit() const override;
+	void setShadowLights(const ShadowLight * lights, size_t count) override;
+	void setShadowOccluders(const Vec3f * vertices, size_t count) override;
+	void addShadowCasters(const Vec3f * vertices, size_t count) override;
+
 	//! \return true if relief maps are generated for textures, for normal maps or parallax mapping
 	bool reliefMapsEnabled() const {
 		return (m_normalMapStrength > 0.f || m_parallaxStrength > 0.f) && m_normalMapPixelShader;
@@ -308,6 +314,28 @@ private:
 	 */
 	void renderAmbientOcclusion(bool apply);
 	void renderReflections();
+
+	//! \return true if the scene shaders write the surface normals, for the reflections and the shadows
+	bool surfaceTargetNeeded() const;
+
+	//! \return true if dynamic shadows are drawn in the 3D scene
+	bool shadowsEnabled() const;
+
+	//! Create or free the shadow maps for the current quality
+	bool updateShadowMaps();
+	void releaseShadowMaps();
+
+	/*!
+	 * Draw the occluders and casters of the shadow casting lights into their cube maps
+	 * \param cubes receives the cube map index of each light in m_shadowLights
+	 */
+	void renderShadowMaps(size_t * cubes);
+
+	/*!
+	 * Darken the parts of the scene that the shadow casting lights do not reach
+	 * \param apply multiply the resolved scene with the shadows, false for the debug view
+	 */
+	void renderShadows(bool apply);
 	
 	/*!
 	 * Blur the bright parts of the scene through the bloom chain
@@ -424,7 +452,48 @@ private:
 	ComPtr<ID3D11Texture2D> m_reflectionColor;
 	ComPtr<ID3D11ShaderResourceView> m_reflectionColorResource;
 	UINT m_reflectionColorLevels;
-	
+
+	// Dynamic shadows: the light that reaches the surface written by the scene shaders, and two cube maps for each
+	// shadow casting light, one with the static world geometry and one with the models of the current frame
+	static constexpr size_t MaxShadowLights = 6;
+	int m_shadowQuality; //!< 0 = off
+	ComPtr<ID3D11Texture2D> m_shadingTarget;
+	ComPtr<ID3D11RenderTargetView> m_shadingView;
+	ComPtr<ID3D11Texture2D> m_shadingResolved;
+	ComPtr<ID3D11ShaderResourceView> m_shadingResource;
+	UINT m_shadowMapSize;
+	size_t m_shadowMapLights; //!< Number of lights the shadow maps were created for
+	ComPtr<ID3D11Texture2D> m_shadowWorldMaps;
+	ComPtr<ID3D11Texture2D> m_shadowModelMaps;
+	std::vector<ComPtr<ID3D11DepthStencilView>> m_shadowWorldFaces;
+	std::vector<ComPtr<ID3D11DepthStencilView>> m_shadowModelFaces;
+	ComPtr<ID3D11ShaderResourceView> m_shadowWorldResource;
+	ComPtr<ID3D11ShaderResourceView> m_shadowModelResource;
+	ComPtr<ID3D11SamplerState> m_shadowSampler;
+	ComPtr<ID3D11RasterizerState> m_shadowRasterizer;
+	struct ShadowSlot {
+		ShadowLight light;
+		bool used = false;
+		bool worldValid = false; //!< The world cube map has the occluders around the current position
+	};
+	ShadowSlot m_shadowSlots[MaxShadowLights];
+	std::vector<ShadowLight> m_shadowLights;
+	// Static world geometry sorted into chunks for culling by the light range
+	struct ShadowChunk {
+		UINT start;
+		UINT count;
+		Vec3f min;
+		Vec3f max;
+	};
+	ComPtr<ID3D11Buffer> m_shadowOccluders;
+	std::vector<ShadowChunk> m_shadowChunks;
+	// Model triangles of the current frame in world space
+	std::vector<Vec3f> m_shadowCasters;
+	Vec3f m_shadowCastersMin;
+	Vec3f m_shadowCastersMax;
+	ComPtr<ID3D11Buffer> m_shadowCasterBuffer;
+	size_t m_shadowCasterCapacity;
+
 	// Bloom chain, each level half the size of the previous one
 	static constexpr size_t BloomLevels = 6;
 	bool m_bloom;
@@ -517,6 +586,12 @@ private:
 	ComPtr<ID3D11PixelShader> m_bloomCompositePixelShader;
 	ComPtr<ID3D11Buffer> m_gradingConstants;
 	ComPtr<ID3D11PixelShader> m_gradingPixelShader;
+	ComPtr<ID3D11Buffer> m_shadowPassConstants;
+	ComPtr<ID3D11Buffer> m_shadowConstants;
+	ComPtr<ID3D11VertexShader> m_shadowVertexShader;
+	ComPtr<ID3D11InputLayout> m_shadowInputLayout;
+	ComPtr<ID3D11PixelShader> m_shadowCasterPixelShader;
+	ComPtr<ID3D11PixelShader> m_shadowPixelShader;
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;
 	ComPtr<ID3D11Buffer> m_clearConstants;
@@ -566,7 +641,7 @@ private:
 	static constexpr UINT NormalMapSlot = 3;
 	float m_vsConstantsData[72];
 	bool m_vsConstantsValid;
-	unsigned char m_psConstantsData[128];
+	unsigned char m_psConstantsData[160];
 	bool m_psConstantsValid;
 	
 	// Per-pixel lighting of world geometry
@@ -576,6 +651,7 @@ private:
 	float m_parallaxStrength;
 	float m_specularStrength;
 	bool m_waterSurface;
+	float m_effectTime; //!< Seconds for animated surfaces (lava), fixed during a frame
 	ComPtr<ID3D11PixelShader> m_normalMapPixelShader;
 	bool m_pixelLightsWarned;
 	

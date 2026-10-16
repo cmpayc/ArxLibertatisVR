@@ -28,6 +28,7 @@ if "ArxFacePanel" in locals():
 from .arx_io_util import ArxException
 from .managers import ArxAddon
 from .meshEdit import ArxFacePanel, ArxMeshAddCustomProperties
+from .arx_io_rig import ArxOperatorTransferRig, ArxRigPanel
 
 import bpy
 
@@ -66,7 +67,8 @@ class ArxAddonPreferences(bpy.types.AddonPreferences):
         update=reload
     )
     arxAllowLibFallback: bpy.props.BoolProperty(
-        name="Allow use of fallback io library, only import ftl models, scenes are broken!",
+        name="Use the slow built-in decompressor if the ArxIO library is missing (models only, scenes are broken)",
+        default=True,
         update=reload
     )
 
@@ -230,8 +232,12 @@ class ImportTea(bpy.types.Operator, ImportHelper):
     )
 
     def execute(self, context):
-        getAddon(context).animationManager.loadAnimation(self.filepath)
-        return {'FINISHED'}
+        try:
+            getAddon(context).animationManager.loadAnimation(self.filepath)
+            return {'FINISHED'}
+        except ArxException as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
     
 
 def menu_func_import_tea(self, context):
@@ -251,7 +257,9 @@ classes = (
     ArxFacePanel,
     ImportFTL,
     ExportFTL,
-    ImportTea
+    ImportTea,
+    ArxOperatorTransferRig,
+    ArxRigPanel
 )
 
 def register():

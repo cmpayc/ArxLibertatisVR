@@ -928,6 +928,7 @@ public:
 		, m_dlssPresetCycleText(nullptr)
 		, m_fsrSharpnessCycleText(nullptr)
 		, m_ambientOcclusionCycleText(nullptr)
+		, m_shadowsCycleText(nullptr)
 		, m_bloomCycleText(nullptr)
 		, m_colorGradingCycleText(nullptr)
 		, m_pixelLightingCheckbox(nullptr)
@@ -946,6 +947,7 @@ public:
 	CycleTextWidget * m_dlssPresetCycleText;
 	CycleTextWidget * m_fsrSharpnessCycleText;
 	CycleTextWidget * m_ambientOcclusionCycleText;
+	CycleTextWidget * m_shadowsCycleText;
 	CycleTextWidget * m_bloomCycleText;
 	CycleTextWidget * m_colorGradingCycleText;
 	CheckboxWidget * m_pixelLightingCheckbox;
@@ -1183,7 +1185,23 @@ public:
 		
 		m_ambientOcclusionCycleText = addEffectStrength(getLocalised("system_menus_options_video_ambient_occlusion"),
 		                                                &config.video.ambientOcclusion, &Renderer::setAmbientOcclusion);
-		
+
+		{
+			std::string_view label = getLocalised("system_menus_options_video_shadows");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->valueChanged = [](int pos, std::string_view /* string */) {
+				config.video.shadows = pos;
+				GRenderer->setShadows(pos);
+			};
+			cb->addEntry(getLocalised("system_menus_options_video_upscaler_off"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_low"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_med"));
+			cb->addEntry(getLocalised("system_menus_options_video_texture_high"));
+			cb->setValue(config.video.shadows);
+			m_shadowsCycleText = cb.get();
+			addCenter(std::move(cb));
+		}
+
 		m_bloomCycleText = addEffectStrength(getLocalised("system_menus_options_video_bloom"), &config.video.bloom,
 		                                     &Renderer::setBloom);
 		
@@ -1369,6 +1387,9 @@ private:
 		}
 		if(m_ambientOcclusionCycleText) {
 			m_ambientOcclusionCycleText->setEnabled(direct3D);
+		}
+		if(m_shadowsCycleText) {
+			m_shadowsCycleText->setEnabled(direct3D);
 		}
 		if(m_normalMapsCycleText) {
 			m_normalMapsCycleText->setEnabled(direct3D);
