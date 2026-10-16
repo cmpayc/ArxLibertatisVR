@@ -172,6 +172,12 @@ void PrecalcDynamicLighting(const Vec3f & camPos, float camDepth);
 //! Pass the lights from \ref PrecalcDynamicLighting() to the renderer if it lights world geometry per pixel
 void UploadPixelLights();
 
+//! Choose the lights near the camera that cast dynamic shadows and pass them to the renderer
+void UploadShadowLights();
+
+//! Forget the shadow casting lights, for loading a new level
+void ClearShadowLights();
+
 
 struct ShaderLight {
 	

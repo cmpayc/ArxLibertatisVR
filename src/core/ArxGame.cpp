@@ -2053,7 +2053,8 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	renderer.setReflections(config.video.reflections);
 	renderer.setColorGrading(config.video.colorGrading);
 	renderer.setPixelLighting(config.video.pixelLighting);
-	
+	renderer.setShadows(config.video.shadows);
+
 	ComputePortalVertexBuffer();
 	std::unique_ptr<VertexBuffer<SMY_VERTEX3>> vb3 = renderer.createVertexBuffer3(4000, Renderer::Stream);
 	pDynamicVertexBuffer = new CircularVertexBuffer<SMY_VERTEX3>(std::move(vb3));

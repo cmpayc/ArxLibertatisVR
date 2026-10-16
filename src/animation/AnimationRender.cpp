@@ -65,6 +65,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "game/Player.h"
 #include "game/Spells.h"
 #include "game/spell/Cheat.h"
+#include "game/npc/Dismemberment.h"
 
 #include "graphics/BaseGraphicsTypes.h"
 #include "graphics/Draw.h"
@@ -129,7 +130,7 @@ static void PopOneTriangleList(RenderState baseState, TextureContainer * materia
 	}
 	
 	EERIEDRAWPRIM(Renderer::TriangleList, bucket.data(), bucket.size());
-	
+
 	if(clear) {
 		bucket.clear();
 	}
@@ -585,8 +586,40 @@ static bool CullFace(const EERIE_3DOBJ * eobj, const EERIE_FACE & face) {
 			return true;
 		}
 	}
-	
+
 	return false;
+}
+
+/*!
+ * Pass the solid faces of a model to the renderer for the dynamic shadows, also the ones that face away from the
+ * camera and the head and body of the player that the first person view hides
+ */
+static void addShadowCasters(const EERIE_3DOBJ * eobj, const Entity * io, float invisibility) {
+
+	if(!g_renderingScene || invisibility > 0.f || GRenderer->getShadowLightLimit() == 0) {
+		return;
+	}
+
+	bool firstPerson = (io == entities.player() && !EXTERNALVIEW);
+	MaterialId gore = firstPerson ? getGoreMaterial(*eobj) : MaterialId();
+
+	static std::vector<Vec3f> vertices;
+	vertices.clear();
+	for(const EERIE_FACE & face : eobj->facelist) {
+		if(!face.material || (face.facetype & POLY_TRANS)) {
+			continue;
+		}
+		// Other hidden faces are cut off limbs or gore
+		if((face.facetype & POLY_HIDE) && (!firstPerson || face.material == gore)) {
+			continue;
+		}
+		for(VertexId vertex : face.vid) {
+			vertices.push_back(eobj->vertexWorldPositions[vertex].v);
+		}
+	}
+
+	GRenderer->addShadowCasters(vertices.data(), vertices.size());
+
 }
 
 // TODO copy-paste halo
@@ -716,7 +749,9 @@ void DrawEERIEInter_Render(EERIE_3DOBJ * eobj, const TransformInfo & t, Entity *
 		Vec2f size = io->bbox2D.max - io->bbox2D.min;
 		segments = std::min(segments, meshSmoothingSegmentsForSize(std::max(size.x, size.y)));
 	}
-	
+
+	addShadowCasters(eobj, io, invisibility);
+
 	for(size_t i = 0; i < eobj->facelist.size(); i++) {
 		const EERIE_FACE & face = eobj->facelist[i];
 		
@@ -1054,11 +1089,13 @@ static void Cedric_RenderObject(EERIE_3DOBJ * eobj, Skeleton * obj, Entity * io,
                                 const MeshLighting * lighting, bool smoothNormals) {
 	
 	ARX_PROFILE_FUNC();
-	
+
 	if(invisibility == 1.f) {
 		return;
 	}
-	
+
+	addShadowCasters(eobj, io, invisibility);
+
 	Entity * use_io = io;
 	if(!io && IN_BOOK_DRAW && eobj == entities.player()->obj) {
 		use_io = entities.player();

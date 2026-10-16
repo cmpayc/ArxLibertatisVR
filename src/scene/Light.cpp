@@ -331,7 +331,156 @@ void UploadPixelLights() {
 	}
 	
 	GRenderer->setPixelLights(lights.data(), count);
-	
+
+}
+
+namespace {
+
+//! A light that casts shadows, or did and is fading out
+struct ShadowLightState {
+	const EERIE_LIGHT * light = nullptr; //!< Only compared, may be gone while the shadows fade out
+	Renderer::ShadowLight data;
+	float fade = 0.f;
+	bool wanted = false;
+};
+
+std::vector<ShadowLightState> g_shadowLightStates;
+
+// Shadows fade in and out over this time in seconds when the lights change
+const float ShadowLightFadeTime = 0.3f;
+// Lights are considered up to this far from the camera beyond their range, where nearby casters can still be lit
+const float ShadowLightRange = 500.f;
+// Lights closer to the camera (the player's torch) cast their shadows behind what is seen
+const float ShadowLightMinDistance = 50.f;
+// The current lights are preferred over slightly better ones, so that the shadows do not flicker between them
+const float ShadowLightKeepBonus = 1.3f;
+
+} // anonymous namespace
+
+void UploadShadowLights() {
+
+	size_t limit = GRenderer->getShadowLightLimit();
+
+	// Improve vision recolors the world on the CPU
+	if(limit == 0 || player.m_improve) {
+		if(!g_shadowLightStates.empty()) {
+			g_shadowLightStates.clear();
+			GRenderer->setShadowLights(nullptr, 0);
+		}
+		return;
+	}
+
+	struct Candidate {
+		float score;
+		const EERIE_LIGHT * light;
+		Renderer::ShadowLight data;
+	};
+	static std::vector<Candidate> candidates;
+	candidates.clear();
+
+	auto isCurrent = [](const EERIE_LIGHT * light) {
+		for(const ShadowLightState & state : g_shadowLightStates) {
+			if(state.light == light && state.wanted) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	// Same parameters as UploadPixelLights()
+	auto addCandidate = [&](const EERIE_LIGHT & light, Color3f color, bool baked) {
+		if(light.fallend < 50.f || color == Color3f::black) {
+			return;
+		}
+		float distance = fdist(light.pos, g_camera->m_pos);
+		float range = light.fallend + ShadowLightRange;
+		if(distance < ShadowLightMinDistance || distance >= range) {
+			return;
+		}
+		Candidate & candidate = candidates.emplace_back();
+		candidate.light = &light;
+		candidate.data.position = light.pos;
+		candidate.data.fallStart = light.fallstart;
+		candidate.data.fallEnd = light.fallend;
+		candidate.data.color = color;
+		candidate.data.intensity = light.intensity * GLOBAL_LIGHT_FACTOR * 0.5f;
+		candidate.data.baked = baked;
+		float brightness = (color.r * 0.299f + color.g * 0.587f + color.b * 0.114f) * candidate.data.intensity;
+		candidate.score = brightness * (1.f - distance / range) * (isCurrent(&light) ? ShadowLightKeepBonus : 1.f);
+	};
+
+	for(size_t i = 0; i < g_culledDynamicLightsCount; i++) {
+		const EERIE_LIGHT & light = *g_culledDynamicLights[i];
+		addCandidate(light, light.rgb255 * (1.f / 255.f), false);
+	}
+
+	// Semi-dynamic lights are not in the static lighting, they have a dynamic light while they burn
+	for(const EERIE_LIGHT & light : g_staticLights) {
+		if(!light.m_ignitionStatus || (light.extras & (EXTRAS_SEMIDYNAMIC | EXTRAS_NOCASTED))) {
+			continue;
+		}
+		addCandidate(light, light.rgb, true);
+	}
+
+	std::sort(candidates.begin(), candidates.end(),
+	          [](const Candidate & a, const Candidate & b) { return a.score > b.score; });
+	if(candidates.size() > limit) {
+		candidates.resize(limit);
+	}
+
+	// Keep the lights that are still wanted up to date and fade out the others
+	float step = toMsf(g_platformTime.lastFrameDuration()) * 0.001f / ShadowLightFadeTime;
+	for(ShadowLightState & state : g_shadowLightStates) {
+		state.wanted = false;
+		for(const Candidate & candidate : candidates) {
+			if(candidate.light == state.light) {
+				state.wanted = true;
+				state.data = candidate.data;
+				break;
+			}
+		}
+		state.fade = glm::clamp(state.fade + (state.wanted ? step : -step), 0.f, 1.f);
+	}
+	g_shadowLightStates.erase(std::remove_if(g_shadowLightStates.begin(), g_shadowLightStates.end(),
+	                                         [](const ShadowLightState & state) {
+	                                           return !state.wanted && state.fade <= 0.f;
+	                                         }),
+	                          g_shadowLightStates.end());
+
+	// New lights take the free slots
+	for(const Candidate & candidate : candidates) {
+		if(g_shadowLightStates.size() >= limit) {
+			break;
+		}
+		bool known = false;
+		for(const ShadowLightState & state : g_shadowLightStates) {
+			known = known || state.light == candidate.light;
+		}
+		if(!known) {
+			ShadowLightState & state = g_shadowLightStates.emplace_back();
+			state.light = candidate.light;
+			state.data = candidate.data;
+			state.wanted = true;
+			state.fade = std::min(step, 1.f);
+		}
+	}
+
+	static std::vector<Renderer::ShadowLight> lights;
+	lights.clear();
+	for(const ShadowLightState & state : g_shadowLightStates) {
+		Renderer::ShadowLight & light = lights.emplace_back(state.data);
+		light.strength = state.fade * state.fade * (3.f - 2.f * state.fade);
+	}
+
+	GRenderer->setShadowLights(lights.data(), lights.size());
+
+}
+
+void ClearShadowLights() {
+	g_shadowLightStates.clear();
+	if(GRenderer) {
+		GRenderer->setShadowLights(nullptr, 0);
+	}
 }
 
 void PrecalcIOLighting(const Vec3f & pos, float radius) {

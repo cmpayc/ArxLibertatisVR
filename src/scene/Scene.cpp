@@ -1573,7 +1573,8 @@ void ARX_SCENE_Update() {
 	TreatBackgroundDynlights();
 	PrecalcDynamicLighting(camPos, camDepth);
 	UploadPixelLights();
-	
+	UploadShadowLights();
+
 	g_tiles->resetActiveTiles();
 	
 	ARX_PORTALS_InitDrawnRooms();
@@ -1612,7 +1613,8 @@ void ARX_SCENE_Render() {
 		}
 	}
 	
-	if(!player.m_improve) {
+	// Dynamic shadows replace the blob shadows
+	if(!player.m_improve && GRenderer->getShadowLightLimit() == 0) {
 		ARXDRAW_DrawInterShadows();
 	}
 	

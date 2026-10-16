@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -165,6 +166,53 @@ struct LightConstants {
 	float lights[MaxPixelLights * 2][4];
 };
 
+const size_t MaxShadowMapLights = 6;
+
+struct ShadowPassConstants {
+	float face[16]; // From the position relative to the light to the clip space of a cube map face
+	float light[4]; // xyz = light position, w = model triangles closer than this to the light are ignored
+};
+
+struct ShadowConstants {
+	float target[4];     // xy = size, zw = 1 / size
+	float projection[4]; // x = 1 / projection[0][0], y = 1 / projection[1][1], z = near, w = far
+	float view[3][4];    // Rows of the rotation from the reconstructed view space to world space
+	float params[4];     // x = light count, y = filter taps, z = shadow map size
+	float fog[4];        // x = fog start, y = fog end
+	// Per light: position relative to the camera + fall start, brightness + fall end + strength + 1 if baked,
+	// near plane + far plane + cube index
+	float lights[MaxShadowMapLights * 3][4];
+};
+
+struct ShadowQuality {
+	size_t lights;
+	UINT size; //!< Size of each cube map face
+	UINT taps; //!< Filter samples per pixel and light
+};
+
+// Off, low, medium, high
+const ShadowQuality ShadowQualities[] = {
+	{ 0, 0, 0 },
+	{ 2, 512, 8 },
+	{ 4, 1024, 12 },
+	{ 6, 1024, 16 },
+};
+
+// Near plane of the cube map faces
+const float ShadowNearPlane = 2.f;
+
+// Model triangles closer than this to a light are not drawn into its cube map, lights carried by characters (or
+// the player's torch at the eyes) are inside their models
+const float ShadowCasterMinDistance = 40.f;
+
+// Size of the cells that sort the static world geometry into chunks for culling by the light range
+const float ShadowChunkSize = 1000.f;
+
+// Debug view that shows the shadow factor instead of the scene
+const int ShadowDebugView = 10;
+
+static_assert(sizeof(ShadowPassConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
+static_assert(sizeof(ShadowConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(VSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(PSConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
 static_assert(sizeof(ClearConstants) % 16 == 0, "constant buffer size must be a multiple of 16");
@@ -225,6 +273,56 @@ std::string hresultString(HRESULT hr) {
 	return oss.str();
 }
 
+//! Transform of pre-transformed vertices from window pixels in the viewport to clip space
+glm::mat4x4 transformTL(const Rect & viewport) {
+	// Direct3D doesn't apply any transform for D3DTLVERTEX
+	// Change coordinate system from [0, width] x [0, height] to [-1, 1] x [-1, 1] and flip the y axis
+	glm::mat4x4 transform = glm::translate(glm::mat4x4(1.f), Vec3f(-1.f, 1.f, 0.f));
+	transform = glm::scale(transform, Vec3f(2.f / float(std::max<s32>(viewport.width(), 1)),
+	                                        -2.f / float(std::max<s32>(viewport.height(), 1)), 1.f));
+	// Change pixel origins
+	return glm::translate(transform, Vec3f(0.5f, 0.5f, 0.f));
+}
+
+/*!
+ * From positions relative to a light to the clip space of a cube map face, with the face orientations of Direct3D
+ * cube maps so that the faces can be sampled with the direction from the light
+ */
+glm::mat4x4 shadowFaceTransform(size_t face, float nearPlane, float farPlane) {
+
+	// Right, up and forward axis of each face
+	static const Vec3f axes[6][3] = {
+		{ Vec3f(0.f, 0.f, -1.f), Vec3f(0.f, 1.f, 0.f), Vec3f(1.f, 0.f, 0.f) },
+		{ Vec3f(0.f, 0.f, 1.f), Vec3f(0.f, 1.f, 0.f), Vec3f(-1.f, 0.f, 0.f) },
+		{ Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 0.f, -1.f), Vec3f(0.f, 1.f, 0.f) },
+		{ Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 0.f, 1.f), Vec3f(0.f, -1.f, 0.f) },
+		{ Vec3f(1.f, 0.f, 0.f), Vec3f(0.f, 1.f, 0.f), Vec3f(0.f, 0.f, 1.f) },
+		{ Vec3f(-1.f, 0.f, 0.f), Vec3f(0.f, 1.f, 0.f), Vec3f(0.f, 0.f, -1.f) },
+	};
+
+	// 90 degree field of view, depth in [0, 1]
+	float a = farPlane / (farPlane - nearPlane);
+	float b = -nearPlane * farPlane / (farPlane - nearPlane);
+
+	glm::mat4x4 transform(0.f);
+	for(glm::length_t column = 0; column < 3; column++) {
+		transform[column][0] = axes[face][0][column];
+		transform[column][1] = axes[face][1][column];
+		transform[column][2] = axes[face][2][column] * a;
+		transform[column][3] = axes[face][2][column];
+	}
+	transform[3][2] = b;
+
+	return transform;
+}
+
+//! \return true if an axis-aligned box intersects a sphere
+bool boxIntersectsSphere(const Vec3f & min, const Vec3f & max, const Vec3f & center, float radius) {
+	Vec3f closest = glm::clamp(center, min, max);
+	Vec3f offset = closest - center;
+	return glm::dot(offset, offset) < radius * radius;
+}
+
 } // anonymous namespace
 
 D3D11Renderer::D3D11Renderer()
@@ -243,6 +341,12 @@ D3D11Renderer::D3D11Renderer()
 	, m_ambientOcclusionStrength(0.f)
 	, m_reflectionStrength(0.f)
 	, m_reflectionColorLevels(0)
+	, m_shadowQuality(0)
+	, m_shadowMapSize(0)
+	, m_shadowMapLights(0)
+	, m_shadowCastersMin(0.f)
+	, m_shadowCastersMax(0.f)
+	, m_shadowCasterCapacity(0)
 	, m_bloom(false)
 	, m_bloomStrength(0.f)
 	, m_bloomSizes()
@@ -328,7 +432,7 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 	
 	// Debug view for the scene: 1 = depth, 2 = motion vectors, 3 = per-object motion, 4 = ambient occlusion,
 	// 5 = bloom, 6 = per-pixel dynamic light, 7 = reflections, 8 = highlights of models,
-	// 9 = models as wireframes
+	// 9 = models as wireframes, 10 = dynamic shadows
 	{
 		char value[16];
 		DWORD length = GetEnvironmentVariableA("ARX_SCENE_DEBUG", value, sizeof(value));
@@ -549,6 +653,14 @@ bool D3D11Renderer::create(HWND window, int maxMSAALevel) {
 		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_gradingConstants))) {
 			return false;
 		}
+		bufferDesc.ByteWidth = sizeof(ShadowPassConstants);
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_shadowPassConstants))) {
+			return false;
+		}
+		bufferDesc.ByteWidth = sizeof(ShadowConstants);
+		if(FAILED(m_device->CreateBuffer(&bufferDesc, nullptr, &m_shadowConstants))) {
+			return false;
+		}
 	}
 	
 	{
@@ -738,6 +850,8 @@ bool D3D11Renderer::compileShaders() {
 			{ "psBloomComposite", nullptr, std::addressof(m_bloomCompositePixelShader) },
 			{ "psColorGrading", nullptr, std::addressof(m_gradingPixelShader) },
 			{ "psNormalMap", nullptr, std::addressof(m_normalMapPixelShader) },
+			{ "psShadowCaster", nullptr, std::addressof(m_shadowCasterPixelShader) },
+			{ "psShadow", nullptr, std::addressof(m_shadowPixelShader) },
 		};
 		for(const PixelShaderInfo & info : shaders) {
 			if(m_featureLevel < D3D_FEATURE_LEVEL_10_1) {
@@ -751,6 +865,22 @@ bool D3D11Renderer::compileShaders() {
 		}
 	}
 	
+	// Shadow maps hold only depth, from world space positions
+	if(m_featureLevel >= D3D_FEATURE_LEVEL_10_1) {
+		const D3D11_INPUT_ELEMENT_DESC layout[] = {
+			{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		};
+		ComPtr<ID3DBlob> code = compileShader("vsShadow", "vs_4_1");
+		if(!code || FAILED(m_device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr,
+		                                                &m_shadowVertexShader))
+		   || FAILED(m_device->CreateInputLayout(layout, UINT(std::size(layout)), code->GetBufferPointer(),
+		                                         code->GetBufferSize(), &m_shadowInputLayout))) {
+			LogWarning << "Dynamic shadows not available";
+			m_shadowVertexShader.Reset();
+			m_shadowInputLayout.Reset();
+		}
+	}
+
 	// Models are tessellated with hull and domain shaders, which need feature level 11
 	if(m_featureLevel >= D3D_FEATURE_LEVEL_11_0 && GetEnvironmentVariableA("ARX_D3D11_NO_TESSELLATION", nullptr, 0) == 0) {
 		std::string source = std::string(d3d11ShaderSource) + d3d11ModelPatchSource + d3d11ModelPatchStagesSource;
@@ -935,13 +1065,25 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		return false;
 	}
 	
-	// Surface normal and reflectivity for the screen-space reflections
-	if(m_reflectionStrength > 0.f) {
+	// Surface normal and reflectivity for the screen-space reflections and the shadows
+	if(surfaceTargetNeeded()) {
 		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 		desc.BindFlags = D3D11_BIND_RENDER_TARGET | (m_sceneSamples > 1 ? 0 : D3D11_BIND_SHADER_RESOURCE);
 		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_surfaceTarget))
 		   || FAILED(m_device->CreateRenderTargetView(m_surfaceTarget.Get(), nullptr, &m_surfaceView))) {
 			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 surface target";
+			releaseSceneTargets();
+			return false;
+		}
+	}
+
+	// The light that reached each surface, which the shadows take away from
+	if(shadowsEnabled()) {
+		desc.Format = DXGI_FORMAT_R8G8_UNORM;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | (m_sceneSamples > 1 ? 0 : D3D11_BIND_SHADER_RESOURCE);
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_shadingTarget))
+		   || FAILED(m_device->CreateRenderTargetView(m_shadingTarget.Get(), nullptr, &m_shadingView))) {
+			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 shading target";
 			releaseSceneTargets();
 			return false;
 		}
@@ -1025,7 +1167,7 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		}
 	}
 	
-	// Resolved surface target and the scene copy with mipmaps for the screen-space reflections
+	// Resolved surface target
 	if(m_surfaceTarget) {
 		if(m_sceneSamples > 1) {
 			desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -1038,13 +1180,41 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size) {
 		} else {
 			m_surfaceResolved = m_surfaceTarget;
 		}
+		if(FAILED(m_device->CreateShaderResourceView(m_surfaceResolved.Get(), nullptr, &m_surfaceResource))) {
+			LogError << "Failed to create Direct3D 11 surface view";
+			releaseSceneTargets();
+			return false;
+		}
+	}
+
+	// Resolved shading target
+	if(m_shadingTarget) {
+		if(m_sceneSamples > 1) {
+			desc.Format = DXGI_FORMAT_R8G8_UNORM;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &m_shadingResolved))) {
+				LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 shading resolve target";
+				releaseSceneTargets();
+				return false;
+			}
+		} else {
+			m_shadingResolved = m_shadingTarget;
+		}
+		if(FAILED(m_device->CreateShaderResourceView(m_shadingResolved.Get(), nullptr, &m_shadingResource))) {
+			LogError << "Failed to create Direct3D 11 shading view";
+			releaseSceneTargets();
+			return false;
+		}
+	}
+
+	// Scene copy with mipmaps for the screen-space reflections
+	if(m_surfaceTarget && m_reflectionStrength > 0.f) {
 		D3D11_TEXTURE2D_DESC colorDesc = desc;
 		colorDesc.Format = ColorFormat;
 		colorDesc.MipLevels = 0;
 		colorDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 		colorDesc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
-		if(FAILED(m_device->CreateShaderResourceView(m_surfaceResolved.Get(), nullptr, &m_surfaceResource))
-		   || FAILED(m_device->CreateTexture2D(&colorDesc, nullptr, &m_reflectionColor))
+		if(FAILED(m_device->CreateTexture2D(&colorDesc, nullptr, &m_reflectionColor))
 		   || FAILED(m_device->CreateShaderResourceView(m_reflectionColor.Get(), nullptr, &m_reflectionColorResource))) {
 			LogError << "Failed to create " << size.x << "x" << size.y << " Direct3D 11 reflection targets";
 			releaseSceneTargets();
@@ -1112,7 +1282,12 @@ void D3D11Renderer::releaseSceneTargets() {
 	unbindTextureView(m_aoBlurResource.Get());
 	unbindTextureView(m_surfaceResource.Get());
 	unbindTextureView(m_reflectionColorResource.Get());
-	
+	unbindTextureView(m_shadingResource.Get());
+
+	m_shadingResource.Reset();
+	m_shadingResolved.Reset();
+	m_shadingView.Reset();
+	m_shadingTarget.Reset();
 	m_aoResource.Reset();
 	m_aoView.Reset();
 	m_aoTarget.Reset();
@@ -1155,7 +1330,15 @@ void D3D11Renderer::releaseSceneTargets() {
 
 bool D3D11Renderer::sceneEnabled() const {
 	return m_sceneScale < 1.f || m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion || m_bloom
-	       || m_colorGrading != 0 || m_reflectionStrength > 0.f;
+	       || m_colorGrading != 0 || m_reflectionStrength > 0.f || shadowsEnabled();
+}
+
+bool D3D11Renderer::surfaceTargetNeeded() const {
+	return m_reflectionStrength > 0.f || shadowsEnabled();
+}
+
+bool D3D11Renderer::shadowsEnabled() const {
+	return m_shadowQuality > 0 && m_shadowWorldResource && m_shadowModelResource;
 }
 
 void D3D11Renderer::setColorGrading(std::string_view preset) {
@@ -1177,8 +1360,9 @@ void D3D11Renderer::setColorGrading(std::string_view preset) {
 }
 
 bool D3D11Renderer::upscalerInputsNeeded() const {
-	// Ambient occlusion and reflections use the depth written by the motion pass
-	return m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion || m_reflectionStrength > 0.f;
+	// Ambient occlusion, reflections and shadows use the depth written by the motion pass
+	return m_sceneDebugView != 0 || m_jitterEnabled || m_ambientOcclusion || m_reflectionStrength > 0.f
+	       || shadowsEnabled();
 }
 
 void D3D11Renderer::setAmbientOcclusion(float strength) {
@@ -1461,10 +1645,6 @@ void D3D11Renderer::renderReflections() {
 		return;
 	}
 	
-	if(m_sceneSamples > 1) {
-		m_context->ResolveSubresource(m_surfaceResolved.Get(), 0, m_surfaceTarget.Get(), 0, DXGI_FORMAT_R8G8B8A8_UNORM);
-	}
-	
 	// The reflections show the scene drawn so far, blurred with the mipmaps for rough surfaces
 	unbindTextureView(m_reflectionColorResource.Get());
 	m_context->CopySubresourceRegion(m_reflectionColor.Get(), 0, 0, 0, 0, m_sceneResolved.Get(), 0, nullptr);
@@ -1535,6 +1715,473 @@ void D3D11Renderer::renderReflections() {
 	m_currentViews[2] = nullptr;
 	m_currentSamplers[0] = sampler;
 	
+}
+
+void D3D11Renderer::setShadows(int quality) {
+
+	static_assert(MaxShadowMapLights == MaxShadowLights, "shadow light limits must match");
+
+	quality = glm::clamp(quality, 0, int(std::size(ShadowQualities)) - 1);
+	if(!m_shadowVertexShader || !m_shadowCasterPixelShader || !m_shadowPixelShader) {
+		quality = 0;
+	}
+	if(quality == m_shadowQuality) {
+		return;
+	}
+
+	bool wasEnabled = shadowsEnabled();
+
+	m_shadowQuality = quality;
+	if(!updateShadowMaps()) {
+		m_shadowQuality = 0;
+		releaseShadowMaps();
+	}
+	m_stateValid = false;
+
+	if(wasEnabled != shadowsEnabled() && !m_inScene) {
+		// The scene targets for the shadows are created or freed
+		releaseSceneTargets();
+	}
+
+}
+
+size_t D3D11Renderer::getShadowLightLimit() const {
+	return shadowsEnabled() ? m_shadowMapLights : 0;
+}
+
+void D3D11Renderer::setShadowLights(const ShadowLight * lights, size_t count) {
+	m_shadowLights.assign(lights, lights + std::min(count, m_shadowMapLights));
+}
+
+void D3D11Renderer::releaseShadowMaps() {
+
+	m_shadowWorldResource.Reset();
+	m_shadowModelResource.Reset();
+	m_shadowWorldFaces.clear();
+	m_shadowModelFaces.clear();
+	m_shadowWorldMaps.Reset();
+	m_shadowModelMaps.Reset();
+	m_shadowMapSize = 0;
+	m_shadowMapLights = 0;
+	for(ShadowSlot & slot : m_shadowSlots) {
+		slot = ShadowSlot();
+	}
+
+}
+
+bool D3D11Renderer::updateShadowMaps() {
+
+	const ShadowQuality & quality = ShadowQualities[m_shadowQuality];
+	if(quality.lights == 0) {
+		releaseShadowMaps();
+		return true;
+	}
+	if(quality.lights == m_shadowMapLights && quality.size == m_shadowMapSize) {
+		return true;
+	}
+
+	releaseShadowMaps();
+
+	if(!m_shadowSampler) {
+		D3D11_SAMPLER_DESC desc = {};
+		desc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+		desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+		desc.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;
+		desc.MaxAnisotropy = 1;
+		desc.MaxLOD = D3D11_FLOAT32_MAX;
+		if(FAILED(m_device->CreateSamplerState(&desc, &m_shadowSampler))) {
+			LogError << "Failed to create Direct3D 11 shadow sampler";
+			return false;
+		}
+	}
+
+	if(!m_shadowRasterizer) {
+		// Models and the world have open and single-sided geometry, draw both sides
+		D3D11_RASTERIZER_DESC desc = {};
+		desc.FillMode = D3D11_FILL_SOLID;
+		desc.CullMode = D3D11_CULL_NONE;
+		desc.FrontCounterClockwise = TRUE;
+		desc.SlopeScaledDepthBias = 1.5f;
+		desc.DepthClipEnable = TRUE;
+		if(FAILED(m_device->CreateRasterizerState(&desc, &m_shadowRasterizer))) {
+			LogError << "Failed to create Direct3D 11 shadow rasterizer state";
+			return false;
+		}
+	}
+
+	D3D11_TEXTURE2D_DESC desc = {};
+	desc.Width = desc.Height = quality.size;
+	desc.MipLevels = 1;
+	desc.ArraySize = UINT(6 * quality.lights);
+	desc.Format = DXGI_FORMAT_R32_TYPELESS;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+	desc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+
+	D3D11_SHADER_RESOURCE_VIEW_DESC resourceDesc = {};
+	resourceDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	resourceDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
+	resourceDesc.TextureCubeArray.MostDetailedMip = 0;
+	resourceDesc.TextureCubeArray.MipLevels = 1;
+	resourceDesc.TextureCubeArray.First2DArrayFace = 0;
+	resourceDesc.TextureCubeArray.NumCubes = UINT(quality.lights);
+
+	auto createMaps = [&](ComPtr<ID3D11Texture2D> & texture, std::vector<ComPtr<ID3D11DepthStencilView>> & faces,
+	                      ComPtr<ID3D11ShaderResourceView> & resource) {
+		if(FAILED(m_device->CreateTexture2D(&desc, nullptr, &texture))
+		   || FAILED(m_device->CreateShaderResourceView(texture.Get(), &resourceDesc, &resource))) {
+			return false;
+		}
+		faces.resize(desc.ArraySize);
+		for(UINT i = 0; i < desc.ArraySize; i++) {
+			D3D11_DEPTH_STENCIL_VIEW_DESC faceDesc = {};
+			faceDesc.Format = DXGI_FORMAT_D32_FLOAT;
+			faceDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+			faceDesc.Texture2DArray.MipSlice = 0;
+			faceDesc.Texture2DArray.FirstArraySlice = i;
+			faceDesc.Texture2DArray.ArraySize = 1;
+			if(FAILED(m_device->CreateDepthStencilView(texture.Get(), &faceDesc, &faces[i]))) {
+				return false;
+			}
+		}
+		return true;
+	};
+
+	if(!createMaps(m_shadowWorldMaps, m_shadowWorldFaces, m_shadowWorldResource)
+	   || !createMaps(m_shadowModelMaps, m_shadowModelFaces, m_shadowModelResource)) {
+		LogError << "Failed to create " << quality.lights << " Direct3D 11 shadow cube maps of " << quality.size << "x"
+		         << quality.size;
+		releaseShadowMaps();
+		return false;
+	}
+
+	m_shadowMapSize = quality.size;
+	m_shadowMapLights = quality.lights;
+
+	LogInfo << "Dynamic shadows for " << quality.lights << " lights with " << quality.size << "x" << quality.size
+	        << " cube maps";
+
+	return true;
+}
+
+void D3D11Renderer::setShadowOccluders(const Vec3f * vertices, size_t count) {
+
+	m_shadowOccluders.Reset();
+	m_shadowChunks.clear();
+	for(ShadowSlot & slot : m_shadowSlots) {
+		slot.worldValid = false;
+	}
+
+	size_t triangles = count / 3;
+	if(!vertices || triangles == 0 || !m_device) {
+		return;
+	}
+
+	// Sort the triangles into cells of the horizontal plane
+	std::vector<std::pair<u64, u32>> cells(triangles);
+	for(size_t i = 0; i < triangles; i++) {
+		Vec3f center = (vertices[i * 3] + vertices[i * 3 + 1] + vertices[i * 3 + 2]) * (1.f / 3.f);
+		u64 x = u64(u32(s32(std::floor(center.x / ShadowChunkSize)) + 0x8000));
+		u64 z = u64(u32(s32(std::floor(center.z / ShadowChunkSize)) + 0x8000));
+		cells[i] = { (x << 32) | z, u32(i) };
+	}
+	std::sort(cells.begin(), cells.end());
+
+	std::vector<Vec3f> sorted;
+	sorted.reserve(triangles * 3);
+	for(size_t i = 0; i < triangles; i++) {
+		if(i == 0 || cells[i].first != cells[i - 1].first) {
+			ShadowChunk & chunk = m_shadowChunks.emplace_back();
+			chunk.start = UINT(sorted.size());
+			chunk.count = 0;
+			chunk.min = Vec3f(std::numeric_limits<float>::max());
+			chunk.max = Vec3f(-std::numeric_limits<float>::max());
+		}
+		ShadowChunk & chunk = m_shadowChunks.back();
+		for(size_t j = 0; j < 3; j++) {
+			const Vec3f & vertex = vertices[size_t(cells[i].second) * 3 + j];
+			sorted.push_back(vertex);
+			chunk.min = glm::min(chunk.min, vertex);
+			chunk.max = glm::max(chunk.max, vertex);
+		}
+		chunk.count += 3;
+	}
+
+	D3D11_BUFFER_DESC desc = {};
+	desc.Usage = D3D11_USAGE_IMMUTABLE;
+	desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+	desc.ByteWidth = UINT(sorted.size() * sizeof(Vec3f));
+	D3D11_SUBRESOURCE_DATA data = { sorted.data(), 0, 0 };
+	if(FAILED(m_device->CreateBuffer(&desc, &data, &m_shadowOccluders))) {
+		LogError << "Failed to create the Direct3D 11 shadow occluders for " << triangles << " triangles";
+		m_shadowChunks.clear();
+		return;
+	}
+
+	LogDebug("Shadow occluders: " << triangles << " triangles in " << m_shadowChunks.size() << " chunks");
+
+}
+
+void D3D11Renderer::addShadowCasters(const Vec3f * vertices, size_t count) {
+
+	if(!m_inScene || !shadowsEnabled() || m_shadowLights.empty() || !vertices || count < 3) {
+		return;
+	}
+
+	if(m_shadowCasters.empty()) {
+		m_shadowCastersMin = Vec3f(std::numeric_limits<float>::max());
+		m_shadowCastersMax = Vec3f(-std::numeric_limits<float>::max());
+	}
+
+	count -= count % 3;
+	m_shadowCasters.insert(m_shadowCasters.end(), vertices, vertices + count);
+	for(size_t i = 0; i < count; i++) {
+		m_shadowCastersMin = glm::min(m_shadowCastersMin, vertices[i]);
+		m_shadowCastersMax = glm::max(m_shadowCastersMax, vertices[i]);
+	}
+
+}
+
+void D3D11Renderer::renderShadowMaps(size_t * cubes) {
+
+	size_t lightCount = std::min(m_shadowLights.size(), m_shadowMapLights);
+
+	// Lights that did not move keep their cube map, so that the world geometry is drawn only once for static lights
+	bool taken[MaxShadowLights] = { };
+	for(size_t i = 0; i < lightCount; i++) {
+		cubes[i] = size_t(-1);
+		const ShadowLight & light = m_shadowLights[i];
+		for(size_t slot = 0; slot < m_shadowMapLights; slot++) {
+			const ShadowSlot & cube = m_shadowSlots[slot];
+			if(!taken[slot] && cube.used && cube.light.position == light.position
+			   && cube.light.fallEnd == light.fallEnd) {
+				cubes[i] = slot;
+				taken[slot] = true;
+				break;
+			}
+		}
+	}
+	for(size_t i = 0; i < lightCount; i++) {
+		if(cubes[i] != size_t(-1)) {
+			continue;
+		}
+		// Prefer slots that are not used by any light, they may be needed again for a light that comes back
+		size_t best = size_t(-1);
+		for(size_t slot = 0; slot < m_shadowMapLights; slot++) {
+			if(!taken[slot] && (best == size_t(-1) || (m_shadowSlots[best].used && !m_shadowSlots[slot].used))) {
+				best = slot;
+			}
+		}
+		arx_assert(best != size_t(-1));
+		cubes[i] = best;
+		taken[best] = true;
+		m_shadowSlots[best].used = true;
+		m_shadowSlots[best].light = m_shadowLights[i];
+		m_shadowSlots[best].worldValid = false;
+	}
+
+	// Upload the model triangles of this frame
+	bool hasCasters = false;
+	if(!m_shadowCasters.empty()) {
+		if(m_shadowCasters.size() > m_shadowCasterCapacity) {
+			m_shadowCasterBuffer.Reset();
+			m_shadowCasterCapacity = 0;
+			size_t capacity = std::max<size_t>(m_shadowCasters.size() * 3 / 2, 64 * 1024);
+			D3D11_BUFFER_DESC desc = {};
+			desc.Usage = D3D11_USAGE_DYNAMIC;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+			desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+			desc.ByteWidth = UINT(capacity * sizeof(Vec3f));
+			if(SUCCEEDED(m_device->CreateBuffer(&desc, nullptr, &m_shadowCasterBuffer))) {
+				m_shadowCasterCapacity = capacity;
+			}
+		}
+		D3D11_MAPPED_SUBRESOURCE mapped;
+		if(m_shadowCasterBuffer
+		   && SUCCEEDED(m_context->Map(m_shadowCasterBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+			std::memcpy(mapped.pData, m_shadowCasters.data(), m_shadowCasters.size() * sizeof(Vec3f));
+			m_context->Unmap(m_shadowCasterBuffer.Get(), 0);
+			hasCasters = true;
+		}
+	}
+
+	bindTessellation(false);
+	m_context->IASetInputLayout(m_shadowInputLayout.Get());
+	m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	m_context->VSSetShader(m_shadowVertexShader.Get(), nullptr, 0);
+	ID3D11Buffer * constants = m_shadowPassConstants.Get();
+	m_context->VSSetConstantBuffers(8, 1, &constants);
+	m_context->PSSetConstantBuffers(8, 1, &constants);
+	m_context->RSSetState(m_shadowRasterizer.Get());
+	m_context->OMSetBlendState(getBlendState(BlendOne, BlendZero, false, false), nullptr, 0xffffffff);
+	m_context->OMSetDepthStencilState(getDepthState(true, true), 0);
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_shadowMapSize), float(m_shadowMapSize), 0.f, 1.f };
+	m_context->RSSetViewports(1, &viewport);
+	const UINT stride = sizeof(Vec3f);
+	const UINT offset = 0;
+
+	for(size_t i = 0; i < lightCount; i++) {
+
+		ShadowSlot & slot = m_shadowSlots[cubes[i]];
+		const ShadowLight & light = m_shadowLights[i];
+		float farPlane = std::max(light.fallEnd, ShadowNearPlane * 2.f);
+		bool drawWorld = !slot.worldValid;
+		bool drawModels = hasCasters && boxIntersectsSphere(m_shadowCastersMin, m_shadowCastersMax, light.position,
+		                                                    farPlane);
+
+		for(size_t face = 0; face < 6; face++) {
+
+			size_t index = cubes[i] * 6 + face;
+
+			ShadowPassConstants pass;
+			glm::mat4x4 transform = shadowFaceTransform(face, ShadowNearPlane, farPlane);
+			std::memcpy(pass.face, &transform, sizeof(pass.face));
+			pass.light[0] = light.position.x;
+			pass.light[1] = light.position.y;
+			pass.light[2] = light.position.z;
+			pass.light[3] = ShadowCasterMinDistance;
+			m_context->UpdateSubresource(m_shadowPassConstants.Get(), 0, nullptr, &pass, 0, 0);
+
+			if(drawWorld) {
+				ID3D11DepthStencilView * target = m_shadowWorldFaces[index].Get();
+				m_context->ClearDepthStencilView(target, D3D11_CLEAR_DEPTH, 1.f, 0);
+				if(m_shadowOccluders) {
+					m_context->OMSetRenderTargets(0, nullptr, target);
+					m_context->PSSetShader(nullptr, nullptr, 0);
+					ID3D11Buffer * buffer = m_shadowOccluders.Get();
+					m_context->IASetVertexBuffers(0, 1, &buffer, &stride, &offset);
+					for(const ShadowChunk & chunk : m_shadowChunks) {
+						if(boxIntersectsSphere(chunk.min, chunk.max, light.position, farPlane)) {
+							m_context->Draw(chunk.count, chunk.start);
+						}
+					}
+				}
+			}
+
+			ID3D11DepthStencilView * target = m_shadowModelFaces[index].Get();
+			m_context->ClearDepthStencilView(target, D3D11_CLEAR_DEPTH, 1.f, 0);
+			if(drawModels) {
+				m_context->OMSetRenderTargets(0, nullptr, target);
+				m_context->PSSetShader(m_shadowCasterPixelShader.Get(), nullptr, 0);
+				ID3D11Buffer * buffer = m_shadowCasterBuffer.Get();
+				m_context->IASetVertexBuffers(0, 1, &buffer, &stride, &offset);
+				m_context->Draw(UINT(m_shadowCasters.size()), 0);
+			}
+
+		}
+
+		slot.worldValid = true;
+	}
+
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	invalidateCachedState();
+	m_currentVertexBuffer = nullptr;
+	m_currentPixelShader = nullptr;
+
+}
+
+void D3D11Renderer::renderShadows(bool apply) {
+
+	if(!m_shadowPixelShader || !m_linearDepthResource || !m_surfaceResource || !m_shadingResource
+	   || !m_sceneResolvedTargetView) {
+		return;
+	}
+
+	if(m_shadowLights.empty() && apply) {
+		return;
+	}
+
+	if(m_shadingResolved.Get() != m_shadingTarget.Get()) {
+		m_context->ResolveSubresource(m_shadingResolved.Get(), 0, m_shadingTarget.Get(), 0, DXGI_FORMAT_R8G8_UNORM);
+	}
+
+	size_t cubes[MaxShadowLights];
+	renderShadowMaps(cubes);
+
+	// See renderAmbientOcclusion() and renderReflections() for the depth reconstruction
+	float q = m_sceneProjection[2][2];
+	float nearPlane = (q != 0.f) ? -m_sceneProjection[3][2] / q : 1.f;
+	float farPlane = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
+
+	ShadowConstants constants = {};
+	constants.target[0] = float(m_sceneSize.x);
+	constants.target[1] = float(m_sceneSize.y);
+	constants.target[2] = 1.f / float(m_sceneSize.x);
+	constants.target[3] = 1.f / float(m_sceneSize.y);
+	constants.projection[0] = 1.f / std::max(std::abs(m_sceneProjection[0][0]), 0.0001f);
+	constants.projection[1] = 1.f / std::max(std::abs(m_sceneProjection[1][1]), 0.0001f);
+	constants.projection[2] = nearPlane;
+	constants.projection[3] = farPlane;
+	// The inverse of the rotation in renderReflections()
+	const float signs[3] = {
+		glm::sign(m_sceneProjection[0][0]), glm::sign(m_sceneProjection[1][1]), glm::sign(m_sceneProjection[2][3])
+	};
+	for(size_t row = 0; row < 3; row++) {
+		for(size_t column = 0; column < 3; column++) {
+			constants.view[row][column] = m_sceneView[row][column] * signs[column];
+		}
+	}
+	size_t lightCount = std::min(m_shadowLights.size(), m_shadowMapLights);
+	constants.params[0] = float(lightCount);
+	constants.params[1] = float(ShadowQualities[m_shadowQuality].taps);
+	constants.params[2] = float(m_shadowMapSize);
+	constants.fog[0] = m_fogStart;
+	constants.fog[1] = m_fogEnd;
+	// Light positions relative to the camera, the world coordinates are too large for single precision
+	glm::dvec3 camera = glm::dvec3(glm::inverse(glm::dmat4(m_sceneView))[3]);
+	for(size_t i = 0; i < lightCount; i++) {
+		const ShadowLight & light = m_shadowLights[i];
+		float * a = constants.lights[i * 3];
+		float * b = constants.lights[i * 3 + 1];
+		float * c = constants.lights[i * 3 + 2];
+		glm::dvec3 position = glm::dvec3(light.position) - camera;
+		a[0] = float(position.x);
+		a[1] = float(position.y);
+		a[2] = float(position.z);
+		a[3] = light.fallStart;
+		b[0] = (light.color.r * 0.299f + light.color.g * 0.587f + light.color.b * 0.114f) * light.intensity;
+		b[1] = light.fallEnd;
+		b[2] = light.strength;
+		b[3] = light.baked ? 1.f : 0.f;
+		c[0] = ShadowNearPlane;
+		c[1] = std::max(light.fallEnd, ShadowNearPlane * 2.f);
+		c[2] = float(cubes[i]);
+	}
+	m_context->UpdateSubresource(m_shadowConstants.Get(), 0, nullptr, &constants, 0, 0);
+	ID3D11Buffer * buffer = m_shadowConstants.Get();
+	m_context->PSSetConstantBuffers(9, 1, &buffer);
+
+	D3D11_VIEWPORT viewport = { 0.f, 0.f, float(m_sceneSize.x), float(m_sceneSize.y), 0.f, 1.f };
+	m_context->RSSetViewports(1, &viewport);
+	m_context->RSSetState(getRasterizerState(false, 0, false, false));
+	m_context->OMSetDepthStencilState(getDepthState(false, false), 0);
+	// The shadow factor darkens the scene, or replaces it in the debug view
+	BlendingFactor src = apply ? BlendZero : BlendOne;
+	BlendingFactor dst = apply ? BlendSrcColor : BlendZero;
+	m_context->OMSetBlendState(getBlendState(src, dst, false, true), nullptr, 0xffffffff);
+
+	ID3D11RenderTargetView * target = m_sceneResolvedTargetView.Get();
+	m_context->OMSetRenderTargets(1, &target, nullptr);
+	ID3D11ShaderResourceView * inputs[] = {
+		m_linearDepthResource.Get(), m_surfaceResource.Get(), m_shadingResource.Get()
+	};
+	m_context->PSSetShaderResources(0, UINT(std::size(inputs)), inputs);
+	ID3D11ShaderResourceView * maps[] = { m_shadowWorldResource.Get(), m_shadowModelResource.Get() };
+	m_context->PSSetShaderResources(5, UINT(std::size(maps)), maps);
+	ID3D11SamplerState * sampler = m_shadowSampler.Get();
+	m_context->PSSetSamplers(3, 1, &sampler);
+
+	drawFullscreen(m_shadowPixelShader.Get());
+
+	ID3D11ShaderResourceView * none[std::size(inputs)] = { };
+	m_context->PSSetShaderResources(0, UINT(std::size(none)), none);
+	m_context->PSSetShaderResources(5, UINT(std::size(maps)), none);
+	m_context->OMSetRenderTargets(0, nullptr, nullptr);
+	m_currentViews[0] = nullptr;
+	m_currentViews[1] = nullptr;
+	m_currentViews[2] = nullptr;
+
 }
 
 static float halton(u32 index, u32 base) {
@@ -1681,8 +2328,10 @@ void D3D11Renderer::bindRenderTargets() {
 	ID3D11RenderTargetView * colorView = m_inScene ? m_sceneColorView.Get() : m_colorView.Get();
 	ID3D11DepthStencilView * depthView = m_inScene ? m_sceneDepthView.Get() : m_depthView.Get();
 	
-	if(m_inScene && (m_objectMotionView || m_surfaceView)) {
-		ID3D11RenderTargetView * views[] = { colorView, m_objectMotionView.Get(), m_surfaceView.Get() };
+	if(m_inScene && (m_objectMotionView || m_surfaceView || m_shadingView)) {
+		ID3D11RenderTargetView * views[] = {
+			colorView, m_objectMotionView.Get(), m_surfaceView.Get(), m_shadingView.Get()
+		};
 		m_context->OMSetRenderTargets(UINT(std::size(views)), views, depthView);
 		return;
 	}
@@ -1723,22 +2372,25 @@ void D3D11Renderer::beginScene() {
 	}
 
 	updateUpscaler();
-	
+
+	m_shadowCasters.clear();
+
 	if(!sceneEnabled()) {
 		return;
 	}
-	
+
 	float scale = std::min(m_sceneScale, 1.f);
 	Vec2i size(std::max<s32>(s32(float(m_size.x) * scale + 0.5f), 1),
 	           std::max<s32>(s32(float(m_size.y) * scale + 0.5f), 1));
 	UINT samples = m_upscaler ? 1 : m_msaaSamples;
 	if((size != m_sceneSize || bool(m_motionView) != upscalerInputsNeeded() || bool(m_aoView) != m_ambientOcclusion
-	    || bool(m_bloomViews[0]) != m_bloom || bool(m_surfaceView) != (m_reflectionStrength > 0.f)
+	    || bool(m_bloomViews[0]) != m_bloom || bool(m_surfaceView) != surfaceTargetNeeded()
+	    || bool(m_reflectionColor) != (m_reflectionStrength > 0.f) || bool(m_shadingView) != shadowsEnabled()
 	    || samples != m_sceneSamples)
 	   && !createSceneTargets(size)) {
 		return;
 	}
-	
+
 	// The scene textures are about to become render targets
 	unbindTextureView(m_sceneResolvedView.Get());
 	unbindTextureView(m_sceneDepthResource.Get());
@@ -1747,13 +2399,17 @@ void D3D11Renderer::beginScene() {
 	unbindTextureView(m_objectMotionResource.Get());
 	unbindTextureView(m_surfaceResource.Get());
 	unbindTextureView(m_reflectionColorResource.Get());
-	
+	unbindTextureView(m_shadingResource.Get());
+
 	const float none[4] = { 0.f, 0.f, 0.f, 0.f };
 	if(m_objectMotionView) {
 		m_context->ClearRenderTargetView(m_objectMotionView.Get(), none);
 	}
 	if(m_surfaceView) {
 		m_context->ClearRenderTargetView(m_surfaceView.Get(), none);
+	}
+	if(m_shadingView) {
+		m_context->ClearRenderTargetView(m_shadingView.Get(), none);
 	}
 	
 	updateSceneCamera();
@@ -1779,13 +2435,22 @@ void D3D11Renderer::endScene() {
 	}
 	
 	renderSceneMotion();
-	
+
+	if(m_surfaceTarget && m_surfaceResolved.Get() != m_surfaceTarget.Get()) {
+		m_context->ResolveSubresource(m_surfaceResolved.Get(), 0, m_surfaceTarget.Get(), 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+	}
+
+	if(shadowsEnabled()) {
+		// The debug view shows the shadows instead of the scene
+		renderShadows(m_sceneDebugView != ShadowDebugView);
+	}
+
 	if(m_ambientOcclusion) {
 		// The debug view shows the ambient occlusion without applying it
 		renderAmbientOcclusion(m_sceneDebugView != 4);
 	}
-	
-	if(m_surfaceView) {
+
+	if(m_surfaceView && m_reflectionStrength > 0.f) {
 		renderReflections();
 	}
 	
@@ -2784,6 +3449,8 @@ ID3D11BlendState * D3D11Renderer::getBlendState(BlendingFactor src, BlendingFact
 	surface.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
 	surface.BlendOp = surface.BlendOpAlpha = D3D11_BLEND_OP_ADD;
 	surface.RenderTargetWriteMask = colorWrite ? D3D11_COLOR_WRITE_ENABLE_ALL : 0;
+	// The fourth target (light at the surface for the shadows) is replaced by opaque draws in the same way
+	desc.RenderTarget[3] = surface;
 	D3D11_RENDER_TARGET_BLEND_DESC & target = desc.RenderTarget[0];
 	target.BlendEnable = (src != BlendOne || dst != BlendZero) ? TRUE : FALSE;
 	target.SrcBlend = arxToD3DBlendFactor[src];
@@ -2876,13 +3543,7 @@ void D3D11Renderer::flushState(VertexType type) {
 	{
 		glm::mat4x4 transform;
 		if(type == VertexTL) {
-			// Direct3D doesn't apply any transform for D3DTLVERTEX
-			// Change coordinate system from [0, width] x [0, height] to [-1, 1] x [-1, 1] and flip the y axis
-			transform = glm::translate(glm::mat4x4(1.f), Vec3f(-1.f, 1.f, 0.f));
-			transform = glm::scale(transform, Vec3f(2.f / float(std::max<s32>(m_viewport.width(), 1)),
-			                                        -2.f / float(std::max<s32>(m_viewport.height(), 1)), 1.f));
-			// Change pixel origins
-			transform = glm::translate(transform, Vec3f(0.5f, 0.5f, 0.f));
+			transform = transformTL(m_viewport);
 		} else {
 			transform = m_projection * m_view;
 		}
@@ -3041,7 +3702,7 @@ void D3D11Renderer::flushState(VertexType type) {
 				constants.specular[1] = specular.exponent;
 				constants.specular[2] = specular.metallic;
 			}
-			if(texture && type == VertexWorld && m_surfaceView) {
+			if(texture && type == VertexWorld && m_surfaceView && m_reflectionStrength > 0.f) {
 				constants.surface[0] = texture->specular().reflectivity;
 			}
 			// Lava glows and flows in the 3D scene
@@ -3062,7 +3723,7 @@ void D3D11Renderer::flushState(VertexType type) {
 				constants.specular[0] = water.strength * m_specularStrength * SpecularScale;
 				constants.specular[1] = water.exponent;
 				constants.specular[2] = water.metallic;
-				constants.surface[0] = m_surfaceView ? water.reflectivity : 0.f;
+				constants.surface[0] = (m_surfaceView && m_reflectionStrength > 0.f) ? water.reflectivity : 0.f;
 				constants.surface[2] = 1.f;
 			}
 		}
