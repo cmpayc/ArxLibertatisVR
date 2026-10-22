@@ -1111,19 +1111,26 @@ void applyVRRoomScale() {
 			player.pos += movement;
 		}
 	}
+	// Both hands and torso now use this frame's poses and the collision-resolved root.
+	syncVRTrackingToPlayer();
 	
 	/*
 	 * Play the walk animation while physically stepping, unless the thumbstick already moves the player.
-	 * Any noticeable movement plays at least about one step, so that even small steps are animated.
+	 * A step is a net movement of 5 cm (10 waited too long, user), back and forth cancels out and is forgotten after a while: any movement over
+	 * 10 cm/s in one frame moved the legs all the time (user: the feet settling under the head, millimeters).
+	 * Each step plays at least about one step of the animation, so that even small steps are animated.
 	 */
+	const float StepDistance = 5.f; // cm
 	static float animationTime = 0.f;
 	static Vec3f direction(0.f);
+	static Vec3f stepped(0.f);
 	float dt = g_vr ? g_vr->getFrameDuration() : 0.f;
 	if(dt > 0.f) {
-		Vec3f horizontal(moved.x, 0.f, moved.z);
-		if(glm::length(horizontal) / dt > 10.f) {
+		stepped = stepped * std::exp(-dt * 2.f) + Vec3f(moved.x, 0.f, moved.z);
+		if(glm::length(stepped) > StepDistance * config.vr.worldScale) {
 			animationTime = 0.4f;
-			direction = horizontal;
+			direction = stepped;
+			stepped = Vec3f(0.f);
 		} else {
 			animationTime -= dt;
 		}

@@ -117,6 +117,8 @@ public:
 
 	[[nodiscard]] bool isFrameActive() const { return m_frameActive; }
 	[[nodiscard]] Vec2i getEyeSize() const { return m_eyeSize; }
+	//! Timestamp shared by the located head and controller poses, for motion history.
+	[[nodiscard]] XrTime getTrackingTime() const { return m_displayTime; }
 	//! Predicted duration of the current frame in seconds
 	[[nodiscard]] float getFrameDuration() const {
 		return std::min(float(m_frameState.predictedDisplayPeriod) * 1e-9f, 0.1f);

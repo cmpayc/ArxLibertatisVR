@@ -20,6 +20,8 @@
 #include "vr/VRBody.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <map>
 #include <string_view>
 #include <vector>
@@ -47,6 +49,18 @@
 
 namespace {
 
+//! A middle, ring or little finger with its own bones, see splitFingers
+struct FingerBones {
+	VertexGroupId middle; //!< Middle phalanx, a child of the fingers tip bone
+	VertexGroupId tip;    //!< Last phalanx
+};
+
+//! A slice of the forearm that turns with a part of the hand twist, see splitForearm
+struct TwistBone {
+	VertexGroupId bone;   //!< A child of the elbow or wrist bone, at its pivot
+	float twist = 0.f;    //!< Part of the forearm twist: 0 at the elbow, 1 at the wrist
+};
+
 //! The bones of one arm of the player model
 struct ArmBones {
 	VertexGroupId shoulder;  //!< Shoulder joint, rotates the upper arm
@@ -58,6 +72,8 @@ struct ArmBones {
 	VertexGroupId indexTip;
 	VertexGroupId fingersRoot; //!< Middle, ring and little fingers
 	VertexGroupId fingersTip;
+	std::vector<FingerBones> fingers;
+	std::vector<TwistBone> twists;
 	[[nodiscard]] bool valid() const { return shoulder && elbow && wrist && hand && indexRoot && thumb; }
 };
 
@@ -184,6 +200,215 @@ void updateBoneDescendants(Skeleton & skeleton, VertexGroupId root) {
 		Vec3f parentScale = parent.anim.scale / getBoneLength(bone.father);
 		bone.anim.scale = (bone.init.scale + Vec3f(1.f)) * parentScale * getBoneLength(group);
 	}
+}
+
+/*!
+ * The middle, ring and little fingers of the model share one root and one tip bone, and the tip bone holds the last two
+ * phalanges of each finger: they could only bend at the knuckles and at one joint, all three around the same point.
+ * Give each finger a bone for its middle phalanx (a child of the tip bone, where the root bone ends) and one for its
+ * last phalanx. Each finger is a separate part of the mesh. The new bones come after the bones of the
+ * model, so the animations of the game leave them alone, and the fingers follow the shared bones as before until
+ * curlFingers bends them.
+ */
+void splitFingers(EERIE_3DOBJ & object, ArmBones & arm) {
+
+	arm.fingers.clear();
+	if(!object.m_skeleton || !arm.indexRoot || !arm.fingersRoot || !arm.fingersTip) {
+		return;
+	}
+	Skeleton & skeleton = *object.m_skeleton;
+	const Vec3f direction = glm::normalize(skeleton.bones[arm.indexRoot].transinit_global);
+
+	// Each finger is a separate part of the mesh: find the vertices of both bones connected by faces
+	std::map<size_t, size_t> parents;
+	std::map<size_t, bool> isTip;
+	for(VertexGroupId bone : { arm.fingersRoot, arm.fingersTip }) {
+		for(VertexId vertex : object.m_boneVertices[bone]) {
+			parents[size_t(vertex)] = size_t(vertex);
+			isTip[size_t(vertex)] = (bone == arm.fingersTip);
+		}
+	}
+	auto find = [&parents](size_t vertex) {
+		while(parents[vertex] != vertex) {
+			vertex = parents[vertex] = parents[parents[vertex]];
+		}
+		return vertex;
+	};
+	for(const EERIE_FACE & face : object.facelist) {
+		for(size_t i = 0; i < IOPOLYVERT; i++) {
+			size_t a = size_t(face.vid[i]);
+			size_t b = size_t(face.vid[(i + 1) % IOPOLYVERT]);
+			if(parents.count(a) && parents.count(b)) {
+				parents[find(a)] = find(b);
+			}
+		}
+	}
+	std::map<size_t, std::vector<size_t>> parts;
+	for(const auto & entry : parents) {
+		parts[find(entry.first)].push_back(entry.first);
+	}
+
+	const Vec3f tipPivot = object.vertexlist[object.grouplist[arm.fingersTip].origin].v;
+	std::vector<size_t> moved;
+
+	for(auto & entry : parts) {
+
+		std::vector<size_t> & vertices = entry.second;
+		if(vertices.size() < 3) {
+			continue; // The loose pivot vertex
+		}
+		auto along = [&](size_t vertex) { return glm::dot(object.vertexlist[VertexId(vertex)].v, direction); };
+		std::sort(vertices.begin(), vertices.end(), [&](size_t a, size_t b) { return along(a) < along(b); });
+		std::vector<size_t> tips;
+		float rootEnd = -std::numeric_limits<float>::max();
+		for(size_t vertex : vertices) {
+			if(isTip[vertex]) {
+				tips.push_back(vertex);
+			} else {
+				rootEnd = std::max(rootEnd, along(vertex));
+			}
+		}
+		if(tips.size() < 2 || rootEnd == -std::numeric_limits<float>::max()) {
+			continue;
+		}
+
+		/*
+		 * The middle joint is where the root bone ends. The last joint is at the largest gap between the vertices of the
+		 * tip bone 50% to 80% of the way from there to the tip: the three rings of human_base, or a denser mesh.
+		 */
+		const float middleJoint = (rootEnd + along(tips.front())) / 2.f;
+		const float end = along(tips.back());
+		if(end - middleJoint < 0.001f) {
+			continue;
+		}
+		float lastJoint = 0.f;
+		float largestGap = -1.f;
+		for(size_t i = 0; i + 1 < tips.size(); i++) {
+			float gap = along(tips[i + 1]) - along(tips[i]);
+			float middle = (along(tips[i + 1]) + along(tips[i])) / 2.f;
+			float fraction = (middle - middleJoint) / (end - middleJoint);
+			if(fraction >= 0.5f && fraction <= 0.8f && gap > largestGap) {
+				largestGap = gap;
+				lastJoint = middle;
+			}
+		}
+		if(largestGap < 0.f) {
+			continue;
+		}
+
+		// A joint bends around the center of the finger: the vertices nearest to it along the finger
+		auto center = [&](float position) {
+			std::vector<size_t> nearest = vertices;
+			size_t count = std::max<size_t>(3, vertices.size() / 6);
+			std::partial_sort(nearest.begin(), nearest.begin() + count, nearest.end(), [&](size_t a, size_t b) {
+				return std::abs(along(a) - position) < std::abs(along(b) - position);
+			});
+			Vec3f sum(0.f);
+			for(size_t i = 0; i < count; i++) {
+				sum += object.vertexlist[VertexId(nearest[i])].v;
+			}
+			sum /= float(count);
+			return sum + direction * (position - glm::dot(sum, direction));
+		};
+		const Vec3f middlePivot = center(middleJoint);
+		const Vec3f lastPivot = center(lastJoint);
+
+		auto addBone = [&](VertexGroupId father, const Vec3f & pivot, const Vec3f & fatherPivot) {
+			Bone bone;
+			bone.father = father;
+			bone.transinit_global = bone.init.trans = pivot - fatherPivot;
+			bone.anim.trans = pivot;
+			bone.anim.scale = Vec3f(1.f);
+			skeleton.bones.push_back(bone);
+			object.m_boneVertices.emplace_back();
+			return skeleton.bones.last();
+		};
+		FingerBones finger;
+		finger.middle = addBone(arm.fingersTip, middlePivot, tipPivot);
+		finger.tip = addBone(finger.middle, lastPivot, middlePivot);
+		for(size_t tip : tips) {
+			const VertexId vertex(tip);
+			bool last = along(tip) >= lastJoint;
+			object.m_boneVertices[last ? finger.tip : finger.middle].push_back(vertex);
+			object.vertexlocal[vertex] = object.vertexlist[vertex].v - (last ? lastPivot : middlePivot);
+			moved.push_back(tip);
+		}
+		arm.fingers.push_back(finger);
+
+	}
+
+	auto & tipVertices = object.m_boneVertices[arm.fingersTip];
+	tipVertices.erase(std::remove_if(tipVertices.begin(), tipVertices.end(), [&moved](VertexId vertex) {
+		return std::find(moved.begin(), moved.end(), size_t(vertex)) != moved.end();
+	}), tipVertices.end());
+
+	updateBoneDescendants(skeleton, arm.fingersRoot);
+}
+
+/*!
+ * The forearm of the model has two bones, and a few rings of vertices: with rigid skinning, the twist of the hand around
+ * the forearm all went to the faces between two rings and stretched them (user: turning the palm up). Like the twist
+ * bones of other games, give the vertices of both bones slices that turn with a part of the twist, from none at the
+ * elbow to all of it at the wrist (see solveArm). The slices are children of the bone the vertices were in, at its pivot,
+ * so the vertices keep their positions and follow it as before until solveArm turns them.
+ */
+void splitForearm(EERIE_3DOBJ & object, ArmBones & arm) {
+
+	arm.twists.clear();
+	if(!object.m_skeleton || !arm.elbow || !arm.wrist) {
+		return;
+	}
+	Skeleton & skeleton = *object.m_skeleton;
+	const Vec3f elbowPivot = object.vertexlist[object.grouplist[arm.elbow].origin].v;
+	const Vec3f wristPivot = object.vertexlist[object.grouplist[arm.wrist].origin].v;
+	if(glm::distance(elbowPivot, wristPivot) < 0.001f) {
+		return;
+	}
+	const Vec3f axis = glm::normalize(wristPivot - elbowPivot);
+	auto along = [&](VertexId vertex) { return glm::dot(object.vertexlist[vertex].v - elbowPivot, axis); };
+
+	// From the ring nearest to the elbow (it meets the upper arm, which does not turn) to the wrist
+	float start = std::numeric_limits<float>::max();
+	float end = -std::numeric_limits<float>::max();
+	for(VertexGroupId bone : { arm.elbow, arm.wrist }) {
+		for(VertexId vertex : object.m_boneVertices[bone]) {
+			start = std::min(start, along(vertex));
+			end = std::max(end, along(vertex));
+		}
+	}
+	if(end - start < 0.001f) {
+		return;
+	}
+
+	const int Slices = 12;
+	std::map<std::pair<size_t, int>, VertexGroupId> slices;
+	for(VertexGroupId owner : { arm.elbow, arm.wrist }) {
+		const std::vector<VertexId> vertices = object.m_boneVertices[owner]; // Adding bones moves the lists
+		std::vector<VertexId> kept;
+		for(VertexId vertex : vertices) {
+			int slice = int(std::round((along(vertex) - start) / (end - start) * float(Slices)));
+			if(slice == ((owner == arm.wrist) ? Slices : 0)) {
+				kept.push_back(vertex); // Already turns as much as its bone
+				continue;
+			}
+			VertexGroupId & bone = slices[{ size_t(owner), slice }];
+			if(!bone) {
+				Bone twistBone;
+				twistBone.father = owner;
+				twistBone.transinit_global = twistBone.init.trans = Vec3f(0.f);
+				twistBone.anim.trans = (owner == arm.wrist) ? wristPivot : elbowPivot;
+				twistBone.anim.scale = Vec3f(1.f);
+				skeleton.bones.push_back(twistBone);
+				object.m_boneVertices.emplace_back();
+				bone = skeleton.bones.last();
+				arm.twists.push_back({ bone, float(slice) / float(Slices) });
+			}
+			object.m_boneVertices[bone].push_back(vertex);
+		}
+		object.m_boneVertices[owner] = kept;
+	}
+
+	updateBoneDescendants(skeleton, arm.elbow);
 }
 
 //! Shortest rotation from one unit vector to another
@@ -355,7 +580,9 @@ void solveSpine(Skeleton & skeleton, const SpineBones & spine, const LegBones (&
 	 * crouching while the player sits), the shoulders would stay out of reach of the hands. Move the upper body
 	 * so that the neck reaches its place, ignoring small differences so that standing looks the same.
 	 */
-	const float MaxShift = 60.f;
+	// Small residual corrections keep the shoulders reachable without detaching
+	// the torso from the planted pelvis when the requested pose is unreachable.
+	const float MaxShift = 8.f * getVRBodyScale();
 	Vec3f error = neck - skeleton.bones[spine.neck].anim.trans;
 	float length = glm::length(error);
 	if(length > Tolerance) {
@@ -381,6 +608,21 @@ glm::mat3x3 makeBodyFrame(const Vec3f & primary, const Vec3f & secondary) {
  */
 bool g_handInWall[VRHandCount] = { false, false };
 bool g_weaponInWall[VRHandCount] = { false, false };
+
+//! Twist of the hand around the forearm in the last frame (degrees), to follow it past half a turn
+float g_handTwist[VRHandCount] = { 0.f, 0.f };
+bool g_handTwistValid[VRHandCount] = { false, false };
+
+//! Signed angle (degrees) of the part of a rotation around an axis (swing-twist decomposition)
+float twistAngle(const glm::quat & rotation, const Vec3f & axis) {
+	float angle = glm::degrees(2.f * std::atan2(glm::dot(Vec3f(rotation.x, rotation.y, rotation.z), axis), rotation.w));
+	return (angle > 180.f) ? angle - 360.f : ((angle <= -180.f) ? angle + 360.f : angle);
+}
+
+//! The angle plus or minus whole turns that is nearest to a reference (degrees)
+float unwrapAngle(float angle, float reference) {
+	return angle + 360.f * std::round((reference - angle) / 360.f);
+}
 
 // The wrist joint and the controller orientation of each hand of the posed model, in the world
 struct WristPose {
@@ -441,19 +683,42 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 	}
 	fingerAxis = glm::normalize(fingerAxis);
 	thumbAxis = glm::normalize(thumbAxis);
-	
+
+	// The index points straight on, unlike the line from the wrist to it (9° to the thumb): it curled to the thumb
+	Vec3f indexAxis = fingerAxis;
+	if(arm.indexTip) {
+		Vec3f axis = glm::cross(skeleton.bones[arm.indexTip].transinit_global, palm);
+		if(glm::length(axis) > 0.001f) {
+			indexAxis = glm::normalize(axis);
+		}
+	}
+
+	/*
+	 * The thumb touching a button bends towards the tip of the curled index, like an OK sign: 56° around this axis,
+	 * measured on human_base and the enhanced player mesh. It is built from cross products of the bone directions, so
+	 * it mirrors for the left hand.
+	 */
+	Vec3f thumbOkAxis = 0.71f * glm::cross(fingers, palm) - 0.073f * glm::cross(palm, thumb)
+	                    + 0.21f * glm::cross(thumb, fingers);
+	if(glm::length(thumbOkAxis) < 0.001f) {
+		return;
+	}
+	thumbOkAxis = glm::normalize(thumbOkAxis);
+
 	const float relaxed = 0.12f; // A slight curl even when open
 	float grip = glm::mix(relaxed, 1.f, state.squeeze);
 	float index = glm::mix(relaxed, 1.f, state.trigger);
 	if(state.hasIndexTouch && state.indexTouch) {
 		// Resting on the trigger
-		index = std::max(index, 0.35f);
+		index = std::max(index, 0.175f);
 	}
-	
-	// With touch sensors the thumb lies on the controller while touching it and is raised otherwise
+
+	// With touch sensors the thumb bends while touching the controller (less without the index) and is raised otherwise
 	float thumbAngle = 25.f + 15.f * state.squeeze;
+	Vec3f thumbBend = thumbAxis;
 	if(state.hasThumbTouch) {
-		thumbAngle = state.thumbTouch ? 40.f + 15.f * state.squeeze : 0.f;
+		thumbAngle = state.thumbTouch ? glm::mix(15.f, 56.f, state.trigger) : 0.f;
+		thumbBend = thumbOkAxis;
 	}
 
 	// Casting (the game's pose for magic): the index straight, the other fingers bent with the thumb over them
@@ -461,6 +726,7 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 		grip = 1.f;
 		index = 0.f;
 		thumbAngle = 55.f;
+		thumbBend = thumbAxis;
 	}
 	
 	/*
@@ -471,7 +737,8 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 	float fist = pointing ? 0.f : std::min(state.squeeze, state.trigger);
 	const EERIE_ANIM * fistAnim = (fistPose && !fistPose->anims.empty()) ? fistPose->anims[0] : nullptr;
 	
-	auto curl = [&](VertexGroupId bone, VertexGroupId fistBone, const Vec3f & axis, float degrees) {
+	auto curl = [&](VertexGroupId bone, VertexGroupId fistBone, const Vec3f & axis, float degrees,
+	                const glm::quat & fistOffset = glm::quat(1.f, 0.f, 0.f, 0.f)) {
 		if(!bone) {
 			return;
 		}
@@ -483,16 +750,56 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 			if(mirrorFist) {
 				pose = glm::quat(pose.w, pose.x, -pose.y, -pose.z);
 			}
-			rotation = glm::slerp(rotation, pose, fist);
+			rotation = glm::slerp(rotation, fistOffset * pose, fist);
 		}
 		skeleton.bones[bone].init.quat = rotation;
 	};
 	const ArmBones & source = fistArm ? *fistArm : arm;
-	curl(arm.fingersRoot, source.fingersRoot, fingerAxis, 80.f * grip);
-	curl(arm.fingersTip, source.fingersTip, fingerAxis, 60.f * grip);
-	curl(arm.indexRoot, source.indexRoot, fingerAxis, 75.f * index);
-	curl(arm.indexTip, source.indexTip, fingerAxis, 55.f * index);
-	curl(arm.thumb, source.thumb, thumbAxis, thumbAngle);
+	/*
+	 * The middle, ring and little fingers bend at all three joints when they have their own bones (splitFingers), into
+	 * an arc like the index. Otherwise the tip bone holds two phalanges: each joint stays below 90°, more at the knuckle
+	 * folded them into a sharp L. They do not take the game's fist: it bends the tip 142° and folds them flat under the
+	 * palm. The index curls almost like in the game's fist (69° and 97°).
+	 */
+	/*
+	 * Around a line across the fingers from their root to their tip bone: the axis of the index made them roll up to
+	 * one side. The bones are the same for every mesh, the vertices are not: the armor gloves have them as one piece.
+	 */
+	// The left hand is not quite a mirror of the right one (its bones point 8° to the side, not 3°): mirror the right one
+	Vec3f fingersAxis = fingerAxis;
+	const ArmBones & right = g_bones.arms[VRHandRight];
+	const bool mirrored = (&arm == &g_bones.arms[VRHandLeft] && right.fingersTip);
+	if(VertexGroupId fingersTip = mirrored ? right.fingersTip : arm.fingersTip) {
+		Vec3f direction = skeleton.bones[fingersTip].transinit_global;
+		if(mirrored) {
+			direction.x = -direction.x;
+		}
+		Vec3f axis = glm::cross(direction, palm);
+		if(glm::length(axis) > 0.001f) {
+			fingersAxis = glm::normalize(axis);
+		}
+	}
+	if(arm.fingers.empty()) {
+		curl(arm.fingersRoot, VertexGroupId(), fingersAxis, 60.f * grip);
+		curl(arm.fingersTip, VertexGroupId(), fingersAxis, 75.f * grip);
+	} else {
+		// The first phalanx is long: less at the knuckle (like the index) and more at the other joints rolls them up
+		curl(arm.fingersRoot, VertexGroupId(), fingersAxis, 65.f * grip);
+		curl(arm.fingersTip, VertexGroupId(), fingersAxis, 0.f);
+		for(const FingerBones & finger : arm.fingers) {
+			curl(finger.middle, VertexGroupId(), fingersAxis, 100.f * grip);
+			curl(finger.tip, VertexGroupId(), fingersAxis, 75.f * grip);
+		}
+	}
+	curl(arm.indexRoot, source.indexRoot, indexAxis, 70.f * index);
+	curl(arm.indexTip, source.indexTip, indexAxis, 90.f * index);
+	// The thumb of the game's fist goes through the index: turned a bit out, away from it
+	Vec3f thumbOut = glm::cross(fingers, thumb);
+	glm::quat thumbOffset(1.f, 0.f, 0.f, 0.f);
+	if(glm::length(thumbOut) > 0.001f) {
+		thumbOffset = glm::angleAxis(glm::radians(12.f), glm::normalize(thumbOut));
+	}
+	curl(arm.thumb, source.thumb, thumbBend, thumbAngle, thumbOffset);
 	
 	updateBoneDescendants(skeleton, arm.hand);
 }
@@ -505,6 +812,7 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	Vec3f gripPosition;
 	glm::quat gripOrientation;
 	if(!grip.valid || !trackingPoseToWorld(grip.position, grip.orientation, gripPosition, gripOrientation)) {
+		g_handTwistValid[hand] = false;
 		return;
 	}
 
@@ -582,6 +890,10 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 		float factor = std::min(distance / armLength, 1.f + MaxLengthen);
 		lengthenBone(skeleton, arm.shoulder, arm.elbow, factor);
 		lengthenBone(skeleton, arm.elbow, arm.wrist, factor);
+		for(const TwistBone & slice : arm.twists) {
+			// The slices are longer with their bone (lengthenBone made room for all bones)
+			g_boneLengths[size_t(slice.bone)] = getBoneLength(skeleton.bones[slice.bone].father);
+		}
 		updateBoneDescendants(skeleton, arm.shoulder);
 		upperLength = glm::distance(shoulder, skeleton.bones[arm.elbow].anim.trans);
 		lowerLength = glm::distance(skeleton.bones[arm.elbow].anim.trans, skeleton.bones[arm.wrist].anim.trans);
@@ -621,24 +933,98 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	glm::quat handOrientation = glm::normalize(glm::quat_cast(world * glm::transpose(local)));
 
 	/*
-	 * The wrist bone carries the lower half of the forearm (rigid skinning), so it must stay aligned with the
-	 * forearm: only give it half of the hand's twist around the forearm axis, like a real forearm.
+	 * The twist of the hand around the forearm is shared out like in a real arm, so that no seam of the rigid skinning
+	 * twists too far and stretches the textures (user request):
+	 *  - 50% is a rotation of the shoulder: the whole arm turns around the line from the shoulder to the wrist (the
+	 *    elbow swings, the wrist stays), up to 180° (user: more than 35%), but only when the elbow moves outwards
+	 *    (user: not inwards, into the body),
+	 *  - the rest goes along the forearm: the wrist bone turns with the hand (half of it made the hand turn faster)
+	 *    and the slices of splitForearm in steps between none at the elbow and all at the wrist. Two seams there tore
+	 *    or stretched the forearm at any share and limit (user: turning the palm up).
+	 * The twist is followed from frame to frame, so it does not flip to the other side at half a turn.
 	 */
+	const float ShoulderShare = 0.5f;
+	const float ShoulderTwist = 180.f;
+	const float ElbowShare = 0.3f; // Without slices: of the whole, at the seam between the upper arm and the elbow bone
+	const float MaxSwivel = 150.f;
 	Bone & wrist = skeleton.bones[arm.wrist];
-	Vec3f forearm = wrist.anim.trans - skeleton.bones[arm.elbow].anim.trans;
-	if(glm::length(forearm) > 0.001f) {
-		forearm = glm::normalize(forearm);
-		glm::quat change = handOrientation * glm::inverse(wrist.anim.quat);
-		if(change.w < 0.f) {
-			change = -change;
+	auto forearmAxis = [&]() {
+		Vec3f forearm = wrist.anim.trans - skeleton.bones[arm.elbow].anim.trans;
+		return (glm::length(forearm) > 0.001f) ? glm::normalize(forearm) : Vec3f(0.f);
+	};
+	Vec3f forearm = forearmAxis();
+	if(forearm != Vec3f(0.f)) {
+
+		float twist = twistAngle(handOrientation * glm::inverse(wrist.anim.quat), forearm);
+		if(g_handTwistValid[hand]) {
+			twist = unwrapAngle(twist, g_handTwist[hand]);
+			if(std::abs(twist) > 400.f) {
+				twist -= std::copysign(360.f, twist); // More than a hand can turn: tracking was lost
+			}
 		}
-		Vec3f axis = forearm * glm::dot(Vec3f(change.x, change.y, change.z), forearm);
-		glm::quat twist(change.w, axis.x, axis.y, axis.z);
-		if(glm::length(twist) > 0.001f) {
-			twist = glm::normalize(twist);
-			wrist.anim.quat = glm::normalize(glm::slerp(glm::quat(1.f, 0.f, 0.f, 0.f), twist, 0.5f) * wrist.anim.quat);
+		g_handTwist[hand] = twist;
+		g_handTwistValid[hand] = true;
+
+		float shoulderPart = glm::clamp(twist * ShoulderShare, -ShoulderTwist, ShoulderTwist);
+		float along = glm::dot(direction, forearm);
+		if(std::abs(shoulderPart) > 0.1f && std::abs(along) > 0.2f) {
+			// Turning the arm around the shoulder to wrist line by an angle turns the forearm by about angle × along
+			auto turnArm = [&](float angle) {
+				// Both bones: updating the upper arm alone puts the forearm back where the animation had it
+				glm::quat rotation = glm::angleAxis(glm::radians(angle), direction);
+				Bone & upperArm = skeleton.bones[arm.shoulder];
+				Bone & forearmBone = skeleton.bones[arm.elbow];
+				glm::quat forearmOrientation = glm::normalize(rotation * forearmBone.anim.quat);
+				upperArm.anim.quat = glm::normalize(rotation * upperArm.anim.quat);
+				updateBoneDescendants(skeleton, arm.shoulder);
+				forearmBone.anim.quat = forearmOrientation;
+				updateBoneDescendants(skeleton, arm.elbow);
+			};
+			auto measure = [&](float expected) {
+				forearm = forearmAxis();
+				return unwrapAngle(twistAngle(handOrientation * glm::inverse(wrist.anim.quat), forearm), expected);
+			};
+			const Vec3f elbowBefore = skeleton.bones[arm.elbow].anim.trans;
+			const Vec3f forearmBefore = forearm;
+			float swivel = glm::clamp(shoulderPart / along, -MaxSwivel, MaxSwivel);
+			turnArm(swivel);
+			float turned = measure(twist - swivel * along);
+			if(std::abs(turned) > std::abs(twist)) {
+				turnArm(-2.f * swivel);
+				turned = measure(twist + swivel * along);
+				swivel = -swivel;
+			}
+			// The elbow does not swing inwards, towards the body (user): the forearm takes that twist
+			if(glm::dot(skeleton.bones[arm.elbow].anim.trans - elbowBefore, outwards) < 0.f) {
+				turnArm(-swivel);
+				forearm = forearmBefore;
+			} else {
+				twist = turned;
+			}
+		}
+
+		Bone & elbowBone = skeleton.bones[arm.elbow];
+		if(arm.twists.empty()) {
+			// What is left after the shoulder: 30% and 20% of the whole at the two seams of the forearm
+			float elbowPart = twist * ElbowShare / (1.f - ShoulderShare);
+			elbowBone.anim.quat = glm::normalize(glm::angleAxis(glm::radians(elbowPart), forearm) * elbowBone.anim.quat);
+			updateBoneDescendants(skeleton, arm.elbow);
+			wrist.anim.quat = glm::normalize(glm::angleAxis(glm::radians(twist - elbowPart), forearm) * wrist.anim.quat);
 			updateBoneDescendants(skeleton, arm.wrist);
+		} else {
+			// The wrist bone turns with the hand, each slice by its part of that from its bone
+			glm::quat wristOrientation = glm::normalize(glm::angleAxis(glm::radians(twist), forearm) * wrist.anim.quat);
+			wrist.init.quat = glm::normalize(glm::inverse(elbowBone.anim.quat) * wristOrientation);
+			for(const TwistBone & slice : arm.twists) {
+				Bone & bone = skeleton.bones[slice.bone];
+				bool lower = (bone.father == arm.wrist);
+				Vec3f axis = glm::inverse(lower ? wristOrientation : elbowBone.anim.quat) * forearm;
+				float part = lower ? slice.twist - 1.f : slice.twist;
+				bone.init.quat = glm::angleAxis(glm::radians(part * twist), axis);
+			}
+			updateBoneDescendants(skeleton, arm.elbow);
 		}
+
 	}
 	
 	skeleton.bones[arm.hand].anim.quat = handOrientation;
@@ -786,6 +1172,13 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 	}
 
 	const BodyBones & bones = getBodyBones(*entity.obj);
+	// Once for each player mesh (it is created again when the equipment changes), see splitFingers
+	if(entity.obj->m_skeleton.get() == &skeleton && skeleton.bones.size() == entity.obj->grouplist.size()) {
+		for(ArmBones & arm : g_bones.arms) {
+			splitFingers(*entity.obj, arm);
+			splitForearm(*entity.obj, arm);
+		}
+	}
 	const VRInput & input = g_vr->getInput();
 	g_boneLengths.assign(skeleton.bones.size(), Vec3f(1.f)); // The animation set the scales again
 	for(WristPose & pose : g_wristPoses) {

@@ -51,16 +51,17 @@ void resetVRTracking();
 //! player model is animated (its hands use it, the camera of the frame is prepared later)
 void syncVRTrackingToPlayer();
 
-//! \return the physical head movement since the last call, converted to world movement of the player
+//! Estimate physical body movement from the current head and hands, once per tracked frame.
+//! Apply the returned world displacement through collision before posing the body or preparing the camera.
 Vec3f takeVRRoomScaleMovement();
 
 //! \return true while the user physically crouches (head well below the height at the last recenter)
 bool isVRPhysicallyCrouching();
 
-//! \return the world position between the eyes in the last prepared player frame
+//! \return the current world position between the eyes, using the synchronized player transform
 bool getVREyeCenter(Vec3f & position);
 
-//! The eye center and the head orientation (Arx basis: x right, y down, z forward, to world) in the last frame
+//! Current eye center and head orientation (Arx basis: x right, y down, z forward, to world).
 bool getVRHeadPose(Vec3f & position, glm::mat3x3 & rotation);
 
 //! \return the scale of the player model, so that its eyes are at the user's real eye height
