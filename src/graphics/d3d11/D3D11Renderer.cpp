@@ -373,6 +373,7 @@ D3D11Renderer::D3D11Renderer()
 	, m_bloom(false)
 	, m_bloomStrength(0.f)
 	, m_bloomSizes()
+	, m_sceneEffectsExcluded(false)
 	, m_colorGrading(0)
 	, m_sceneSamples(1)
 	, m_sceneLodBias(0.f)
@@ -920,9 +921,11 @@ bool D3D11Renderer::compileShaders() {
 			{ "psAmbientOcclusionBlur", nullptr, std::addressof(m_aoBlurPixelShader) },
 			{ "psAmbientOcclusionBlur", verticalDefines, std::addressof(m_aoBlurVerticalPixelShader) },
 			{ "psApplyAmbientOcclusion", nullptr, std::addressof(m_aoApplyPixelShader) },
+			{ "psApplyAmbientOcclusion", msaaDefines, std::addressof(m_aoApplyPixelShaderMS) },
 			{ "psDebugAmbientOcclusion", nullptr, std::addressof(m_debugAOPixelShader) },
 			{ "psReflection", nullptr, std::addressof(m_reflectionPixelShader) },
 			{ "psBloomPrefilter", nullptr, std::addressof(m_bloomPrefilterPixelShader) },
+			{ "psBloomPrefilter", msaaDefines, std::addressof(m_bloomPrefilterPixelShaderMS) },
 			{ "psBloomDownsample", nullptr, std::addressof(m_bloomDownsamplePixelShader) },
 			{ "psBloomUpsample", nullptr, std::addressof(m_bloomUpsamplePixelShader) },
 			{ "psBloomComposite", nullptr, std::addressof(m_bloomCompositePixelShader) },
@@ -930,6 +933,7 @@ bool D3D11Renderer::compileShaders() {
 			{ "psNormalMap", nullptr, std::addressof(m_normalMapPixelShader) },
 			{ "psShadowCaster", nullptr, std::addressof(m_shadowCasterPixelShader) },
 			{ "psShadow", nullptr, std::addressof(m_shadowPixelShader) },
+			{ "psShadow", msaaDefines, std::addressof(m_shadowPixelShaderMS) },
 		};
 		for(const PixelShaderInfo & info : shaders) {
 			if(m_featureLevel < D3D_FEATURE_LEVEL_10_1) {
@@ -1187,6 +1191,12 @@ bool D3D11Renderer::createSceneTargets(const Vec2i & size, UINT samples) {
 			releaseSceneTargets();
 			return false;
 		}
+		// The stencil marks the pixels without effects
+		resourceDesc.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+		if(FAILED(m_device->CreateShaderResourceView(m_sceneDepthTarget.Get(), &resourceDesc,
+		                                             &m_sceneStencilResource))) {
+			m_sceneStencilResource.Reset();
+		}
 	}
 	
 	desc.SampleDesc.Count = 1;
@@ -1353,6 +1363,7 @@ void D3D11Renderer::releaseSceneTargets() {
 	
 	unbindTextureView(m_sceneResolvedView.Get());
 	unbindTextureView(m_sceneDepthResource.Get());
+	unbindTextureView(m_sceneStencilResource.Get());
 	unbindTextureView(m_motionResource.Get());
 	unbindTextureView(m_linearDepthResource.Get());
 	unbindTextureView(m_objectMotionResource.Get());
@@ -1391,6 +1402,7 @@ void D3D11Renderer::releaseSceneTargets() {
 	m_sceneColorView.Reset();
 	m_sceneColorTarget.Reset();
 	m_sceneDepthResource.Reset();
+	m_sceneStencilResource.Reset();
 	m_sceneDepthView.Reset();
 	m_sceneDepthTarget.Reset();
 	m_motionResource.Reset();
@@ -1587,6 +1599,20 @@ void D3D11Renderer::setBloom(float strength) {
 	
 }
 
+ID3D11PixelShader * D3D11Renderer::sceneMaskShader(ID3D11PixelShader * shader, ID3D11PixelShader * multisampled,
+                                                   ID3D11ShaderResourceView * & mask) const {
+
+	mask = m_sceneStencilResource.Get();
+	ID3D11PixelShader * result = (m_sceneSamples > 1) ? multisampled : shader;
+	if(!mask || !result) {
+		// The shader reads no stencil: no pixel is left out
+		mask = nullptr;
+		result = shader;
+	}
+
+	return result;
+}
+
 void D3D11Renderer::renderBloom(bool apply) {
 	
 	if(!m_bloomViews[0] || !m_sceneResolvedTargetView || !m_bloomPrefilterPixelShader || !m_bloomDownsamplePixelShader
@@ -1613,11 +1639,13 @@ void D3D11Renderer::renderBloom(bool apply) {
 	}
 	
 	auto pass = [&](ID3D11RenderTargetView * target, const Vec2i & targetSize, ID3D11ShaderResourceView * source,
-	                const Vec2i & sourceSize, ID3D11PixelShader * shader, bool additive) {
-		
+	                const Vec2i & sourceSize, ID3D11PixelShader * shader, bool additive,
+	                ID3D11ShaderResourceView * mask = nullptr) {
+
 		m_context->PSSetShaderResources(0, 1, &none);
 		m_context->OMSetRenderTargets(1, &target, nullptr);
 		m_context->PSSetShaderResources(0, 1, &source);
+		m_context->PSSetShaderResources(4, 1, &mask);
 		BlendingFactor dst = additive ? BlendOne : BlendZero;
 		m_context->OMSetBlendState(getBlendState(BlendOne, dst, false, true), nullptr, 0xffffffff);
 		
@@ -1630,6 +1658,8 @@ void D3D11Renderer::renderBloom(bool apply) {
 			constants.params[2] = 6.f * m_bloomStrength / float(BloomLevels);
 			constants.source[0] = 1.f / float(sourceSize.x);
 			constants.source[1] = 1.f / float(sourceSize.y);
+			constants.source[2] = float(sourceSize.x);
+			constants.source[3] = float(sourceSize.y);
 			constants.clamp[0] = region.x + 0.5f * constants.source[0];
 			constants.clamp[1] = region.y + 0.5f * constants.source[1];
 			constants.clamp[2] = region.x + region.z - 0.5f * constants.source[0];
@@ -1646,8 +1676,12 @@ void D3D11Renderer::renderBloom(bool apply) {
 		}
 	};
 	
-	pass(m_bloomViews[0].Get(), m_bloomSizes[0], m_sceneResolvedView.Get(), m_sceneSize,
-	     m_bloomPrefilterPixelShader.Get(), false);
+	// Without the pixels marked in the stencil (see setSceneEffectsExcluded)
+	ID3D11ShaderResourceView * mask = nullptr;
+	ID3D11PixelShader * prefilter = sceneMaskShader(m_bloomPrefilterPixelShader.Get(),
+	                                                m_bloomPrefilterPixelShaderMS.Get(), mask);
+	pass(m_bloomViews[0].Get(), m_bloomSizes[0], m_sceneResolvedView.Get(), m_sceneSize, prefilter, false, mask);
+	m_context->PSSetShaderResources(4, 1, &none);
 	for(size_t i = 1; i < BloomLevels; i++) {
 		pass(m_bloomViews[i].Get(), m_bloomSizes[i], m_bloomResources[i - 1].Get(), m_bloomSizes[i - 1],
 		     m_bloomDownsamplePixelShader.Get(), false);
@@ -1747,7 +1781,12 @@ void D3D11Renderer::renderAmbientOcclusion(bool apply) {
 			};
 			m_context->RSSetViewports(1, &viewport);
 			m_context->OMSetBlendState(getBlendState(BlendZero, BlendSrcColor, false, true), nullptr, 0xffffffff);
-			pass(m_sceneResolvedTargetView.Get(), m_aoResource.Get(), m_aoApplyPixelShader.Get());
+			// Not the pixels marked in the stencil (see setSceneEffectsExcluded)
+			ID3D11ShaderResourceView * mask = nullptr;
+			ID3D11PixelShader * shader = sceneMaskShader(m_aoApplyPixelShader.Get(), m_aoApplyPixelShaderMS.Get(), mask);
+			m_context->PSSetShaderResources(4, 1, &mask);
+			pass(m_sceneResolvedTargetView.Get(), m_aoResource.Get(), shader);
+			m_context->PSSetShaderResources(4, 1, none);
 		}
 		
 	}
@@ -2255,6 +2294,10 @@ void D3D11Renderer::renderShadows(bool apply) {
 	m_context->PSSetShaderResources(5, UINT(std::size(maps)), maps);
 	ID3D11SamplerState * sampler = m_shadowSampler.Get();
 	m_context->PSSetSamplers(3, 1, &sampler);
+	// Not the pixels marked in the stencil (see setSceneEffectsExcluded)
+	ID3D11ShaderResourceView * mask = nullptr;
+	ID3D11PixelShader * shader = sceneMaskShader(m_shadowPixelShader.Get(), m_shadowPixelShaderMS.Get(), mask);
+	m_context->PSSetShaderResources(4, 1, &mask);
 
 	// Each eye of the stereo scene on its own, with its camera, the cube maps are shared
 	size_t lightCount = std::min(m_shadowLights.size(), m_shadowMapLights);
@@ -2323,12 +2366,13 @@ void D3D11Renderer::renderShadows(bool apply) {
 		};
 		m_context->RSSetViewports(1, &viewport);
 
-		drawFullscreen(m_shadowPixelShader.Get());
+		drawFullscreen(shader);
 
 	}
 
 	ID3D11ShaderResourceView * none[std::size(inputs)] = { };
 	m_context->PSSetShaderResources(0, UINT(std::size(none)), none);
+	m_context->PSSetShaderResources(4, 1, none);
 	m_context->PSSetShaderResources(5, UINT(std::size(maps)), none);
 	m_context->OMSetRenderTargets(0, nullptr, nullptr);
 	m_currentViews[0] = nullptr;
@@ -2580,12 +2624,18 @@ void D3D11Renderer::beginScene() {
 	// The scene textures are about to become render targets
 	unbindTextureView(m_sceneResolvedView.Get());
 	unbindTextureView(m_sceneDepthResource.Get());
+	unbindTextureView(m_sceneStencilResource.Get());
 	unbindTextureView(m_motionResource.Get());
 	unbindTextureView(m_linearDepthResource.Get());
 	unbindTextureView(m_objectMotionResource.Get());
 	unbindTextureView(m_surfaceResource.Get());
 	unbindTextureView(m_reflectionColorResource.Get());
 	unbindTextureView(m_shadingResource.Get());
+
+	// No pixels without effects yet (see setSceneEffectsExcluded)
+	if(m_sceneDepthView) {
+		m_context->ClearDepthStencilView(m_sceneDepthView.Get(), D3D11_CLEAR_STENCIL, 1.f, 0);
+	}
 
 	const float none[4] = { 0.f, 0.f, 0.f, 0.f };
 	if(m_objectMotionView) {
@@ -4038,9 +4088,9 @@ ID3D11BlendState * D3D11Renderer::getBlendState(BlendingFactor src, BlendingFact
 	return result;
 }
 
-ID3D11DepthStencilState * D3D11Renderer::getDepthState(bool test, bool write) {
-	
-	u32 key = u32(test) | (u32(write) << 1);
+ID3D11DepthStencilState * D3D11Renderer::getDepthState(bool test, bool write, bool stencil) {
+
+	u32 key = u32(test) | (u32(write) << 1) | (u32(stencil) << 2);
 	
 	auto it = m_depthStates.find(key);
 	if(it != m_depthStates.end()) {
@@ -4052,8 +4102,16 @@ ID3D11DepthStencilState * D3D11Renderer::getDepthState(bool test, bool write) {
 	desc.DepthEnable = TRUE;
 	desc.DepthWriteMask = write ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
 	desc.DepthFunc = test ? D3D11_COMPARISON_LESS_EQUAL : D3D11_COMPARISON_ALWAYS;
-	desc.StencilEnable = FALSE;
-	
+	desc.StencilEnable = stencil ? TRUE : FALSE;
+	if(stencil) {
+		// The drawn pixels get the reference value (1)
+		desc.StencilReadMask = desc.StencilWriteMask = 0xff;
+		desc.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+		desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+		desc.FrontFace.StencilFailOp = desc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+		desc.BackFace = desc.FrontFace;
+	}
+
 	ComPtr<ID3D11DepthStencilState> state;
 	if(FAILED(m_device->CreateDepthStencilState(&desc, &state))) {
 		LogError << "Failed to create Direct3D 11 depth stencil state";
@@ -4189,9 +4247,10 @@ void D3D11Renderer::flushState(VertexType type) {
 		m_currentRasterizer = rasterizer;
 	}
 	
-	ID3D11DepthStencilState * depth = getDepthState(m_state.getDepthTest(), m_state.getDepthWrite());
+	ID3D11DepthStencilState * depth = getDepthState(m_state.getDepthTest(), m_state.getDepthWrite(),
+	                                                m_sceneEffectsExcluded && m_inScene);
 	if(force || depth != m_currentDepth) {
-		m_context->OMSetDepthStencilState(depth, 0);
+		m_context->OMSetDepthStencilState(depth, 1);
 		m_currentDepth = depth;
 	}
 	

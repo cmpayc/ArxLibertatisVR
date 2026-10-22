@@ -1452,7 +1452,9 @@ void drawBookCover() {
 	if(g_vr->isNoteInHand()) {
 		Vec2f panelSize;
 		if(Texture * sheet = g_vr->getBookTexture(panelSize)) {
+			GRenderer->setSceneEffectsExcluded(true);
 			drawWorldPanel(sheet, position, orientation, panelSize);
+			GRenderer->setSceneEffectsExcluded(false);
 		}
 		return;
 	}
@@ -1472,6 +1474,21 @@ void drawBookCover() {
 		}
 	}
 	
+	// The book casts dynamic shadows, like the hand holding it (user): the block, all six faces
+	{
+		const int sides[6][4] = {
+			{ 0, 1, 4, 5 }, { 2, 3, 6, 7 }, { 0, 2, 4, 6 }, { 1, 3, 5, 7 }, { 0, 1, 2, 3 }, { 4, 5, 6, 7 },
+		};
+		Vec3f triangles[6 * 6];
+		size_t count = 0;
+		for(const int (&face)[4] : sides) {
+			for(int corner : { face[0], face[1], face[2], face[2], face[1], face[3] }) {
+				triangles[count++] = corners[corner];
+			}
+		}
+		GRenderer->addShadowCasters(triangles, count);
+	}
+
 	static TextureContainer * leather = TextureContainer::Load("graph/obj3d/textures/item_book2");
 	// The sides and the face under the pages as two triangles each, from the corners: bit 0 right, bit 1 top, bit 2
 	// the back (drawn below)
@@ -1511,10 +1528,16 @@ void drawBookCover() {
 	drawQuad(rightHalf, turnedRight);
 	GRenderer->ResetTexture(0);
 	
-	// The pages: the book of the interface, as it was drawn in the last frame (see VRSystem::updateBookPanel)
+	/*
+	 * The pages: the book of the interface, as it was drawn in the last frame (see VRSystem::updateBookPanel). They are
+	 * bright and close to the eyes: with bloom the whole book glowed, and the ambient occlusion and the shadows (taken
+	 * from the surface behind it) darkened it under the hand (user)
+	 */
 	Vec2f panelSize;
 	if(Texture * pages = g_vr->getBookTexture(panelSize)) {
+		GRenderer->setSceneEffectsExcluded(true);
 		drawWorldPanel(pages, position, orientation, panelSize);
+		GRenderer->setSceneEffectsExcluded(false);
 	}
 }
 

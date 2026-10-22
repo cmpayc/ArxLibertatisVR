@@ -202,6 +202,15 @@ void updateBoneDescendants(Skeleton & skeleton, VertexGroupId root) {
 	}
 }
 
+//! The pivot of a bone in the rest pose of the model (its bones have no rest rotation)
+Vec3f getRestPivot(const Skeleton & skeleton, VertexGroupId bone) {
+	Vec3f pivot(0.f);
+	for(; bone; bone = skeleton.bones[bone].father) {
+		pivot += skeleton.bones[bone].transinit_global;
+	}
+	return pivot;
+}
+
 /*!
  * The middle, ring and little fingers of the model share one root and one tip bone, and the tip bone holds the last two
  * phalanges of each finger: they could only bend at the knuckles and at one joint, all three around the same point.
@@ -248,7 +257,7 @@ void splitFingers(EERIE_3DOBJ & object, ArmBones & arm) {
 		parts[find(entry.first)].push_back(entry.first);
 	}
 
-	const Vec3f tipPivot = object.vertexlist[object.grouplist[arm.fingersTip].origin].v;
+	const Vec3f tipPivot = getRestPivot(skeleton, arm.fingersTip); // Not the group origin, see mirrorFingerRig
 	std::vector<size_t> moved;
 
 	for(auto & entry : parts) {
@@ -409,6 +418,132 @@ void splitForearm(EERIE_3DOBJ & object, ArmBones & arm) {
 	}
 
 	updateBoneDescendants(skeleton, arm.elbow);
+}
+
+/*!
+ * The armor meshes put the vertices of a finger into other bones on one side than on the other: the right index tip of
+ * human_plate and human_ylside holds the whole finger (its pivot 3 cm off it), the left index and fingers root of
+ * human_leather_black hold nothing. Those fingers bent junky on one hand, only with armor (user). The meshes are
+ * symmetric across x: such a finger gets the rig of the other hand mirrored, the pivots and which bone each vertex of the
+ * hand, the finger root and tip follows.
+ */
+void mirrorFingerRig(EERIE_3DOBJ & object, VertexGroupId rightHand, VertexGroupId rightRoot, VertexGroupId rightTip,
+                     VertexGroupId leftHand, VertexGroupId leftRoot, VertexGroupId leftTip) {
+
+	if(!object.m_skeleton || !rightHand || !rightRoot || !rightTip || !leftHand || !leftRoot || !leftTip) {
+		return;
+	}
+	Skeleton & skeleton = *object.m_skeleton;
+	auto mirror = [](Vec3f v) { v.x = -v.x; return v; };
+
+	// The root bone of a finger holds its first phalanx: its vertices more than 1 cm along the finger from its pivot
+	auto phalanx = [&](VertexGroupId hand, VertexGroupId root) {
+		Vec3f pivot = getRestPivot(skeleton, root);
+		Vec3f direction = pivot - getRestPivot(skeleton, hand);
+		if(glm::length(direction) < 0.001f) {
+			return size_t(0);
+		}
+		direction = glm::normalize(direction);
+		return size_t(std::count_if(object.m_boneVertices[root].begin(), object.m_boneVertices[root].end(),
+		                            [&](VertexId vertex) {
+			return glm::dot(object.vertexlist[vertex].v - pivot, direction) > 1.f;
+		}));
+	};
+	size_t rightPhalanx = phalanx(rightHand, rightRoot);
+	size_t leftPhalanx = phalanx(leftHand, leftRoot);
+	if(std::max(rightPhalanx, leftPhalanx) < 2 || 2 * std::min(rightPhalanx, leftPhalanx) >= std::max(rightPhalanx, leftPhalanx)) {
+		return; // Both or neither
+	}
+	const bool toLeft = (rightPhalanx > leftPhalanx);
+	const VertexGroupId from[3] = { toLeft ? rightHand : leftHand, toLeft ? rightRoot : leftRoot, toLeft ? rightTip : leftTip };
+	const VertexGroupId to[3] = { toLeft ? leftHand : rightHand, toLeft ? leftRoot : rightRoot, toLeft ? leftTip : rightTip };
+
+	// Each vertex follows the bone of its mirror image, if there is one
+	std::vector<VertexId> vertices[3];
+	size_t total = 0;
+	size_t matched = 0;
+	for(size_t i = 0; i < 3; i++) {
+		for(VertexId vertex : object.m_boneVertices[to[i]]) {
+			const Vec3f image = mirror(object.vertexlist[vertex].v);
+			size_t bone = i;
+			float nearest = 0.3f; // cm
+			for(size_t j = 0; j < 3; j++) {
+				for(VertexId other : object.m_boneVertices[from[j]]) {
+					float distance = glm::distance(object.vertexlist[other].v, image);
+					if(distance < nearest) {
+						nearest = distance;
+						bone = j;
+					}
+				}
+			}
+			matched += (nearest < 0.3f) ? 1 : 0;
+			total++;
+			vertices[bone].push_back(vertex);
+		}
+	}
+	if(matched * 3 < total * 2) {
+		return; // Not symmetric (the armor meshes: 76% to 85% of the vertices)
+	}
+
+	// The pivots of the finger mirrored, the bones attached to them (the fingers tip of human_chainmail) stay in place
+	std::vector<Vec3f> pivots;
+	for(VertexGroupId bone : skeleton.bones.handles()) {
+		pivots.push_back(getRestPivot(skeleton, bone));
+	}
+	pivots[size_t(to[1])] = mirror(pivots[size_t(from[1])]);
+	pivots[size_t(to[2])] = mirror(pivots[size_t(from[2])]);
+	for(VertexGroupId group : skeleton.bones.handles()) {
+		Bone & bone = skeleton.bones[group];
+		if(bone.father) {
+			Vec3f offset = pivots[size_t(group)] - pivots[size_t(bone.father)];
+			bone.init.trans += offset - bone.transinit_global; // The animation of this frame added to it
+			bone.transinit_global = offset;
+		}
+	}
+	for(size_t i = 0; i < 3; i++) {
+		for(VertexId vertex : vertices[i]) {
+			object.vertexlocal[vertex] = object.vertexlist[vertex].v - pivots[size_t(to[i])];
+		}
+		object.m_boneVertices[to[i]] = std::move(vertices[i]);
+	}
+
+	updateBoneDescendants(skeleton, to[0]);
+}
+
+/*!
+ * The right attach point of human_leather_black is 2.5 cm above the palm, at the back of the hand: weapons and arrows
+ * were held there (user). It is not part of the mesh: when the attach points of the two hands differ, both get the one
+ * nearer to the palm (in the rest pose, it faces +y), mirrored.
+ */
+void mirrorHoldVertex(EERIE_3DOBJ & object, VertexGroupId rightHand, VertexGroupId leftHand) {
+
+	const VertexId right = object.fastaccess.primary_attach;
+	const VertexId left = object.fastaccess.left_attach;
+	if(!object.m_skeleton || !rightHand || !leftHand || !right || !left) {
+		return;
+	}
+	auto & rightVertices = object.m_boneVertices[rightHand];
+	auto & leftVertices = object.m_boneVertices[leftHand];
+	if(std::find(rightVertices.begin(), rightVertices.end(), right) == rightVertices.end()
+	   || std::find(leftVertices.begin(), leftVertices.end(), left) == leftVertices.end()) {
+		return;
+	}
+	const Vec3f rightPivot = getRestPivot(*object.m_skeleton, rightHand);
+	const Vec3f leftPivot = getRestPivot(*object.m_skeleton, leftHand);
+	Vec3f rightOffset = object.vertexlist[right].v - rightPivot;
+	Vec3f leftOffset = object.vertexlist[left].v - leftPivot;
+	rightOffset.x = -rightOffset.x;
+	if(glm::distance(rightOffset, leftOffset) < 1.f) {
+		return;
+	}
+	const bool toLeft = std::abs(rightOffset.y) < std::abs(leftOffset.y);
+	Vec3f offset = toLeft ? rightOffset : leftOffset;
+	const VertexId vertex = toLeft ? left : right;
+	if(!toLeft) {
+		offset.x = -offset.x;
+	}
+	object.vertexlist[vertex].v = (toLeft ? leftPivot : rightPivot) + offset;
+	object.vertexlocal[vertex] = offset;
 }
 
 //! Shortest rotation from one unit vector to another
@@ -1174,6 +1309,12 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 	const BodyBones & bones = getBodyBones(*entity.obj);
 	// Once for each player mesh (it is created again when the equipment changes), see splitFingers
 	if(entity.obj->m_skeleton.get() == &skeleton && skeleton.bones.size() == entity.obj->grouplist.size()) {
+		const ArmBones & right = g_bones.arms[VRHandRight];
+		const ArmBones & left = g_bones.arms[VRHandLeft];
+		mirrorFingerRig(*entity.obj, right.hand, right.indexRoot, right.indexTip, left.hand, left.indexRoot, left.indexTip);
+		mirrorFingerRig(*entity.obj, right.hand, right.fingersRoot, right.fingersTip,
+		                left.hand, left.fingersRoot, left.fingersTip);
+		mirrorHoldVertex(*entity.obj, right.hand, left.hand);
 		for(ArmBones & arm : g_bones.arms) {
 			splitFingers(*entity.obj, arm);
 			splitForearm(*entity.obj, arm);

@@ -567,6 +567,26 @@ Texture2DMS<float> sceneDepth : register(t1);
 #else
 Texture2D<float> sceneDepth : register(t1);
 #endif
+
+)HLSL"
+R"HLSL(
+/*
+ * The stencil of the scene: 1 where it gets no bloom, ambient occlusion or dynamic shadows (the book held in VR, see
+ * setSceneEffectsExcluded), none bound reads 0
+ */
+#ifdef MSAA_DEPTH
+Texture2DMS<uint2> sceneMask : register(t4);
+#else
+Texture2D<uint2> sceneMask : register(t4);
+#endif
+
+uint sceneMasked(int2 pixel) {
+	#ifdef MSAA_DEPTH
+	return sceneMask.Load(pixel, 0).g;
+	#else
+	return sceneMask.Load(int3(pixel, 0)).g;
+	#endif
+}
 Texture2D<float4> objectMotion : register(t2);
 
 struct MotionOutput {
@@ -750,6 +770,9 @@ float psAmbientOcclusionBlur(float4 position : SV_Position) : SV_Target {
 // blend state
 float4 psApplyAmbientOcclusion(float4 position : SV_Position) : SV_Target {
 	int2 pixel = int2(position.xy);
+	if(sceneMasked(pixel)) {
+		return float4(1, 1, 1, 1); // The hand above the book darkened it (user)
+	}
 	float centerDistance = aoViewDistance(aoDepth.Load(int3(pixel, 0)));
 	float2 halfPosition = (float2(pixel) + 0.5) / AoScale - 0.5;
 	int2 base = int2(floor(halfPosition));
@@ -914,12 +937,20 @@ float4 psReflection(float4 position : SV_Position) : SV_Target {
 
 cbuffer BloomConstants : register(b4) {
 	float4 bloomParams; // x = threshold, y = soft knee, z = intensity
-	float4 bloomSource; // xy = 1 / source size
+	float4 bloomSource; // xy = 1 / source size, zw = source size
 	float4 bloomClamp;  // The source texture coordinates of the view (one eye in VR): xy = minimum, zw = maximum
 };
 
 float3 bloomSample(float2 uv) {
 	return texture0.Sample(sampler0, clamp(uv, bloomClamp.xy, bloomClamp.zw)).rgb;
+}
+
+// A sample of the scene, none if any of the four pixels it filters gives off no bloom
+float3 bloomSampleScene(float2 uv) {
+	int2 pixel = int2(floor(clamp(uv, bloomClamp.xy, bloomClamp.zw) * bloomSource.zw - 0.5));
+	uint masked = sceneMasked(pixel) | sceneMasked(pixel + int2(1, 0)) | sceneMasked(pixel + int2(0, 1))
+	              | sceneMasked(pixel + int2(1, 1));
+	return masked ? float3(0, 0, 0) : bloomSample(uv);
 }
 
 float3 bloomThreshold(float3 color) {
@@ -939,10 +970,10 @@ float bloomKarisWeight(float3 color) {
 // First downsample from the scene with the threshold
 float4 psBloomPrefilter(BlitOutput input) : SV_Target {
 	float2 t = bloomSource.xy;
-	float3 a = bloomThreshold(bloomSample(input.uv + t * float2(-1, -1)));
-	float3 b = bloomThreshold(bloomSample(input.uv + t * float2(1, -1)));
-	float3 c = bloomThreshold(bloomSample(input.uv + t * float2(-1, 1)));
-	float3 d = bloomThreshold(bloomSample(input.uv + t * float2(1, 1)));
+	float3 a = bloomThreshold(bloomSampleScene(input.uv + t * float2(-1, -1)));
+	float3 b = bloomThreshold(bloomSampleScene(input.uv + t * float2(1, -1)));
+	float3 c = bloomThreshold(bloomSampleScene(input.uv + t * float2(-1, 1)));
+	float3 d = bloomThreshold(bloomSampleScene(input.uv + t * float2(1, 1)));
 	float wa = bloomKarisWeight(a), wb = bloomKarisWeight(b), wc = bloomKarisWeight(c), wd = bloomKarisWeight(d);
 	return float4((a * wa + b * wb + c * wc + d * wd) / (wa + wb + wc + wd), 1);
 }
@@ -1155,7 +1186,8 @@ float4 psShadow(float4 position : SV_Position) : SV_Target {
 	int2 pixel = int2(position.xy);
 	float depth = shadowDepth.Load(int3(pixel, 0));
 	float4 shading = shadowShading.Load(int3(pixel, 0));
-	if(depth >= 0.99999 || shading.y < 0.5) {
+	// The book held in VR: the shading under it is the one of the surface behind it
+	if(depth >= 0.99999 || shading.y < 0.5 || sceneMasked(pixel)) {
 		return float4(1, 1, 1, 1);
 	}
 

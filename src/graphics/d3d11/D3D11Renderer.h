@@ -146,6 +146,7 @@ public:
 	bool supportsReflections() const override { return true; }
 	void setReflections(float strength) override;
 	void setWaterSurface(bool water) override { m_waterSurface = water; m_stateValid = false; }
+	void setSceneEffectsExcluded(bool excluded) override { m_sceneEffectsExcluded = excluded; m_stateValid = false; }
 	bool supportsModelTessellation() const override;
 	void setModelTessellation(bool enabled) override { m_modelTessellation = enabled; }
 	bool supportsShadows() const override { return true; }
@@ -342,6 +343,13 @@ private:
 	 * \param apply add the result to the resolved scene, false for the debug view
 	 */
 	void renderBloom(bool apply);
+
+	/*!
+	 * The variant of a full screen shader for the scene that leaves out the pixels marked in the stencil (see
+	 * setSceneEffectsExcluded), and the stencil to bind for it at t4, or the shader and no stencil
+	 */
+	ID3D11PixelShader * sceneMaskShader(ID3D11PixelShader * shader, ID3D11PixelShader * multisampled,
+	                                    ID3D11ShaderResourceView * & mask) const;
 	
 	//! Create the requested upscaler if that was not tried yet
 	void updateUpscaler();
@@ -380,7 +388,8 @@ private:
 	ID3D11RasterizerState * getRasterizerState(bool cull, unsigned depthOffset, bool wireframe, bool scissor);
 	ID3D11BlendState * getBlendState(BlendingFactor src, BlendingFactor dst, bool alphaToCoverage,
 	                                 bool colorWrite, bool premultipliedAlpha = false);
-	ID3D11DepthStencilState * getDepthState(bool test, bool write);
+	//! \param stencil Set the stencil of the scene to 1: no effects there, see setSceneEffectsExcluded()
+	ID3D11DepthStencilState * getDepthState(bool test, bool write, bool stencil = false);
 	
 	HWND m_window;
 	
@@ -502,6 +511,8 @@ private:
 	ComPtr<ID3D11Texture2D> m_bloomTargets[BloomLevels];
 	ComPtr<ID3D11RenderTargetView> m_bloomViews[BloomLevels];
 	ComPtr<ID3D11ShaderResourceView> m_bloomResources[BloomLevels];
+	bool m_sceneEffectsExcluded;
+	ComPtr<ID3D11ShaderResourceView> m_sceneStencilResource; //!< The pixels without effects, see setSceneEffectsExcluded()
 	
 	size_t m_colorGrading; //!< Index of the color grading preset, 0 = off
 	ComPtr<ID3D11ShaderResourceView> m_sceneDepthResource;
@@ -576,11 +587,13 @@ private:
 	ComPtr<ID3D11PixelShader> m_aoBlurPixelShader;
 	ComPtr<ID3D11PixelShader> m_aoBlurVerticalPixelShader;
 	ComPtr<ID3D11PixelShader> m_aoApplyPixelShader;
+	ComPtr<ID3D11PixelShader> m_aoApplyPixelShaderMS;
 	ComPtr<ID3D11PixelShader> m_debugAOPixelShader;
 	ComPtr<ID3D11Buffer> m_reflectionConstants;
 	ComPtr<ID3D11PixelShader> m_reflectionPixelShader;
 	ComPtr<ID3D11Buffer> m_bloomConstants;
 	ComPtr<ID3D11PixelShader> m_bloomPrefilterPixelShader;
+	ComPtr<ID3D11PixelShader> m_bloomPrefilterPixelShaderMS;
 	ComPtr<ID3D11PixelShader> m_bloomDownsamplePixelShader;
 	ComPtr<ID3D11PixelShader> m_bloomUpsamplePixelShader;
 	ComPtr<ID3D11PixelShader> m_bloomCompositePixelShader;
@@ -592,6 +605,7 @@ private:
 	ComPtr<ID3D11InputLayout> m_shadowInputLayout;
 	ComPtr<ID3D11PixelShader> m_shadowCasterPixelShader;
 	ComPtr<ID3D11PixelShader> m_shadowPixelShader;
+	ComPtr<ID3D11PixelShader> m_shadowPixelShaderMS;
 	ComPtr<ID3D11Buffer> m_vsConstants;
 	ComPtr<ID3D11Buffer> m_psConstants;
 	ComPtr<ID3D11Buffer> m_clearConstants;

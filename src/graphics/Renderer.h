@@ -494,6 +494,12 @@ public:
 	
 	//! Mark the following draws as horizontal water surfaces for highlights and reflections, until reset
 	virtual void setWaterSurface(bool water) { ARX_UNUSED(water); }
+
+	/*!
+	 * Mark the following draws of the scene as getting no bloom, ambient occlusion or dynamic shadows, until reset:
+	 * a book held up close, its bright pages glowed and the hand above them darkened them
+	 */
+	virtual void setSceneEffectsExcluded(bool excluded) { ARX_UNUSED(excluded); }
 	
 	/*!
 	 * \return true if the renderer currently turns model triangles into curved patches itself, using
