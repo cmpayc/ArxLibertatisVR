@@ -546,13 +546,41 @@ bool VRSystem::initInstance() {
 		m_imageRectFromTop = std::string_view(instanceProperties.runtimeName).substr(0, 6) == "Oculus";
 	}
 
-	XrSystemGetInfo systemInfo = { XR_TYPE_SYSTEM_GET_INFO };
-	systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-	if(!check(xrGetSystem(m_instance, &systemInfo, &m_systemId), "xrGetSystem")) {
+	/*
+	 * The headset may not be connected yet (the Meta runtime before Quest Link or Air Link is started): wait for it
+	 * like after it was disconnected, see recoverSession(). The game started without VR, and the headset showed only a
+	 * black screen once it was connected (user).
+	 */
+	XrResult result = initSystem();
+	if(result == XR_ERROR_FORM_FACTOR_UNAVAILABLE) {
+		LogWarning << "OpenXR: no headset found - waiting for it, connect it to " << m_runtimeName;
+		m_recoverSession = true;
+		m_recoverAttempts = 0;
+		m_nextRecoverTime = getMilliseconds() + 1000;
+		return true;
+	}
+	if(XR_FAILED(result)) {
 		LogError << "OpenXR: no headset found - is it connected and is " << m_runtimeName << " running?";
 		shutdown();
 		return false;
 	}
+
+	return true;
+}
+
+XrResult VRSystem::initSystem() {
+
+	XrSystemGetInfo systemInfo = { XR_TYPE_SYSTEM_GET_INFO };
+	systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+	XrSystemId systemId = XR_NULL_SYSTEM_ID;
+	XrResult result = xrGetSystem(m_instance, &systemInfo, &systemId);
+	if(result == XR_ERROR_INSTANCE_LOST) {
+		m_instanceLost = true;
+	}
+	if(XR_FAILED(result)) {
+		return result; // Logged by the caller: it is repeated while waiting for the headset
+	}
+	m_systemId = systemId;
 
 	XrSystemProperties systemProperties = { XR_TYPE_SYSTEM_PROPERTIES };
 	if(XR_SUCCEEDED(xrGetSystemProperties(m_instance, m_systemId, &systemProperties))) {
@@ -561,8 +589,8 @@ bool VRSystem::initInstance() {
 
 	// Direct3D 11: the renderer is created on the adapter of the headset
 	if(!m_graphics->checkRequirements(m_instance, m_systemId)) {
-		shutdown();
-		return false;
+		m_systemId = XR_NULL_SYSTEM_ID;
+		return XR_ERROR_RUNTIME_FAILURE;
 	}
 
 	uint32_t viewCount = 0;
@@ -574,8 +602,8 @@ bool VRSystem::initInstance() {
 	                                               viewCount, &viewCount, configViews.data()),
 	             "xrEnumerateViewConfigurationViews")) {
 		LogError << "OpenXR: stereo view configuration not supported";
-		shutdown();
-		return false;
+		m_systemId = XR_NULL_SYSTEM_ID;
+		return XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
 	}
 	// Sharper eyes above the recommended size (config.vr.resolutionScale), up to the maximum of the runtime
 	const XrViewConfigurationView & configView = configViews[0];
@@ -588,7 +616,7 @@ bool VRSystem::initInstance() {
 	LogInfo << "OpenXR runtime: " << m_runtimeName << ", system: " << m_systemName
 	        << ", eye resolution: " << m_eyeSize.x << 'x' << m_eyeSize.y << ", " << m_graphics->getName();
 
-	return true;
+	return XR_SUCCESS;
 }
 
 void VRSystem::shutdown() {
@@ -609,6 +637,10 @@ bool VRSystem::createSession() {
 
 	arx_assert(m_instance != XR_NULL_HANDLE);
 	arx_assert(m_session == XR_NULL_HANDLE);
+
+	if(m_systemId == XR_NULL_SYSTEM_ID) {
+		return false; // No headset yet, see recoverSession()
+	}
 
 	// The requirements must be queried before each xrCreateSession (SteamVR, after the headset reconnected)
 	if(!m_graphics->checkRequirements(m_instance, m_systemId)) {
@@ -818,20 +850,18 @@ void VRSystem::recoverSession() {
 	}
 	m_nextRecoverTime = getMilliseconds() + 1000;
 
+	bool created = false;
 	if(m_instance == XR_NULL_HANDLE) {
 		m_graphics.reset();
 		if(!initInstance()) {
 			return;
 		}
+		created = true;
 	}
 
-	// The system is not available while the headset is disconnected
-	XrSystemGetInfo systemInfo = { XR_TYPE_SYSTEM_GET_INFO };
-	systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-	XrSystemId systemId = XR_NULL_SYSTEM_ID;
-	XrResult result = xrGetSystem(m_instance, &systemInfo, &systemId);
+	// The system is not available while the headset is disconnected, or before it was connected at all
+	XrResult result = (created && m_systemId != XR_NULL_SYSTEM_ID) ? XR_SUCCESS : initSystem();
 	if(result == XR_ERROR_INSTANCE_LOST) {
-		m_instanceLost = true;
 		handleLoss();
 		return;
 	}
@@ -841,7 +871,6 @@ void VRSystem::recoverSession() {
 		}
 		return;
 	}
-	m_systemId = systemId;
 
 	if(!createSession()) {
 		// The instance may not be usable any more: create it again

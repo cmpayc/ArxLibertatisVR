@@ -2285,7 +2285,8 @@ void ArxGame::onRendererInit(Renderer & renderer) {
 	MenuReInitAll();
 
 	#if ARX_HAVE_OPENXR
-	if(g_vr && !g_vr->hasSession() && !g_vr->createSession()) {
+	// Without a headset yet the session is created once it is connected, see VRSystem::recoverSession()
+	if(g_vr && g_vr->hasSystem() && !g_vr->hasSession() && !g_vr->createSession()) {
 		LogError << "Could not create the VR session, continuing without VR";
 	}
 	#endif

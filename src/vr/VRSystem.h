@@ -68,8 +68,12 @@ public:
 	//! \return true if VR was enabled in the config or on the command line
 	static bool isRequested();
 
+	//! \return false if there is no usable runtime, true also without a headset yet (see recoverSession())
 	bool initInstance();
 	void shutdown();
+
+	//! \return true once the headset was found (the system of the runtime)
+	[[nodiscard]] bool hasSystem() const { return m_systemId != XR_NULL_SYSTEM_ID; }
 
 	//! \return true if the session uses Direct3D 11, else OpenGL (the renderer must match)
 	[[nodiscard]] bool usesDirect3D11() const;
@@ -253,6 +257,8 @@ private:
 
 	//! Destroy a lost session (and instance), and start waiting for the headset, see recoverSession()
 	void handleLoss();
+	//! Find the headset: the system, its graphics requirements and the eye size
+	XrResult initSystem();
 	bool createSwapchains();
 	void destroySwapchains();
 	bool createUITarget(const Vec2i & size);
