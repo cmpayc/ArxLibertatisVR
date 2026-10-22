@@ -822,19 +822,23 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 	// The index points straight on, unlike the line from the wrist to it (9° to the thumb): it curled to the thumb
 	Vec3f indexAxis = fingerAxis;
 	if(arm.indexTip) {
-		Vec3f axis = glm::cross(skeleton.bones[arm.indexTip].transinit_global, palm);
+		Vec3f direction = skeleton.bones[arm.indexTip].transinit_global;
+		Vec3f axis = glm::cross(direction, palm);
 		if(glm::length(axis) > 0.001f) {
 			indexAxis = glm::normalize(axis);
+			// Rolled 10° around the finger: the curled index leaned towards the other fingers, now it leans to the thumb
+			float thumbSide = glm::dot(glm::cross(fingers, thumb), palm) < 0.f ? -1.f : 1.f;
+			indexAxis = glm::angleAxis(glm::radians(-10.f * thumbSide), glm::normalize(direction)) * indexAxis;
 		}
 	}
 
 	/*
-	 * The thumb touching a button bends towards the tip of the curled index, like an OK sign: 56° around this axis,
+	 * The thumb touching a button bends towards the tip of the curled index, like an OK sign: 51° around this axis,
 	 * measured on human_base and the enhanced player mesh. It is built from cross products of the bone directions, so
 	 * it mirrors for the left hand.
 	 */
-	Vec3f thumbOkAxis = 0.71f * glm::cross(fingers, palm) - 0.073f * glm::cross(palm, thumb)
-	                    + 0.21f * glm::cross(thumb, fingers);
+	Vec3f thumbOkAxis = 0.95f * glm::cross(fingers, palm) - 0.098f * glm::cross(palm, thumb)
+	                    + 0.19f * glm::cross(thumb, fingers);
 	if(glm::length(thumbOkAxis) < 0.001f) {
 		return;
 	}
@@ -852,7 +856,7 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 	float thumbAngle = 25.f + 15.f * state.squeeze;
 	Vec3f thumbBend = thumbAxis;
 	if(state.hasThumbTouch) {
-		thumbAngle = state.thumbTouch ? glm::mix(15.f, 56.f, state.trigger) : 0.f;
+		thumbAngle = state.thumbTouch ? glm::mix(15.f, 51.f, state.trigger) : 0.f;
 		thumbBend = thumbOkAxis;
 	}
 
