@@ -1078,6 +1078,7 @@ set(VR_OPENXR_SOURCES
 
 set(GRAPHICS_VULKAN_SOURCES
 	src/graphics/vulkan/VulkanLibraries.cpp
+	src/graphics/vulkan/VulkanPipelines.cpp
 	src/graphics/vulkan/VulkanRenderer.cpp
 	src/graphics/vulkan/VulkanTexture.cpp
 	src/graphics/vulkan/VulkanTextureStage.cpp

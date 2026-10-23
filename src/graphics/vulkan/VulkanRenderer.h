@@ -173,12 +173,47 @@ private:
 		VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
 	};
 
+	//! Host-visible memory for data used by one frame, grows by adding chunks
+	struct RingBuffer {
+		struct Chunk {
+			VkBuffer buffer = VK_NULL_HANDLE;
+			VmaAllocation allocation = VK_NULL_HANDLE;
+			u8 * data = nullptr;
+			VkDeviceSize size = 0;
+		};
+		VkBufferUsageFlags usage = 0;
+		VkDeviceSize chunkSize = 0;
+		std::vector<Chunk> chunks;
+		size_t current = 0;
+		VkDeviceSize pos = 0;
+	};
+
+	struct RingAllocation {
+		VkBuffer buffer = VK_NULL_HANDLE;
+		VkDeviceSize offset = 0;
+		void * data = nullptr;
+	};
+
 	struct Frame {
 		VkCommandPool commandPool = VK_NULL_HANDLE;
 		VkCommandBuffer commands = VK_NULL_HANDLE;
 		VkFence fence = VK_NULL_HANDLE;
 		VkSemaphore imageAcquired = VK_NULL_HANDLE;
 		std::vector<std::function<void()>> releases;
+		RingBuffer vertices;
+		RingBuffer indices;
+		RingBuffer constants;
+		std::vector<VkDescriptorPool> descriptorPools;
+		size_t descriptorPool = 0;
+	};
+
+	//! The resources bound to the descriptor set of a draw
+	struct DescriptorKey {
+		VkBuffer vsConstants = VK_NULL_HANDLE;
+		VkBuffer psConstants = VK_NULL_HANDLE;
+		VkImageView views[4] = {};
+		VkSampler samplers[3] = {};
+		bool operator==(const DescriptorKey & o) const;
 	};
 
 	struct UploadContext {
@@ -195,6 +230,30 @@ private:
 	static constexpr VkDeviceSize MaxPendingUploadSize = VkDeviceSize(64) * 1024 * 1024;
 
 	void clearSamplers();
+
+	// Ring buffers, see VulkanRenderer.cpp
+	bool allocate(RingBuffer & ring, VkDeviceSize size, VkDeviceSize alignment, RingAllocation & allocation);
+	void releaseRing(RingBuffer & ring);
+	void flushRing(RingBuffer & ring);
+	VkDescriptorSet allocateDescriptorSet();
+
+	// Shaders and pipelines, see VulkanPipelines.cpp
+	bool createPipelineResources();
+	void releasePipelineResources();
+	VkPipeline getPipeline(uint64_t key);
+
+	/*!
+	 * Prepare the state of a draw: pipeline, dynamic state, constants and descriptors
+	 *
+	 * \return false if the draw must be skipped
+	 */
+	bool prepareDraw(VertexType type, Primitive primitive);
+	glm::mat4x4 screenTransform() const;
+	//! Copy vertices into the ring buffer of the frame and bind them
+	bool bindVertices(VertexType type, const void * vertices, size_t count);
+	bool bindIndices(const unsigned short * indices, size_t count);
+	//! Forget the state bound in the command buffer of the frame
+	void invalidateBoundState();
 
 	bool createInstance(SDL_Window * window);
 	bool selectPhysicalDevice();
@@ -274,6 +333,34 @@ private:
 
 	typedef boost::intrusive::list<VulkanTexture, boost::intrusive::constant_time_size<false>> TextureList;
 	TextureList m_textures;
+
+	// Shaders and pipelines
+	VkShaderModule m_vertexShaders[VertexTypeCount];
+	VkShaderModule m_pixelShader;
+	VkShaderModule m_pixelShaderSampleShading;
+	VkDescriptorSetLayout m_descriptorSetLayout;
+	VkPipelineLayout m_pipelineLayout;
+	VkPipelineCache m_pipelineCache;
+	std::unordered_map<uint64_t, VkPipeline> m_pipelines;
+	VkBuffer m_lightConstants; //!< No per-pixel lights yet
+	VmaAllocation m_lightConstantsAllocation;
+	std::unique_ptr<VulkanTexture> m_whiteTexture; //!< Bound to the texture slots without a texture
+
+	// State bound in the command buffer of the current frame
+	VkPipeline m_boundPipeline;
+	VkBuffer m_boundVertexBuffer;
+	VkDeviceSize m_boundVertexOffset;
+	VkBuffer m_boundIndexBuffer;
+	VkDeviceSize m_boundIndexOffset;
+	bool m_dynamicStateValid;
+	float m_boundDepthBias;
+	DescriptorKey m_boundDescriptors;
+	VkDescriptorSet m_boundDescriptorSet;
+	uint32_t m_boundConstantOffsets[2];
+	RingAllocation m_vsConstants;
+	RingAllocation m_psConstants;
+	std::vector<u8> m_vsConstantsData;
+	std::vector<u8> m_psConstantsData;
 
 };
 

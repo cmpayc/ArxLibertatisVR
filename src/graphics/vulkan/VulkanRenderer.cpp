@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -85,10 +86,18 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBits
                                              VkDebugUtilsMessageTypeFlagsEXT types,
                                              const VkDebugUtilsMessengerCallbackDataEXT * data, void * user) {
 	ARX_UNUSED(types), ARX_UNUSED(user);
+	const char * id = data->pMessageIdName ? data->pMessageIdName : "";
+	/*
+	 * psMain writes the scene targets (SV_Target1-3) also when they are not bound, these writes are discarded by the
+	 * attachments without an image (see VulkanRenderer::beginRendering)
+	 */
+	if(std::strcmp(id, "Undefined-Value-ShaderOutputNotConsumed-DynamicRendering") == 0) {
+		return VK_FALSE;
+	}
 	if(severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-		LogError << "Vulkan: " << data->pMessage;
+		LogError << "Vulkan: [" << id << "] " << data->pMessage;
 	} else {
-		LogWarning << "Vulkan: " << data->pMessage;
+		LogWarning << "Vulkan: [" << id << "] " << data->pMessage;
 	}
 	return VK_FALSE;
 }
@@ -133,8 +142,34 @@ VulkanRenderer::VulkanRenderer()
 	, m_fogColor(Color4f::black)
 	, m_fogStart(0.f)
 	, m_fogEnd(0.f)
+	, m_vertexShaders()
+	, m_pixelShader(VK_NULL_HANDLE)
+	, m_pixelShaderSampleShading(VK_NULL_HANDLE)
+	, m_descriptorSetLayout(VK_NULL_HANDLE)
+	, m_pipelineLayout(VK_NULL_HANDLE)
+	, m_pipelineCache(VK_NULL_HANDLE)
+	, m_lightConstants(VK_NULL_HANDLE)
+	, m_lightConstantsAllocation(VK_NULL_HANDLE)
+	, m_boundPipeline(VK_NULL_HANDLE)
+	, m_boundVertexBuffer(VK_NULL_HANDLE)
+	, m_boundVertexOffset(0)
+	, m_boundIndexBuffer(VK_NULL_HANDLE)
+	, m_boundIndexOffset(0)
+	, m_dynamicStateValid(false)
+	, m_boundDepthBias(1.f)
+	, m_boundDescriptorSet(VK_NULL_HANDLE)
+	, m_boundConstantOffsets()
 {
 	g_vulkanRenderer = this;
+
+	for(Frame & frame : m_frames) {
+		frame.vertices.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+		frame.vertices.chunkSize = VkDeviceSize(4) * 1024 * 1024;
+		frame.indices.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+		frame.indices.chunkSize = VkDeviceSize(1) * 1024 * 1024;
+		frame.constants.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+		frame.constants.chunkSize = VkDeviceSize(1) * 1024 * 1024;
+	}
 }
 
 VulkanRenderer::~VulkanRenderer() {
@@ -165,6 +200,7 @@ VulkanRenderer::~VulkanRenderer() {
 		releaseSizeDependentResources();
 		releaseSwapchain();
 		clearSamplers();
+		releasePipelineResources();
 
 		for(Frame & frame : m_frames) {
 			for(std::function<void()> & release : frame.releases) {
@@ -174,6 +210,13 @@ VulkanRenderer::~VulkanRenderer() {
 		}
 
 		for(Frame & frame : m_frames) {
+			releaseRing(frame.vertices);
+			releaseRing(frame.indices);
+			releaseRing(frame.constants);
+			for(VkDescriptorPool pool : frame.descriptorPools) {
+				vkDestroyDescriptorPool(m_device, pool, nullptr);
+			}
+			frame.descriptorPools.clear();
 			vkDestroySemaphore(m_device, frame.imageAcquired, nullptr);
 			vkDestroyFence(m_device, frame.fence, nullptr);
 			vkDestroyCommandPool(m_device, frame.commandPool, nullptr);
@@ -233,7 +276,7 @@ bool VulkanRenderer::create(SDL_Window * window, int maxMSAALevel) {
 		return false;
 	}
 
-	if(!createSwapchain()) {
+	if(!createSwapchain() || !createPipelineResources()) {
 		return false;
 	}
 
@@ -835,9 +878,20 @@ void VulkanRenderer::beginFrame() {
 
 	vkResetCommandPool(m_device, frame.commandPool, 0);
 
+	for(RingBuffer * ring : { &frame.vertices, &frame.indices, &frame.constants }) {
+		ring->current = 0;
+		ring->pos = 0;
+	}
+	for(VkDescriptorPool pool : frame.descriptorPools) {
+		vkResetDescriptorPool(m_device, pool, 0);
+	}
+	frame.descriptorPool = 0;
+
 	VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
 	begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	vkBeginCommandBuffer(frame.commands, &begin);
+
+	invalidateBoundState();
 
 	m_frameActive = true;
 
@@ -855,6 +909,10 @@ void VulkanRenderer::endFrame(VkSemaphore wait, VkPipelineStageFlags waitStage, 
 	}
 
 	Frame & frame = m_frames[m_frameIndex];
+
+	flushRing(frame.vertices);
+	flushRing(frame.indices);
+	flushRing(frame.constants);
 
 	vkEndCommandBuffer(frame.commands);
 
@@ -918,7 +976,15 @@ void VulkanRenderer::beginRendering() {
 	transition(m_depthTarget, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 	           VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
 
-	VkRenderingAttachmentInfoKHR color = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+	/*
+	 * psMain also writes the motion, surface and shading targets of the 3D scene (SV_Target1-3), these writes are
+	 * discarded by attachments without an image
+	 */
+	VkRenderingAttachmentInfoKHR colors[4];
+	for(VkRenderingAttachmentInfoKHR & attachment : colors) {
+		attachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+	}
+	VkRenderingAttachmentInfoKHR & color = colors[0];
 	color.imageView = m_colorTarget.view;
 	color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -933,8 +999,8 @@ void VulkanRenderer::beginRendering() {
 	VkRenderingInfoKHR info = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
 	info.renderArea = { { 0, 0 }, { uint32_t(m_size.x), uint32_t(m_size.y) } };
 	info.layerCount = 1;
-	info.colorAttachmentCount = 1;
-	info.pColorAttachments = &color;
+	info.colorAttachmentCount = uint32_t(std::size(colors));
+	info.pColorAttachments = colors;
 	info.pDepthAttachment = &depth;
 	info.pStencilAttachment = &depth;
 
@@ -1108,10 +1174,12 @@ void VulkanRenderer::onTextureDestroyed(VulkanTexture * texture) {
 
 void VulkanRenderer::SetViewport(const Rect & viewport) {
 	m_viewport = viewport;
+	m_dynamicStateValid = false;
 }
 
 void VulkanRenderer::SetScissor(const Rect & rect) {
 	m_scissor = rect;
+	m_dynamicStateValid = false;
 }
 
 void VulkanRenderer::Clear(BufferFlags bufferFlags, Color clearColor, float clearDepth, size_t nrects,
@@ -1367,21 +1435,213 @@ std::unique_ptr<VertexBuffer<SMY_VERTEX3>> VulkanRenderer::createVertexBuffer3(s
 	return std::make_unique<VulkanVertexBuffer<SMY_VERTEX3>>(this, capacity, usage);
 }
 
+bool VulkanRenderer::allocate(RingBuffer & ring, VkDeviceSize size, VkDeviceSize alignment,
+                              RingAllocation & allocation) {
+
+	VkDeviceSize offset = (ring.pos + alignment - 1) / alignment * alignment;
+	if(ring.current >= ring.chunks.size() || offset + size > ring.chunks[ring.current].size) {
+
+		// Continue in the next chunk, add one if needed
+		if(ring.current < ring.chunks.size()) {
+			ring.current++;
+		}
+		while(ring.current < ring.chunks.size() && ring.chunks[ring.current].size < size) {
+			ring.current++;
+		}
+		if(ring.current == ring.chunks.size()) {
+			RingBuffer::Chunk chunk;
+			chunk.size = std::max(ring.chunkSize, size);
+			VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+			info.size = chunk.size;
+			info.usage = ring.usage;
+			info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			VmaAllocationCreateInfo create = {};
+			create.usage = VMA_MEMORY_USAGE_AUTO;
+			create.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+			VmaAllocationInfo allocationInfo = {};
+			if(!checkVk(vmaCreateBuffer(m_allocator, &info, &create, &chunk.buffer, &chunk.allocation,
+			                            &allocationInfo), "vmaCreateBuffer")) {
+				return false;
+			}
+			chunk.data = static_cast<u8 *>(allocationInfo.pMappedData);
+			ring.chunks.push_back(chunk);
+		}
+
+		offset = 0;
+	}
+
+	RingBuffer::Chunk & chunk = ring.chunks[ring.current];
+	allocation.buffer = chunk.buffer;
+	allocation.offset = offset;
+	allocation.data = chunk.data + offset;
+	ring.pos = offset + size;
+
+	return true;
+}
+
+void VulkanRenderer::flushRing(RingBuffer & ring) {
+	// Does nothing for host-coherent memory
+	for(size_t i = 0; i <= ring.current && i < ring.chunks.size(); i++) {
+		vmaFlushAllocation(m_allocator, ring.chunks[i].allocation, 0, VK_WHOLE_SIZE);
+	}
+}
+
+void VulkanRenderer::releaseRing(RingBuffer & ring) {
+	for(const RingBuffer::Chunk & chunk : ring.chunks) {
+		vmaDestroyBuffer(m_allocator, chunk.buffer, chunk.allocation);
+	}
+	ring.chunks.clear();
+	ring.current = 0;
+	ring.pos = 0;
+}
+
+VkDescriptorSet VulkanRenderer::allocateDescriptorSet() {
+
+	Frame & frame = m_frames[m_frameIndex];
+
+	while(true) {
+
+		if(frame.descriptorPool == frame.descriptorPools.size()) {
+			const uint32_t sets = 1024;
+			const VkDescriptorPoolSize sizes[] = {
+				{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2 * sets },
+				{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, sets },
+				{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4 * sets },
+				{ VK_DESCRIPTOR_TYPE_SAMPLER, 3 * sets },
+			};
+			VkDescriptorPoolCreateInfo info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+			info.maxSets = sets;
+			info.poolSizeCount = uint32_t(std::size(sizes));
+			info.pPoolSizes = sizes;
+			VkDescriptorPool pool = VK_NULL_HANDLE;
+			if(!checkVk(vkCreateDescriptorPool(m_device, &info, nullptr, &pool), "vkCreateDescriptorPool")) {
+				return VK_NULL_HANDLE;
+			}
+			frame.descriptorPools.push_back(pool);
+		}
+
+		VkDescriptorSetAllocateInfo info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+		info.descriptorPool = frame.descriptorPools[frame.descriptorPool];
+		info.descriptorSetCount = 1;
+		info.pSetLayouts = &m_descriptorSetLayout;
+		VkDescriptorSet set = VK_NULL_HANDLE;
+		VkResult result = vkAllocateDescriptorSets(m_device, &info, &set);
+		if(result == VK_SUCCESS) {
+			return set;
+		}
+		if(result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL) {
+			checkVk(result, "vkAllocateDescriptorSets");
+			return VK_NULL_HANDLE;
+		}
+
+		// The pool is full, continue with the next one
+		frame.descriptorPool++;
+	}
+
+}
+
+void VulkanRenderer::invalidateBoundState() {
+	m_boundPipeline = VK_NULL_HANDLE;
+	m_boundVertexBuffer = VK_NULL_HANDLE;
+	m_boundIndexBuffer = VK_NULL_HANDLE;
+	m_dynamicStateValid = false;
+	// Never used: the bias is -depthOffset, and NaN comparisons don't work with fast floating-point math
+	m_boundDepthBias = 1.f;
+	m_boundDescriptorSet = VK_NULL_HANDLE;
+	m_vsConstants = RingAllocation();
+	m_psConstants = RingAllocation();
+}
+
+static size_t vertexStride(VulkanRenderer::VertexType type) {
+	switch(type) {
+		case VulkanRenderer::VertexTL: return sizeof(TexturedVertex);
+		case VulkanRenderer::VertexWorld: return sizeof(SMY_VERTEX);
+		case VulkanRenderer::VertexWorld3: return sizeof(SMY_VERTEX3);
+		default: arx_unreachable();
+	}
+}
+
+bool VulkanRenderer::bindVertices(VertexType type, const void * vertices, size_t count) {
+
+	size_t stride = vertexStride(type);
+	RingAllocation allocation;
+	if(!allocate(m_frames[m_frameIndex].vertices, VkDeviceSize(count * stride), 16, allocation)) {
+		return false;
+	}
+	std::memcpy(allocation.data, vertices, count * stride);
+
+	if(allocation.buffer != m_boundVertexBuffer || allocation.offset != m_boundVertexOffset) {
+		vkCmdBindVertexBuffers(m_frames[m_frameIndex].commands, 0, 1, &allocation.buffer, &allocation.offset);
+		m_boundVertexBuffer = allocation.buffer;
+		m_boundVertexOffset = allocation.offset;
+	}
+
+	return true;
+}
+
+bool VulkanRenderer::bindIndices(const unsigned short * indices, size_t count) {
+
+	RingAllocation allocation;
+	if(!allocate(m_frames[m_frameIndex].indices, VkDeviceSize(count * sizeof(unsigned short)), 4, allocation)) {
+		return false;
+	}
+	std::memcpy(allocation.data, indices, count * sizeof(unsigned short));
+
+	if(allocation.buffer != m_boundIndexBuffer || allocation.offset != m_boundIndexOffset) {
+		vkCmdBindIndexBuffer(m_frames[m_frameIndex].commands, allocation.buffer, allocation.offset,
+		                     VK_INDEX_TYPE_UINT16);
+		m_boundIndexBuffer = allocation.buffer;
+		m_boundIndexOffset = allocation.offset;
+	}
+
+	return true;
+}
+
 void VulkanRenderer::drawBuffer(VertexType type, Primitive primitive, const void * vertices, size_t count) {
-	// TODO T1.3/T1.4 draw with the uber shader
-	ARX_UNUSED(type), ARX_UNUSED(primitive), ARX_UNUSED(vertices), ARX_UNUSED(count);
+
+	if(count == 0 || !prepareDraw(type, primitive)) {
+		return;
+	}
+
+	// TODO T1.4 keep static vertex buffers in device-local memory
+	if(!bindVertices(type, vertices, count)) {
+		return;
+	}
+
+	vkCmdDraw(m_frames[m_frameIndex].commands, uint32_t(count), 1, 0, 0);
+
 }
 
 void VulkanRenderer::drawBufferIndexed(VertexType type, Primitive primitive, const void * vertices,
                                        const unsigned short * indices, size_t nindices) {
-	// TODO T1.3/T1.4 draw with the uber shader
-	ARX_UNUSED(type), ARX_UNUSED(primitive), ARX_UNUSED(vertices), ARX_UNUSED(indices), ARX_UNUSED(nindices);
+
+	if(nindices == 0 || !prepareDraw(type, primitive)) {
+		return;
+	}
+
+	// TODO T1.4 keep static vertex buffers in device-local memory instead of copying the used vertices
+	size_t count = size_t(*std::max_element(indices, indices + nindices)) + 1;
+	if(!bindVertices(type, vertices, count) || !bindIndices(indices, nindices)) {
+		return;
+	}
+
+	vkCmdDrawIndexed(m_frames[m_frameIndex].commands, uint32_t(nindices), 1, 0, 0, 0);
+
 }
 
 void VulkanRenderer::drawIndexed(Primitive primitive, const TexturedVertex * vertices, size_t nvertices,
                                  unsigned short * indices, size_t nindices) {
-	// TODO T1.3/T1.4 draw with the uber shader
-	ARX_UNUSED(primitive), ARX_UNUSED(vertices), ARX_UNUSED(nvertices), ARX_UNUSED(indices), ARX_UNUSED(nindices);
+
+	if(nvertices == 0 || nindices == 0 || !prepareDraw(VertexTL, primitive)) {
+		return;
+	}
+
+	if(!bindVertices(VertexTL, vertices, nvertices) || !bindIndices(indices, nindices)) {
+		return;
+	}
+
+	vkCmdDrawIndexed(m_frames[m_frameIndex].commands, uint32_t(nindices), 1, 0, 0, 0);
+
 }
 
 bool VulkanRenderer::getSnapshot(Image & image) {
