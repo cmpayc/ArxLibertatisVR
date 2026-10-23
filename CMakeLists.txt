@@ -74,6 +74,7 @@ option(USE_OPENAL "Build the OpenAL audio backend" ON)
 option(USE_OPENGL "Build the OpenGL renderer backend" ON)
 option(USE_OPENXR "Build VR support using OpenXR" ON)
 option(USE_D3D11 "Build the Direct3D 11 renderer backend (Windows only)" ON)
+option(USE_VULKAN "Build the Vulkan renderer backend (needs the Vulkan headers, volk and VMA)" ON)
 option(USE_DLSS "Build NVIDIA DLSS support for the Direct3D 11 renderer (needs the DLSS SDK)" ON)
 option(USE_FSR "Build AMD FidelityFX Super Resolution support for the Direct3D 11 renderer (needs the FidelityFX API headers)" ON)
 option(USE_WINHTTP "Use the native WinHTTP API instead of CURL on Windows" ON)
@@ -1361,6 +1362,46 @@ if(USE_D3D11 AND WIN32 AND ARX_HAVE_SDL2)
 		endif()
 	endif()
 endif()
+if(USE_VULKAN AND ARX_HAVE_SDL2)
+	# Vulkan headers, volk (https://github.com/zeux/volk) and the Vulkan Memory Allocator
+	# (https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) are header-only,
+	# the Vulkan loader is loaded at runtime by volk
+	find_path(VOLK_INCLUDE_DIR volk.h PATH_SUFFIXES include)
+	find_path(VMA_INCLUDE_DIR vk_mem_alloc.h PATH_SUFFIXES include)
+	# The shaders are compiled to SPIR-V with dxc from the Vulkan SDK (https://vulkan.lunarg.com/)
+	file(GLOB vulkan_sdk_bins "C:/VulkanSDK/*/Bin")
+	list(SORT vulkan_sdk_bins ORDER DESCENDING)
+	find_program(DXC_EXECUTABLE dxc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin" ${vulkan_sdk_bins})
+	if(VOLK_INCLUDE_DIR AND VMA_INCLUDE_DIR AND EXISTS "${VOLK_INCLUDE_DIR}/vulkan/vulkan_core.h"
+	   AND DXC_EXECUTABLE)
+		set(ARX_HAVE_VULKAN 1)
+		include_directories(SYSTEM ${VOLK_INCLUDE_DIR} ${VMA_INCLUDE_DIR})
+		add_definitions(-DVK_NO_PROTOTYPES)
+		include(SPIRVShaders)
+		include_directories(${SPIRV_SHADER_DIR})
+		spirv_hlsl_source(Scene.hlsl d3d11ShaderSource)
+		spirv_hlsl_source(ModelPatch.hlsl d3d11ShaderSource d3d11ModelPatchSource d3d11ModelPatchStagesSource)
+		spirv_hlsl_source(ModelHull.hlsl d3d11ModelPatchSource)
+		foreach(entry IN ITEMS vsTL vsWorld vsWorld3 vsClear vsBlit vsOverlay vsShadow)
+			spirv_shader(${entry} Scene.hlsl ${entry} vs_6_0)
+		endforeach()
+		foreach(entry IN ITEMS psMain psClear psBlit psMotion psDebugDepth psDebugMotion psDebugObjectMotion
+		                       psAmbientOcclusion psAmbientOcclusionBlur psApplyAmbientOcclusion
+		                       psDebugAmbientOcclusion psReflection psBloomPrefilter psBloomDownsample
+		                       psBloomUpsample psBloomComposite psColorGrading psNormalMap psShadowCaster psShadow)
+			spirv_shader(${entry} Scene.hlsl ${entry} ps_6_0)
+		endforeach()
+		spirv_shader(psMainSampleShading Scene.hlsl psMain ps_6_0 SAMPLE_SHADING=1)
+		foreach(entry IN ITEMS psMotion psApplyAmbientOcclusion psBloomPrefilter psShadow)
+			spirv_shader(${entry}MS Scene.hlsl ${entry} ps_6_0 MSAA_DEPTH=1)
+		endforeach()
+		spirv_shader(psAmbientOcclusionBlurVertical Scene.hlsl psAmbientOcclusionBlur ps_6_0 BLUR_VERTICAL=1)
+		spirv_shader(vsModelPatch ModelPatch.hlsl vsModelPatch vs_6_0)
+		spirv_shader(hsModelPatch ModelHull.hlsl hsModelPatch hs_6_0)
+		spirv_shader(dsModelPatch ModelPatch.hlsl dsModelPatch ds_6_0)
+		spirv_shader_target()
+	endif()
+endif()
 
 # VR
 if(ARX_HAVE_OPENXR)
@@ -1903,6 +1944,10 @@ else()
 	shared_build()
 endif()
 
+if(ARX_HAVE_VULKAN)
+	add_dependencies(arx vulkan-shaders)
+endif()
+
 if(BUILD_TESTS)
 	
 	target_include_directories(arxtest PRIVATE tests)
@@ -2050,12 +2095,13 @@ print_configuration("Filesystem backend" FIRST
 	1                         "Boost"
 )
 print_configuration("Renderer"
-	ARX_HAVE_EPOXY "OpenGL (libepoxy)"
-	ARX_HAVE_EPOXY "OpenGL ES (libepoxy)"
-	ARX_HAVE_GLEW  "OpenGL (GLEW)"
-	ARX_HAVE_D3D11 "Direct3D 11"
-	ARX_HAVE_DLSS  "DLSS"
-	ARX_HAVE_FSR   "FSR"
+	ARX_HAVE_EPOXY  "OpenGL (libepoxy)"
+	ARX_HAVE_EPOXY  "OpenGL ES (libepoxy)"
+	ARX_HAVE_GLEW   "OpenGL (GLEW)"
+	ARX_HAVE_D3D11  "Direct3D 11"
+	ARX_HAVE_VULKAN "Vulkan"
+	ARX_HAVE_DLSS   "DLSS"
+	ARX_HAVE_FSR    "FSR"
 )
 print_configuration("Audio features"
 	ARX_HAVE_OPENAL_EFX  "EFX"
