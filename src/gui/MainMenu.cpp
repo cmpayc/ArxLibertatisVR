@@ -968,29 +968,28 @@ public:
 		{
 			std::string_view label = getLocalised("system_menus_options_video_renderer");
 			auto slider = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
-			slider->valueChanged = [this](int pos, std::string_view /* string */) {
-				switch(pos) {
-					case 0:  config.video.renderer = "auto"; break;
-					case 1:  config.video.renderer = "OpenGL";  break;
-					#if ARX_HAVE_D3D11
-					case 2:  config.video.renderer = "Direct3D 11";  break;
-					#endif
-					default: arx_unreachable();
+			// Menu entry and config value of each renderer
+			std::vector<std::pair<std::string_view, std::string_view>> renderers = {
+				{ "Auto-Select", "auto" },
+				{ "OpenGL", "OpenGL" },
+				#if ARX_HAVE_D3D11
+				{ "DirectX 11", "Direct3D 11" },
+				#endif
+				#if ARX_HAVE_VULKAN
+				{ "Vulkan", "Vulkan" },
+				#endif
+			};
+			for(const auto & [name, value] : renderers) {
+				slider->addEntry(name);
+				if(value == renderers.front().second || config.video.renderer == value) {
+					slider->selectLast();
 				}
+			}
+			slider->valueChanged = [this, renderers](int pos, std::string_view /* string */) {
+				arx_assert(size_t(pos) < renderers.size());
+				config.video.renderer = renderers[size_t(pos)].second;
 				setUpscalerState();
 			};
-			slider->addEntry("Auto-Select");
-			slider->selectLast();
-			slider->addEntry("OpenGL");
-			if(config.video.renderer == "OpenGL") {
-				slider->selectLast();
-			}
-			#if ARX_HAVE_D3D11
-			slider->addEntry("DirectX 11");
-			if(config.video.renderer == "Direct3D 11") {
-				slider->selectLast();
-			}
-			#endif
 			addCenter(std::move(slider));
 		}
 		

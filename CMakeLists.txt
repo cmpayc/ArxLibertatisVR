@@ -1076,6 +1076,13 @@ set(VR_OPENXR_SOURCES
 	src/vr/VRText.cpp
 )
 
+set(GRAPHICS_VULKAN_SOURCES
+	src/graphics/vulkan/VulkanLibraries.cpp
+	src/graphics/vulkan/VulkanRenderer.cpp
+	src/graphics/vulkan/VulkanTexture.cpp
+	src/graphics/vulkan/VulkanTextureStage.cpp
+)
+
 set(GRAPHICS_D3D11_SOURCES
 	src/graphics/d3d11/D3D11Renderer.cpp
 	src/graphics/d3d11/D3D11Texture.cpp
@@ -1375,6 +1382,9 @@ if(USE_VULKAN AND ARX_HAVE_SDL2)
 	if(VOLK_INCLUDE_DIR AND VMA_INCLUDE_DIR AND EXISTS "${VOLK_INCLUDE_DIR}/vulkan/vulkan_core.h"
 	   AND DXC_EXECUTABLE)
 		set(ARX_HAVE_VULKAN 1)
+		list(APPEND GRAPHICS_SOURCES ${GRAPHICS_VULKAN_SOURCES})
+		# The Vulkan headers and VMA define many macros and pull in a lot of code
+		set_source_files_properties(${GRAPHICS_VULKAN_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
 		include_directories(SYSTEM ${VOLK_INCLUDE_DIR} ${VMA_INCLUDE_DIR})
 		add_definitions(-DVK_NO_PROTOTYPES)
 		include(SPIRVShaders)

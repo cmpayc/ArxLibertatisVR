@@ -55,6 +55,9 @@
 #if ARX_HAVE_D3D11
 #include "graphics/d3d11/D3D11Window.h"
 #endif
+#if ARX_HAVE_VULKAN
+#include "graphics/vulkan/VulkanWindow.h"
+#endif
 #include "input/SDL2InputBackend.h"
 #include "io/log/Logger.h"
 #include "math/Rectangle.h"
@@ -81,6 +84,7 @@ SDL2Window::SDL2Window()
 	: m_window(nullptr)
 	, m_glcontext(nullptr)
 	, m_d3d11(nullptr)
+	, m_vulkan(nullptr)
 	, m_input(nullptr)
 	, m_minimizeOnFocusLost(AlwaysEnabled)
 	, m_allowScreensaver(AlwaysDisabled)
@@ -89,6 +93,21 @@ SDL2Window::SDL2Window()
 	, m_sdlVersion(0)
 	, m_sdlSubsystem(ARX_SDL_SYSWM_UNKNOWN)
 {
+	#if ARX_HAVE_VULKAN
+	bool vulkan = (config.video.renderer == "Vulkan");
+	#if ARX_HAVE_OPENXR
+	// TODO VR with Vulkan (VR_STANDALONE.md phase 3), the VR runtime then uses OpenGL, see VRSystem::initInstance()
+	if(vulkan && g_vr) {
+		LogInfo << "Using OpenGL instead of Vulkan for VR";
+		vulkan = false;
+	}
+	#endif
+	if(vulkan) {
+		m_vulkan = vulkan::createRenderer();
+		m_renderer = m_vulkan;
+		return;
+	}
+	#endif
 	#if ARX_HAVE_D3D11
 	bool d3d11 = (config.video.renderer == "Direct3D 11");
 	#if ARX_HAVE_OPENXR
@@ -407,11 +426,36 @@ int SDL2Window::createWindowAndD3D11Device() {
 	}
 	
 	return samples;
-	
+
 	#else
 	return 0;
 	#endif
-	
+
+}
+
+int SDL2Window::createWindowAndVulkanDevice() {
+
+	#if ARX_HAVE_VULKAN
+
+	arx_assert(m_vulkan);
+
+	int x = SDL_WINDOWPOS_UNDEFINED, y = SDL_WINDOWPOS_UNDEFINED;
+	Uint32 windowFlags = getSDLFlagsForMode(m_mode.resolution, m_fullscreen);
+	windowFlags |= SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN;
+
+	m_window = SDL_CreateWindow(m_title.c_str(), x, y, m_mode.resolution.x, m_mode.resolution.y, windowFlags);
+	if(!m_window) {
+		LogError << "Could not create Vulkan window: " << SDL_GetError();
+		return 0;
+	}
+
+	// On failure the window is destroyed after the renderer, which owns the Vulkan surface of the window
+	return vulkan::createDevice(*m_vulkan, m_window, m_maxMSAALevel);
+
+	#else
+	return 0;
+	#endif
+
 }
 
 bool SDL2Window::initialize() {
@@ -435,7 +479,33 @@ bool SDL2Window::initialize() {
 	gldebug::Mode debugMode = gldebug::mode();
 	
 	int samples = 0;
-	
+
+	#if ARX_HAVE_VULKAN
+	if(m_vulkan) {
+		samples = createWindowAndVulkanDevice();
+		if(samples == 0) {
+			Renderer * renderer = nullptr;
+			#if ARX_HAVE_D3D11
+			LogWarning << "Vulkan initialization failed, falling back to Direct3D 11";
+			m_d3d11 = d3d11::createRenderer();
+			renderer = m_d3d11;
+			#else
+			LogWarning << "Vulkan initialization failed, falling back to OpenGL";
+			renderer = new OpenGLRenderer;
+			autoRenderer = true;
+			#endif
+			m_renderer->transferListeners(*renderer);
+			delete m_renderer;
+			m_renderer = renderer;
+			m_vulkan = nullptr;
+			if(m_window) {
+				SDL_DestroyWindow(m_window);
+				m_window = nullptr;
+			}
+		}
+	}
+	#endif
+
 	if(m_d3d11) {
 		samples = createWindowAndD3D11Device();
 		if(samples == 0) {
@@ -603,6 +673,8 @@ bool SDL2Window::initialize() {
 		
 		if(m_d3d11) {
 			LogInfo << "Window: " << windowSystem << " Direct3D 11 aa:" << samples << "x";
+		} else if(m_vulkan) {
+			LogInfo << "Window: " << windowSystem << " Vulkan aa:" << samples << "x";
 		} else {
 			int red = 0, green = 0, blue = 0, alpha = 0, depth = 0, doublebuffer = 0;
 			SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &red);
@@ -671,6 +743,13 @@ void SDL2Window::setTitle(const std::string & title) {
 }
 
 bool SDL2Window::setVSync(int vsync) {
+	#if ARX_HAVE_VULKAN
+	if(m_vulkan) {
+		vulkan::setVSync(*m_vulkan, vsync);
+		m_vsync = vsync;
+		return true;
+	}
+	#endif
 	#if ARX_HAVE_D3D11
 	if(m_d3d11) {
 		d3d11::setVSync(*m_d3d11, vsync);
@@ -920,6 +999,12 @@ void SDL2Window::processEvents(bool waitForEvent) {
 
 void SDL2Window::showFrame() {
 	ARX_PROFILE_FUNC();
+	#if ARX_HAVE_VULKAN
+	if(m_vulkan) {
+		vulkan::present(*m_vulkan);
+		return;
+	}
+	#endif
 	#if ARX_HAVE_D3D11
 	if(m_d3d11) {
 		d3d11::present(*m_d3d11);
