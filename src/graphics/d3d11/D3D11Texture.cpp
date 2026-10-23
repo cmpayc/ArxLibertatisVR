@@ -51,11 +51,18 @@ static const struct {
 	{ "metal",   { 0.9f, 40.f, 1.f, 0.f } },
 	{ "iron",    { 0.8f, 32.f, 1.f, 0.f } },
 	{ "weapon",  { 0.9f, 40.f, 1.f, 0.f } },
+	// Armor of characters (also the player): steel and brass parts shine and reflect, straps, cloth and flesh have a
+	// leather sheen, before "mithril" for "npc_human_chainmail_mithril_body"
+	{ "plate",        { 1.f, 48.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.12f, 1.f, 1.5f } },
+	{ "chainmail",    { 0.8f, 32.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.12f, 1.f, 1.5f } },
+	{ "ylside",       { 1.f, 48.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.12f, 1.f, 1.5f } },
+	// Leather armor, only its bright grey buckles and studs are steel
+	{ "leather",      { 1.f, 48.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.4f, 1.f, 1.3f } },
+	{ "leatherblack", { 1.f, 48.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.4f, 1.f, 1.3f } },
+	{ "leatherbrown", { 1.f, 48.f, 1.f, 0.f, 0.f, 0.f, 0.f, 0.4f, 1.f, 1.3f } },
 	{ "gold",    { 1.f, 48.f, 1.f, 0.f } },
 	{ "mithril", { 1.f, 48.f, 1.f, 0.f } },
 	{ "silver",  { 1.f, 48.f, 1.f, 0.f } },
-	{ "plate",   { 0.9f, 40.f, 1.f, 0.f } },
-	{ "chainmail", { 0.7f, 24.f, 1.f, 0.f } },
 	{ "sword",   { 0.9f, 40.f, 1.f, 0.f } },
 	{ "shield",  { 0.6f, 32.f, 1.f, 0.f } },
 	{ "stone",   { 0.6f, 48.f, 0.f, 0.f } },

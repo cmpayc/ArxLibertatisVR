@@ -75,9 +75,10 @@ struct PSConstants {
 	float fogColor[4];
 	float fogParams[4];
 	float relief[4]; // x = normal map slope scale, y = parallax depth, z = cavity darkening of models, both 0 without a relief map
-	float specular[4]; // x = highlight strength, y = exponent, z = metallic, all 0 without highlights
+	float specular[4]; // x = highlight strength, y = exponent, z = metallic, w = highlight setting, all 0 without highlights
 	float surface[4]; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
 	float effect[4]; // x = time in seconds (repeating), y = lava glow, z = ice, w = crystal, 0 for other surfaces
+	float material[4]; // x = brightness of the steel parts of armor, y = leather sheen, 0 for other surfaces
 };
 
 // The lava animation repeats after this time, the frequencies of its waves are multiples of 0.1
@@ -4295,7 +4296,7 @@ void D3D11Renderer::flushState(VertexType type) {
 			}
 			constants.stages[0][3] = normalView ? 1 : 0;
 			if(normalView) {
-				constants.relief[0] = m_normalMapStrength * NormalMapSlopeScale;
+				constants.relief[0] = m_normalMapStrength * NormalMapSlopeScale * (model ? texture->specular().relief : 1.f);
 				constants.relief[1] = model ? 0.f : m_parallaxStrength * ParallaxDepthScale;
 				constants.relief[2] = model ? m_normalMapStrength : 0.f;
 			}
@@ -4306,6 +4307,12 @@ void D3D11Renderer::flushState(VertexType type) {
 				constants.specular[0] = specular.strength * m_specularStrength * SpecularScale;
 				constants.specular[1] = specular.exponent;
 				constants.specular[2] = specular.metallic;
+				constants.specular[3] = m_specularStrength * SpecularScale;
+				// Metal and leather parts of armor in the 3D scene
+				if(type == VertexTL) {
+					constants.material[0] = specular.metalParts;
+					constants.material[1] = specular.leather;
+				}
 			}
 			if(texture && type == VertexWorld && m_surfaceView && m_reflectionStrength > 0.f) {
 				constants.surface[0] = texture->specular().reflectivity;

@@ -63,6 +63,11 @@ public:
 		float glow = 0.f; //!< Glowing, flowing lava
 		float ice = 0.f; //!< Deep, cold and sparkling ice on the bright, bluish parts of the texture
 		float crystal = 0.f; //!< Like ice, but clear and on the whole texture
+		//! Armor: grey parts brighter than this are steel and yellow ones brass, only they get the highlights and
+		//! reflect, 0 if the whole texture is one material
+		float metalParts = 0.f;
+		float leather = 0.f; //!< Soft sheen of the parts of armor that are not metal (leather, cloth, flesh)
+		float relief = 1.f; //!< Strength of the normal map of models, for engraved or embossed armor
 	};
 	const Specular & specular() const { return m_specular; }
 	

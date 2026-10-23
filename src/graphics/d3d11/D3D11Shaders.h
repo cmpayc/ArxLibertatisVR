@@ -46,9 +46,10 @@ cbuffer PSConstants : register(b0) {
 	float4 fogColor;
 	float4 fogParams; // x = start, y = end, z = enabled, w = alpha reference (< 0: no test)
 	float4 reliefParams; // x = normal map slope scale, y = parallax depth relative to the texture size, z = cavity darkening of models
-	float4 specularParams; // x = highlight strength, y = exponent, z = metallic
+	float4 specularParams; // x = highlight strength, y = exponent, z = metallic, w = highlight setting
 	float4 surfaceParams; // x = reflectivity, y = 1 for blended draws, z = 1 for water surfaces, w = 1 for models
 	float4 effectParams; // x = time in seconds (repeating), y = lava glow
+	float4 materialParams; // x = brightness of the steel parts of armor (0: no armor), y = leather sheen
 };
 
 cbuffer ClearConstants : register(b1) {
@@ -155,6 +156,10 @@ VSOutput vsWorld(float3 position : POSITION, float4 color : COLOR, float2 uv : T
 // Distance range where the parallax mapping fades out
 static const float ParallaxFadeStart = 1200;
 static const float ParallaxFadeEnd = 2000;
+
+// Broad, weak highlights of leather, relative to the highlight setting
+static const float LeatherExponent = 12;
+static const float LeatherHighlight = 0.3;
 
 // Diffuse light of the first diffuseCount lights and Blinn-Phong highlights of all lights if the exponent is not
 // zero, with the same falloff as ApplyTileLights()
@@ -286,6 +291,8 @@ float3 decodeNormal(float2 e) {
 	return normalize(n);
 }
 
+)HLSL"
+R"HLSL(
 PSOutput psMain(PSInput input
 #ifdef SAMPLE_SHADING
                 , uint sampleIndex : SV_SampleIndex
@@ -384,6 +391,26 @@ PSOutput psMain(PSInput input
 		}
 	}
 	
+	// Armor: the grey parts of its texture are steel and the yellow ones brass, they get the highlights and reflect,
+	// the rest (straps, cloth, flesh) has the broad sheen of leather
+	bool armor = materialParams.x > 0 && stages[0].z != 0;
+	float metal = 1;
+	float sheen = 0;
+	float exponent = specularParams.y;
+	[branch] if(armor) {
+		float3 base = texture0.SampleGrad(sampler0, uv0, dx0, dy0).rgb;
+		float brightest = max(base.r, max(base.g, base.b));
+		float saturation = (brightest - min(base.r, min(base.g, base.b))) / max(brightest, 0.001);
+		float steel = (1 - smoothstep(0.12, 0.3, saturation)) * smoothstep(materialParams.x, materialParams.x + 0.2, brightest);
+		// Brass is yellow: much less blue than red, unlike brown leather or red flesh
+		float yellow = smoothstep(0.4, 0.25, base.b / max(base.r, 0.001)) * smoothstep(0.45, 0.6, base.g / max(base.r, 0.001));
+		float brass = yellow * smoothstep(0.3, 0.5, saturation) * smoothstep(0.35, 0.6, brightest);
+		metal = saturate(steel + brass);
+		// Dark leather shines, bright skin hardly
+		sheen = (1 - metal) * materialParams.y * (1 - smoothstep(0.45, 0.75, brightest));
+		exponent = lerp(LeatherExponent, specularParams.y, metal);
+	}
+
 	// Add the dynamic lights
 	float3 dynamicLight = float3(0, 0, 0);
 	float3 specular = float3(0, 0, 0);
@@ -392,8 +419,8 @@ PSOutput psMain(PSInput input
 		// Water is drawn on top of the lit ground and models are already lit, they only get the highlights
 		int diffuseCount = (water || surfaceParams.w != 0) ? 0 : lightCount.x;
 		pixelLighting(input.world, normal, normalize(input.view), diffuseCount, shiny ? lightCount.z : diffuseCount,
-		              shiny ? specularParams.y : 0, dynamicLight, specular);
-		specular *= specularParams.x;
+		              shiny ? exponent : 0, dynamicLight, specular);
+		specular *= armor ? specularParams.x * metal + specularParams.w * LeatherHighlight * sheen : specularParams.x;
 		color.rgb = saturate(color.rgb + dynamicLight);
 	}
 	
@@ -409,7 +436,8 @@ PSOutput psMain(PSInput input
 		color.rgb *= 1 - saturate((0.5 - height) * 2) * 0.5 * reliefParams.z;
 	}
 	// The light that reaches the surface, which the dynamic shadows take away from
-	float incidentLight = dot(saturate(color.rgb), float3(0.299, 0.587, 0.114));
+	float3 surfaceLight = saturate(color.rgb);
+	float incidentLight = dot(surfaceLight, float3(0.299, 0.587, 0.114));
 	float4 texel0 = float4(1, 1, 1, 1);
 	[branch] if(stages[0].z != 0) {
 		texel0 = texture0.SampleGrad(sampler0, uv0, dx0, dy0);
@@ -421,7 +449,28 @@ PSOutput psMain(PSInput input
 	[branch] if(stages[2].z != 0) {
 		color = combine(stages[2], color, texture2.SampleGrad(sampler2, input.uv2, dx2, dy2));
 	}
-	
+
+	// Polished metal of armor reflects its surroundings. Without environment maps they are a room lit from above with
+	// a bright horizon, as bright as the light at the surface: the metal gets contrast that moves with the view, but
+	// is about as bright as before on average. Leather brightens a little at grazing angles.
+	[branch] if(armor && normalLength > 0.01) {
+		float3 view = input.view / max(length(input.view), 0.0001);
+		float cosView = saturate(dot(view, normal));
+		float strength = saturate(specularParams.w);
+		[branch] if(metal > 0) {
+			float3 reflected = reflect(-view, normal);
+			float up = -reflected.y; // The y axis points down
+			float environment = 0.3 + 0.8 * smoothstep(-0.3, 0.9, up) + 0.7 * exp(-abs(up + 0.05) * 10)
+			                    + 0.2 * sin(reflected.x * 7) * sin(reflected.z * 5);
+			// Metal reflects more and less tinted at grazing angles
+			float fresnel = pow(1 - cosView, 5);
+			float3 tint = lerp(texel0.rgb, saturate(texel0.rgb * 1.5 + 0.2), fresnel);
+			float3 polished = color.rgb * 0.5 + surfaceLight * tint * (environment * 0.6);
+			color.rgb = lerp(color.rgb, saturate(polished), metal * strength);
+		}
+		color.rgb = saturate(color.rgb + surfaceLight * texel0.rgb * (pow(1 - cosView, 3) * 0.6 * sheen * strength));
+	}
+
 	// Ice: its icy (bluish, not brown earth) parts look deep and cold, with cold light at grazing angles and twinkling
 	// frost, and reflect the scene (see the surface output)
 	float iceMask = 0;
@@ -462,7 +511,7 @@ PSOutput psMain(PSInput input
 	// Metals tint the highlights with their color, darker parts of other surfaces are less shiny
 	[branch] if(any(specular > 0)) {
 		float luminance = dot(texel0.rgb, float3(0.299, 0.587, 0.114));
-		float3 tint = lerp(saturate(luminance * 2).xxx, texel0.rgb * 1.5, specularParams.z);
+		float3 tint = lerp(saturate(luminance * 2).xxx, texel0.rgb * 1.5, specularParams.z * metal);
 		color.rgb = saturate(color.rgb + specular * tint);
 	}
 
