@@ -147,18 +147,24 @@ VulkanRenderer::~VulkanRenderer() {
 		shutdown();
 	}
 
-	// Textures can outlive the renderer
+	// Textures can outlive the renderer, their images are released with the device
 	for(VulkanTexture & texture : m_textures) {
+		texture.releaseImage();
 		texture.m_renderer = nullptr;
 	}
 	m_textures.clear();
 
 	if(m_device) {
 
+		if(m_upload.recording) {
+			flushUploads();
+		}
+
 		vkDeviceWaitIdle(m_device);
 
 		releaseSizeDependentResources();
 		releaseSwapchain();
+		clearSamplers();
 
 		for(Frame & frame : m_frames) {
 			for(std::function<void()> & release : frame.releases) {
@@ -172,6 +178,8 @@ VulkanRenderer::~VulkanRenderer() {
 			vkDestroyFence(m_device, frame.fence, nullptr);
 			vkDestroyCommandPool(m_device, frame.commandPool, nullptr);
 		}
+		vkDestroyFence(m_device, m_upload.fence, nullptr);
+		vkDestroyCommandPool(m_device, m_upload.commandPool, nullptr);
 
 		if(m_allocator) {
 			vmaDestroyAllocator(m_allocator);
@@ -520,6 +528,26 @@ bool VulkanRenderer::createFrames() {
 
 	}
 
+	VkCommandPoolCreateInfo pool = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+	pool.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+	pool.queueFamilyIndex = m_queueFamily;
+	if(!checkVk(vkCreateCommandPool(m_device, &pool, nullptr, &m_upload.commandPool), "vkCreateCommandPool")) {
+		return false;
+	}
+
+	VkCommandBufferAllocateInfo commands = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+	commands.commandPool = m_upload.commandPool;
+	commands.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	commands.commandBufferCount = 1;
+	if(!checkVk(vkAllocateCommandBuffers(m_device, &commands, &m_upload.commands), "vkAllocateCommandBuffers")) {
+		return false;
+	}
+
+	VkFenceCreateInfo fence = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+	if(!checkVk(vkCreateFence(m_device, &fence, nullptr, &m_upload.fence), "vkCreateFence")) {
+		return false;
+	}
+
 	return true;
 }
 
@@ -820,6 +848,11 @@ void VulkanRenderer::endFrame(VkSemaphore wait, VkPipelineStageFlags waitStage, 
 	arx_assert(m_frameActive);
 
 	endRendering();
+
+	// Textures used by this frame may have been uploaded after its commands were recorded
+	if(m_upload.recording) {
+		flushUploads();
+	}
 
 	Frame & frame = m_frames[m_frameIndex];
 
@@ -1156,7 +1189,164 @@ void VulkanRenderer::SetFillMode(FillMode mode) {
 }
 
 void VulkanRenderer::setMaxAnisotropy(float value) {
-	m_maximumAnisotropy = std::clamp(value, 1.f, m_maximumSupportedAnisotropy);
+
+	float maxAnisotropy = std::clamp(value, 1.f, m_maximumSupportedAnisotropy);
+	if(m_maximumAnisotropy == maxAnisotropy) {
+		return;
+	}
+
+	m_maximumAnisotropy = maxAnisotropy;
+
+	clearSamplers();
+
+}
+
+VkCommandBuffer VulkanRenderer::beginUpload() {
+
+	if(!m_upload.recording) {
+		vkResetCommandPool(m_device, m_upload.commandPool, 0);
+		VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+		begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer(m_upload.commands, &begin);
+		m_upload.recording = true;
+	}
+
+	return m_upload.commands;
+}
+
+void * VulkanRenderer::createStagingBuffer(VkDeviceSize size, VkBuffer & buffer) {
+
+	// Don't let the staging memory grow while loading levels without presenting frames
+	if(m_upload.recording && m_upload.stagingSize + size > MaxPendingUploadSize) {
+		flushUploads();
+	}
+
+	VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	info.size = size;
+	info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	VmaAllocationCreateInfo allocation = {};
+	allocation.usage = VMA_MEMORY_USAGE_AUTO;
+	allocation.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+	VmaAllocation memory = VK_NULL_HANDLE;
+	VmaAllocationInfo allocationInfo = {};
+	if(!checkVk(vmaCreateBuffer(m_allocator, &info, &allocation, &buffer, &memory, &allocationInfo),
+	            "vmaCreateBuffer")) {
+		return nullptr;
+	}
+
+	m_upload.staging.emplace_back(buffer, memory);
+	m_upload.stagingSize += size;
+
+	return allocationInfo.pMappedData;
+}
+
+void VulkanRenderer::flushUploads() {
+
+	if(!m_upload.recording) {
+		return;
+	}
+
+	vkEndCommandBuffer(m_upload.commands);
+	m_upload.recording = false;
+	VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers = &m_upload.commands;
+
+	VkResult result = vkQueueSubmit(m_queue, 1, &submit, m_upload.fence);
+	if(result == VK_SUCCESS) {
+		vkWaitForFences(m_device, 1, &m_upload.fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+		vkResetFences(m_device, 1, &m_upload.fence);
+	} else if(result == VK_ERROR_DEVICE_LOST) {
+		if(!m_deviceLost) {
+			LogError << "Vulkan device lost";
+			m_deviceLost = true;
+		}
+		vkDeviceWaitIdle(m_device);
+	} else {
+		checkVk(result, "vkQueueSubmit");
+		vkDeviceWaitIdle(m_device);
+	}
+
+	for(const auto & [buffer, memory] : m_upload.staging) {
+		vmaDestroyBuffer(m_allocator, buffer, memory);
+	}
+	m_upload.staging.clear();
+	m_upload.stagingSize = 0;
+
+}
+
+VkSampler VulkanRenderer::getSampler(TextureStage::WrapMode wrapMode, TextureStage::FilterMode minFilter,
+                                     TextureStage::FilterMode magFilter, bool mipmaps, float lodBias) {
+
+	unsigned anisotropy = 1;
+	if(mipmaps && minFilter == TextureStage::FilterLinear) {
+		anisotropy = unsigned(m_maximumAnisotropy);
+	}
+
+	uint32_t biasBits;
+	std::memcpy(&biasBits, &lodBias, sizeof(biasBits));
+
+	uint64_t key = uint64_t(wrapMode) | (uint64_t(minFilter) << 2) | (uint64_t(magFilter) << 3)
+	               | (uint64_t(mipmaps) << 4) | (uint64_t(anisotropy) << 8) | (uint64_t(biasBits) << 32);
+
+	auto it = m_samplers.find(key);
+	if(it != m_samplers.end()) {
+		return it->second;
+	}
+
+	static const VkSamplerAddressMode arxToVkWrapMode[] = {
+		VK_SAMPLER_ADDRESS_MODE_REPEAT,          // WrapRepeat
+		VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT, // WrapMirror
+		VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE    // WrapClamp
+	};
+
+	VkSamplerCreateInfo info = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+	info.magFilter = (magFilter == TextureStage::FilterLinear) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+	info.minFilter = (minFilter == TextureStage::FilterLinear) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+	// OpenGL uses GL_*_MIPMAP_LINEAR for mipmapped textures
+	info.mipmapMode = mipmaps ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	info.addressModeU = info.addressModeV = info.addressModeW = arxToVkWrapMode[wrapMode];
+	float maxBias = m_properties.limits.maxSamplerLodBias;
+	info.mipLodBias = std::clamp(lodBias, -maxBias, maxBias);
+	info.anisotropyEnable = (anisotropy > 1) ? VK_TRUE : VK_FALSE;
+	info.maxAnisotropy = float(anisotropy);
+	info.compareOp = VK_COMPARE_OP_NEVER;
+	info.minLod = 0.f;
+	info.maxLod = mipmaps ? VK_LOD_CLAMP_NONE : 0.f;
+	info.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+
+	VkSampler sampler = VK_NULL_HANDLE;
+	if(!checkVk(vkCreateSampler(m_device, &info, nullptr, &sampler), "vkCreateSampler")) {
+		return VK_NULL_HANDLE;
+	}
+
+	m_samplers.emplace(key, sampler);
+	return sampler;
+}
+
+void VulkanRenderer::clearSamplers() {
+
+	if(m_samplers.empty()) {
+		return;
+	}
+
+	VkDevice device = m_device;
+	std::vector<VkSampler> samplers;
+	samplers.reserve(m_samplers.size());
+	for(const auto & entry : m_samplers) {
+		samplers.push_back(entry.second);
+	}
+	m_samplers.clear();
+
+	deferRelease([device, samplers]() {
+		for(VkSampler sampler : samplers) {
+			vkDestroySampler(device, sampler, nullptr);
+		}
+	});
+
 }
 
 Renderer::AlphaCutoutAntialising VulkanRenderer::getMaxSupportedAlphaCutoutAntialiasing() const {

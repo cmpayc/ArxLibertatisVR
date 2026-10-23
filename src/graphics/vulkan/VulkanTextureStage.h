@@ -20,6 +20,8 @@
 #ifndef ARX_GRAPHICS_VULKAN_VULKANTEXTURESTAGE_H
 #define ARX_GRAPHICS_VULKAN_VULKANTEXTURESTAGE_H
 
+#include <volk.h>
+
 #include "graphics/texture/TextureStage.h"
 #include "platform/Platform.h"
 
@@ -47,6 +49,12 @@ public:
 	float getMipMapLODBias() const { return m_lodBias; }
 
 	bool isEnabled() const { return m_colorOp != OpDisable || m_alphaOp != OpDisable; }
+
+	//! \return the bound texture if it can be sampled, nullptr otherwise
+	VulkanTexture * getActiveTexture() const;
+
+	//! \return the sampler matching the stage and texture settings
+	VkSampler getSampler(const VulkanTexture * texture) const;
 
 private:
 

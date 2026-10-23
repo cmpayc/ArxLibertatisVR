@@ -61,3 +61,23 @@ void VulkanTextureStage::setAlphaOp(TextureOp op) {
 void VulkanTextureStage::setMipMapLODBias(float bias) {
 	m_lodBias = bias;
 }
+
+VulkanTexture * VulkanTextureStage::getActiveTexture() const {
+
+	// Like OpenGL, a stage without a valid texture passes through the previous color
+	if(!isEnabled() || !m_texture || !m_texture->view()) {
+		return nullptr;
+	}
+
+	return m_texture;
+}
+
+VkSampler VulkanTextureStage::getSampler(const VulkanTexture * texture) const {
+
+	arx_assert(texture);
+
+	// TODO: Fix callers and change this into an assert/error/warning (same as in the OpenGL backend)
+	WrapMode wrapMode = texture->isNPOT() ? WrapClamp : getWrapMode();
+
+	return m_renderer->getSampler(wrapMode, getMinFilter(), getMagFilter(), texture->hasMipmaps(), m_lodBias);
+}

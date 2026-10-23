@@ -20,6 +20,9 @@
 #ifndef ARX_GRAPHICS_VULKAN_VULKANTEXTURE_H
 #define ARX_GRAPHICS_VULKAN_VULKANTEXTURE_H
 
+#include <volk.h>
+#include <vk_mem_alloc.h>
+
 #include <boost/intrusive/list_hook.hpp>
 
 #include "graphics/texture/Texture.h"
@@ -29,7 +32,12 @@ class VulkanRenderer;
 
 typedef boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>> VulkanTextureListHook;
 
-//! Texture of the Vulkan renderer (T1.1: no GPU image yet, the image data is kept for the upload in T1.2)
+/*!
+ * Texture of the Vulkan renderer: a device-local RGBA8 image with mipmaps generated on the GPU
+ *
+ * Each upload goes into a new image, the previous one is released once the frames using it finished.
+ * Like with the other backends, draws recorded before the upload still see the old contents.
+ */
 class VulkanTexture final : public Texture, public VulkanTextureListHook {
 
 public:
@@ -41,9 +49,22 @@ public:
 	void upload() override;
 	void destroy() override;
 
+	VkImageView view() const { return m_view; }
+
+	//! NPOT textures are always clamped to match the OpenGL backend.
+	bool isNPOT() const { return m_isNPOT; }
+
 private:
 
+	void releaseImage();
+
 	VulkanRenderer * m_renderer;
+
+	VkImage m_texture;
+	VmaAllocation m_allocation;
+	VkImageView m_view;
+
+	bool m_isNPOT;
 
 	friend class VulkanRenderer;
 

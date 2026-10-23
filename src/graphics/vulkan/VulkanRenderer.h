@@ -22,6 +22,7 @@
 
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <volk.h>
@@ -31,6 +32,7 @@
 
 #include "graphics/Color.h"
 #include "graphics/Renderer.h"
+#include "graphics/texture/TextureStage.h"
 #include "graphics/vulkan/VulkanTexture.h"
 #include "math/Rectangle.h"
 #include "platform/Platform.h"
@@ -130,6 +132,30 @@ public:
 
 	void onTextureDestroyed(VulkanTexture * texture);
 
+	VkDevice device() const { return m_device; }
+	VmaAllocator allocator() const { return m_allocator; }
+
+	/*!
+	 * Command buffer for copies into textures, submitted before the commands of the current frame
+	 *
+	 * Copies are not allowed while rendering, and textures are also uploaded outside of frames (e.g. while loading).
+	 */
+	VkCommandBuffer beginUpload();
+
+	/*!
+	 * Create a host-visible buffer for an upload, released once the upload commands have been executed
+	 *
+	 * \return the mapped memory of the buffer, nullptr on failure
+	 */
+	void * createStagingBuffer(VkDeviceSize size, VkBuffer & buffer);
+
+	//! Submit the recorded uploads and wait for them to finish
+	void flushUploads();
+
+	//! \return a sampler for the texture stage settings, cached
+	VkSampler getSampler(TextureStage::WrapMode wrapMode, TextureStage::FilterMode minFilter,
+	                     TextureStage::FilterMode magFilter, bool mipmaps, float lodBias);
+
 	/*!
 	 * Release a resource once the GPU no longer uses it
 	 *
@@ -155,7 +181,20 @@ private:
 		std::vector<std::function<void()>> releases;
 	};
 
+	struct UploadContext {
+		VkCommandPool commandPool = VK_NULL_HANDLE;
+		VkCommandBuffer commands = VK_NULL_HANDLE;
+		VkFence fence = VK_NULL_HANDLE;
+		bool recording = false;
+		std::vector<std::pair<VkBuffer, VmaAllocation>> staging;
+		VkDeviceSize stagingSize = 0;
+	};
+
 	static constexpr size_t FramesInFlight = 2;
+	//! Staging memory after which the uploads are submitted early (while loading levels)
+	static constexpr VkDeviceSize MaxPendingUploadSize = VkDeviceSize(64) * 1024 * 1024;
+
+	void clearSamplers();
 
 	bool createInstance(SDL_Window * window);
 	bool selectPhysicalDevice();
@@ -212,6 +251,8 @@ private:
 	Vec2i m_size;
 
 	Frame m_frames[FramesInFlight];
+	UploadContext m_upload;
+	std::unordered_map<uint64_t, VkSampler> m_samplers;
 	size_t m_frameIndex;
 	bool m_frameActive;
 	bool m_renderingActive;
