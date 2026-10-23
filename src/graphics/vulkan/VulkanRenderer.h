@@ -24,6 +24,9 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <map>
+#include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -134,6 +137,10 @@ public:
 	bool supportsSpecular() const override { return true; }
 	void setSpecular(float strength) override;
 	void setWaterSurface(bool water) override { m_waterSurface = water; }
+	bool supportsBloom() const override { return true; }
+	void setBloom(float strength) override;
+	bool supportsColorGrading() const override { return true; }
+	void setColorGrading(std::string_view preset) override;
 
 	bool reliefMapsEnabled() const {
 		return (m_normalMapStrength > 0.f || m_parallaxStrength > 0.f) && m_reliefPixelShader;
@@ -325,8 +332,34 @@ private:
 	Vec2f targetScale() const;
 	Rect toTargetRect(const Rect & rect) const;
 	//! Draw the scene into the window target
-	void composeScene(VkImageView scene);
-	VkPipeline getBlitPipeline();
+	// Post-processing of the scene, see VulkanPostProcess.cpp
+
+	//! Descriptor set layout of a full-screen pass: vsBlit with a pixel shader reading one source texture
+	struct PostLayout {
+		VkDescriptorSetLayout set = VK_NULL_HANDLE;
+		VkPipelineLayout pipeline = VK_NULL_HANDLE;
+		uint32_t constantsBinding = 0; //!< The constant buffer of the pixel shader, 0 if none
+		bool sceneMask = false; //!< The pixel shader reads the scene stencil (t4)
+	};
+	typedef std::tuple<VkShaderModule, VkFormat, bool> PostPipelineKey;
+
+	bool createPostProcessResources();
+	void releasePostProcessResources();
+	bool createPostLayout(PostLayout & layout, uint32_t constantsBinding, bool sceneMask);
+	void releasePostLayout(PostLayout & layout);
+	//! \param format VK_FORMAT_UNDEFINED for the window target
+	VkPipeline getPostPipeline(VkShaderModule pixelShader, const char * entry, const PostLayout & layout,
+	                           VkFormat format, bool additive);
+	//! Bind the pipeline, descriptors, viewport and scissor of a full-screen pass in the current rendering
+	bool bindPostPass(VkPipeline pipeline, const PostLayout & layout, VkImageView source, const Vec4f & sourceRect,
+	                  const void * constants, size_t constantsSize, const Vec2i & targetSize);
+	//! A full-screen pass from one image into another
+	void postPass(ImageTarget & target, VkFormat format, const Vec2i & targetSize, ImageTarget & source,
+	              VkShaderModule shader, const char * entry, const PostLayout & layout, const void * constants,
+	              size_t constantsSize, bool additive);
+	void renderBloom(ImageTarget & scene);
+	//! Draw the scene into the window target, with the color grading
+	void composeScene(ImageTarget & scene);
 	VkPipeline getReliefPipeline();
 	VkDescriptorSet allocateUploadDescriptorSet(VkDescriptorSetLayout layout);
 	//! Generate or release the relief maps of all textures after the setting changed
@@ -421,9 +454,26 @@ private:
 	std::unordered_map<uint64_t, VkPipeline> m_pipelines;
 	VkShaderModule m_blitVertexShader;
 	VkShaderModule m_blitPixelShader;
-	VkDescriptorSetLayout m_blitSetLayout;
-	VkPipelineLayout m_blitPipelineLayout;
-	VkPipeline m_blitPipeline;
+	PostLayout m_blitLayout;
+	PostLayout m_bloomPrefilterLayout;
+	PostLayout m_bloomLayout;
+	PostLayout m_gradingLayout;
+	std::map<PostPipelineKey, VkPipeline> m_postPipelines;
+	VkShaderModule m_bloomPrefilterShader;
+	VkShaderModule m_bloomDownsampleShader;
+	VkShaderModule m_bloomUpsampleShader;
+	VkShaderModule m_bloomCompositeShader;
+	VkShaderModule m_gradingShader;
+	ImageTarget m_noSceneMask; //!< Bound as the scene stencil: no pixel is excluded from the effects
+
+	// Bloom and color grading of the 3D scene
+	static constexpr size_t BloomLevels = 6;
+	float m_bloomStrength;
+	bool m_bloom;
+	VkFormat m_bloomFormat;
+	ImageTarget m_bloomTargets[BloomLevels]; //!< From half the scene size down
+	Vec2i m_bloomSizes[BloomLevels];
+	size_t m_colorGrading; //!< Preset index, 0 = off
 	VkShaderModule m_reliefPixelShader;
 	VkPipeline m_reliefPipeline;
 	VkBuffer m_fullRectConstants; //!< BlitConstants for vsBlit covering the whole source

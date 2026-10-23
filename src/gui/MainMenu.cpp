@@ -1380,10 +1380,10 @@ private:
 			m_fsrSharpnessCycleText->setEnabled(direct3D && m_fsrAvailable && config.video.upscaler == "fsr");
 		}
 		if(m_bloomCycleText) {
-			m_bloomCycleText->setEnabled(direct3D);
+			m_bloomCycleText->setEnabled(direct3D || vulkan);
 		}
 		if(m_colorGradingCycleText) {
-			m_colorGradingCycleText->setEnabled(direct3D);
+			m_colorGradingCycleText->setEnabled(direct3D || vulkan);
 		}
 		if(m_ambientOcclusionCycleText) {
 			m_ambientOcclusionCycleText->setEnabled(direct3D);

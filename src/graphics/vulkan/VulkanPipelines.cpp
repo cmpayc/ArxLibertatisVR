@@ -296,23 +296,6 @@ bool VulkanRenderer::createPipelineResources() {
 		return false;
 	}
 
-	// Full-screen copies of the scene targets (vsBlit, psBlit)
-	bindings.clear();
-	addBinding(BlitConstantsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_SHADER_STAGE_VERTEX_BIT);
-	addBinding(TextureBinding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT);
-	addBinding(SamplerBinding, VK_DESCRIPTOR_TYPE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setLayout.bindingCount = uint32_t(bindings.size());
-	setLayout.pBindings = bindings.data();
-	if(vkCreateDescriptorSetLayout(m_device, &setLayout, nullptr, &m_blitSetLayout) != VK_SUCCESS) {
-		LogError << "Failed to create the Vulkan blit descriptor set layout";
-		return false;
-	}
-	layout.pSetLayouts = &m_blitSetLayout;
-	if(vkCreatePipelineLayout(m_device, &layout, nullptr, &m_blitPipelineLayout) != VK_SUCCESS) {
-		LogError << "Failed to create the Vulkan blit pipeline layout";
-		return false;
-	}
-
 	// Pipelines from previous runs, the driver ignores data from other devices or driver versions
 	std::string data;
 	fs::path cachePath = pipelineCachePath();
@@ -392,12 +375,6 @@ void VulkanRenderer::releasePipelineResources() {
 	}
 	m_pipelines.clear();
 
-	vkDestroyPipeline(m_device, m_blitPipeline, nullptr);
-	m_blitPipeline = VK_NULL_HANDLE;
-	vkDestroyPipelineLayout(m_device, m_blitPipelineLayout, nullptr);
-	m_blitPipelineLayout = VK_NULL_HANDLE;
-	vkDestroyDescriptorSetLayout(m_device, m_blitSetLayout, nullptr);
-	m_blitSetLayout = VK_NULL_HANDLE;
 	vkDestroyShaderModule(m_device, m_blitVertexShader, nullptr);
 	m_blitVertexShader = VK_NULL_HANDLE;
 	vkDestroyShaderModule(m_device, m_blitPixelShader, nullptr);
@@ -926,147 +903,6 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 	return true;
 }
 
-VkPipeline VulkanRenderer::getBlitPipeline() {
-	
-	if(m_blitPipeline) {
-		return m_blitPipeline;
-	}
-	
-	VkPipelineShaderStageCreateInfo stages[2] = {
-		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
-		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO }
-	};
-	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-	stages[0].module = m_blitVertexShader;
-	stages[0].pName = "vsBlit";
-	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-	stages[1].module = m_blitPixelShader;
-	stages[1].pName = "psBlit";
-	
-	// A full-screen triangle from SV_VertexID
-	VkPipelineVertexInputStateCreateInfo vertexInput = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly
-		= { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	
-	VkPipelineViewportStateCreateInfo viewport = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
-	viewport.viewportCount = 1;
-	viewport.scissorCount = 1;
-	
-	VkPipelineRasterizationStateCreateInfo rasterization
-		= { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
-	rasterization.polygonMode = VK_POLYGON_MODE_FILL;
-	rasterization.cullMode = VK_CULL_MODE_NONE;
-	rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-	rasterization.lineWidth = 1.f;
-	
-	// The window target
-	VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
-	multisample.rasterizationSamples = m_msaaSamples;
-	
-	VkPipelineDepthStencilStateCreateInfo depthStencil = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
-	
-	VkPipelineColorBlendAttachmentState blend = {};
-	blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
-	                       | VK_COLOR_COMPONENT_A_BIT;
-	// Same attachments as the other pipelines, see beginRendering()
-	const VkFormat formats[] = { m_colorFormat, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
-	const VkPipelineColorBlendAttachmentState blends[] = { blend, blend, blend, blend };
-	VkPipelineColorBlendStateCreateInfo colorBlend = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-	colorBlend.attachmentCount = uint32_t(std::size(blends));
-	colorBlend.pAttachments = blends;
-	
-	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	VkPipelineDynamicStateCreateInfo dynamic = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-	dynamic.dynamicStateCount = uint32_t(std::size(dynamicStates));
-	dynamic.pDynamicStates = dynamicStates;
-	
-	VkPipelineRenderingCreateInfoKHR rendering = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR };
-	rendering.colorAttachmentCount = uint32_t(std::size(formats));
-	rendering.pColorAttachmentFormats = formats;
-	rendering.depthAttachmentFormat = m_depthFormat;
-	rendering.stencilAttachmentFormat = m_depthFormat;
-	
-	VkGraphicsPipelineCreateInfo info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
-	info.pNext = &rendering;
-	info.stageCount = uint32_t(std::size(stages));
-	info.pStages = stages;
-	info.pVertexInputState = &vertexInput;
-	info.pInputAssemblyState = &inputAssembly;
-	info.pViewportState = &viewport;
-	info.pRasterizationState = &rasterization;
-	info.pMultisampleState = &multisample;
-	info.pDepthStencilState = &depthStencil;
-	info.pColorBlendState = &colorBlend;
-	info.pDynamicState = &dynamic;
-	info.layout = m_blitPipelineLayout;
-	
-	if(vkCreateGraphicsPipelines(m_device, m_pipelineCache, 1, &info, nullptr, &m_blitPipeline) != VK_SUCCESS) {
-		LogError << "Failed to create the Vulkan blit pipeline";
-		m_blitPipeline = VK_NULL_HANDLE;
-	}
-	
-	return m_blitPipeline;
-}
-
-void VulkanRenderer::composeScene(VkImageView scene) {
-	
-	beginRendering();
-	if(!m_renderingActive) {
-		return;
-	}
-	
-	VkPipeline pipeline = getBlitPipeline();
-	VkDescriptorSet set = pipeline ? allocateDescriptorSet(m_blitSetLayout) : VK_NULL_HANDLE;
-	RingAllocation constants;
-	VkDeviceSize alignment = std::max<VkDeviceSize>(m_properties.limits.minUniformBufferOffsetAlignment, 16);
-	if(!set || !allocate(m_frames[m_frameIndex].constants, sizeof(BlitConstants), alignment, constants)) {
-		return;
-	}
-	BlitConstants blit = { { 0.f, 0.f, 1.f, 1.f } };
-	std::memcpy(constants.data, &blit, sizeof(blit));
-	
-	VkDescriptorBufferInfo buffer = { constants.buffer, 0, sizeof(BlitConstants) };
-	VkDescriptorImageInfo image = { VK_NULL_HANDLE, scene, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-	VkDescriptorImageInfo sampler = {
-		getSampler(TextureStage::WrapClamp, TextureStage::FilterLinear, TextureStage::FilterLinear, false, 0.f),
-		VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED
-	};
-	VkWriteDescriptorSet writes[3];
-	for(VkWriteDescriptorSet & write : writes) {
-		write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		write.dstSet = set;
-		write.descriptorCount = 1;
-	}
-	writes[0].dstBinding = BlitConstantsBinding;
-	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-	writes[0].pBufferInfo = &buffer;
-	writes[1].dstBinding = TextureBinding;
-	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	writes[1].pImageInfo = &image;
-	writes[2].dstBinding = SamplerBinding;
-	writes[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-	writes[2].pImageInfo = &sampler;
-	vkUpdateDescriptorSets(m_device, uint32_t(std::size(writes)), writes, 0, nullptr);
-	
-	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
-	
-	vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-	uint32_t offset = uint32_t(constants.offset);
-	vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, m_blitPipelineLayout, 0, 1, &set, 1, &offset);
-	
-	VkViewport viewport = { 0.f, float(m_size.y), float(m_size.x), -float(m_size.y), 0.f, 1.f };
-	vkCmdSetViewport(commands, 0, 1, &viewport);
-	VkRect2D scissor = { { 0, 0 }, { uint32_t(m_size.x), uint32_t(m_size.y) } };
-	vkCmdSetScissor(commands, 0, 1, &scissor);
-	
-	vkCmdDraw(commands, 3, 1, 0, 0);
-	
-	// The next draw binds its own state
-	invalidateBoundState();
-	
-}
-
 void VulkanRenderer::setPixelLighting(bool enabled) {
 
 	m_pixelLighting = enabled;
@@ -1224,7 +1060,7 @@ VkPipeline VulkanRenderer::getReliefPipeline() {
 	info.pDepthStencilState = &depthStencil;
 	info.pColorBlendState = &colorBlend;
 	info.pDynamicState = &dynamic;
-	info.layout = m_blitPipelineLayout;
+	info.layout = m_blitLayout.pipeline;
 
 	if(vkCreateGraphicsPipelines(m_device, m_pipelineCache, 1, &info, nullptr, &m_reliefPipeline) != VK_SUCCESS) {
 		LogError << "Failed to create the Vulkan relief map pipeline";
@@ -1281,7 +1117,7 @@ void VulkanRenderer::createReliefMap(VkImageView color, const Vec2i & size, VkIm
 	viewInfo.subresourceRange.levelCount = 1;
 	success = success && (vkCreateImageView(m_device, &viewInfo, nullptr, &target) == VK_SUCCESS);
 
-	VkDescriptorSet set = success ? allocateUploadDescriptorSet(m_blitSetLayout) : VK_NULL_HANDLE;
+	VkDescriptorSet set = success ? allocateUploadDescriptorSet(m_blitLayout.set) : VK_NULL_HANDLE;
 	if(!set) {
 		LogError << "Failed to prepare the Vulkan relief map";
 		vkDestroyImageView(m_device, target, nullptr);
@@ -1345,7 +1181,7 @@ void VulkanRenderer::createReliefMap(VkImageView color, const Vec2i & size, VkIm
 
 	vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 	uint32_t offset = 0;
-	vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, m_blitPipelineLayout, 0, 1, &set, 1, &offset);
+	vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, m_blitLayout.pipeline, 0, 1, &set, 1, &offset);
 	VkViewport viewport = { 0.f, float(height), float(width), -float(height), 0.f, 1.f };
 	vkCmdSetViewport(commands, 0, 1, &viewport);
 	VkRect2D scissor = { { 0, 0 }, { width, height } };

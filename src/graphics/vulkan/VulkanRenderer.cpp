@@ -157,9 +157,16 @@ VulkanRenderer::VulkanRenderer()
 	, m_pipelineCache(VK_NULL_HANDLE)
 	, m_blitVertexShader(VK_NULL_HANDLE)
 	, m_blitPixelShader(VK_NULL_HANDLE)
-	, m_blitSetLayout(VK_NULL_HANDLE)
-	, m_blitPipelineLayout(VK_NULL_HANDLE)
-	, m_blitPipeline(VK_NULL_HANDLE)
+	, m_bloomPrefilterShader(VK_NULL_HANDLE)
+	, m_bloomDownsampleShader(VK_NULL_HANDLE)
+	, m_bloomUpsampleShader(VK_NULL_HANDLE)
+	, m_bloomCompositeShader(VK_NULL_HANDLE)
+	, m_gradingShader(VK_NULL_HANDLE)
+	, m_bloomStrength(0.f)
+	, m_bloom(false)
+	, m_bloomFormat(VK_FORMAT_UNDEFINED)
+	, m_bloomSizes()
+	, m_colorGrading(0)
 	, m_reliefPixelShader(VK_NULL_HANDLE)
 	, m_reliefPipeline(VK_NULL_HANDLE)
 	, m_fullRectConstants(VK_NULL_HANDLE)
@@ -222,6 +229,7 @@ VulkanRenderer::~VulkanRenderer() {
 		releaseSizeDependentResources();
 		releaseSwapchain();
 		clearSamplers();
+		releasePostProcessResources();
 		releasePipelineResources();
 
 		for(Frame & frame : m_frames) {
@@ -308,7 +316,7 @@ bool VulkanRenderer::create(SDL_Window * window, int maxMSAALevel) {
 		return false;
 	}
 
-	if(!createSwapchain() || !createPipelineResources()) {
+	if(!createSwapchain() || !createPipelineResources() || !createPostProcessResources()) {
 		return false;
 	}
 
@@ -921,6 +929,21 @@ bool VulkanRenderer::createSceneTargets(const Vec2i & size) {
 		return false;
 	}
 
+	// Bloom chain from half the scene size down
+	if(m_bloom) {
+		for(size_t i = 0; i < BloomLevels; i++) {
+			m_bloomSizes[i] = Vec2i(std::max<s32>(size.x >> (i + 1), 1), std::max<s32>(size.y >> (i + 1), 1));
+			if(!createImageTarget(m_bloomTargets[i], m_bloomFormat,
+			                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+			                      VK_IMAGE_ASPECT_COLOR_BIT, m_bloomSizes[i], VK_SAMPLE_COUNT_1_BIT)) {
+				LogError << "Failed to create " << m_bloomSizes[i].x << "x" << m_bloomSizes[i].y
+				         << " Vulkan bloom target";
+				releaseSceneTargets();
+				return false;
+			}
+		}
+	}
+
 	m_sceneSize = size;
 
 	return true;
@@ -937,6 +960,9 @@ void VulkanRenderer::releaseSceneTargets() {
 	releaseImageTarget(m_sceneColor);
 	releaseImageTarget(m_sceneDepth);
 	releaseImageTarget(m_sceneResolved);
+	for(ImageTarget & target : m_bloomTargets) {
+		releaseImageTarget(target);
+	}
 	m_sceneSize = Vec2i(0);
 
 }
@@ -988,14 +1014,14 @@ void VulkanRenderer::beginScene() {
 		m_effectTime = float(std::fmod(seconds, 20.0 * 3.14159265358979323846));
 	}
 
-	// TODO Phase 2: also for the effects that need the scene targets
-	if(m_sceneScale >= 1.f) {
+	// The scene has its own targets for the render scale and the effects applied after it
+	if(m_sceneScale >= 1.f && !m_bloom && m_colorGrading == 0) {
 		return;
 	}
 
 	Vec2i size(std::max<s32>(s32(float(m_size.x) * m_sceneScale + 0.5f), 1),
 	           std::max<s32>(s32(float(m_size.y) * m_sceneScale + 0.5f), 1));
-	if(size != m_sceneSize && !createSceneTargets(size)) {
+	if((size != m_sceneSize || bool(m_bloomTargets[0].image) != m_bloom) && !createSceneTargets(size)) {
 		return;
 	}
 
@@ -1021,10 +1047,13 @@ void VulkanRenderer::endScene() {
 	invalidateBoundState();
 
 	ImageTarget & scene = m_sceneResolved.image ? m_sceneResolved : m_sceneColor;
-	transition(scene, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	if(m_bloom) {
+		renderBloom(scene);
+	}
 
 	// Upscale the scene to the window
-	composeScene(scene.view);
+	composeScene(scene);
 
 	// The interface is drawn on top of the scene, with its own depth
 	Clear(DepthBuffer);
