@@ -46,10 +46,13 @@ struct VulkanVertexType<SMY_VERTEX3> {
 };
 
 /*!
- * Vertex buffer with a CPU-side shadow copy.
+ * Vertex buffer with a CPU-side shadow copy, drawn from copies in the per-frame ring buffer of the renderer.
  *
  * The shadow copy lets lock() return memory that keeps the previous buffer contents like the other backends.
- * T1.1: the vertices are only kept on the CPU, the GPU buffers are added in T1.4.
+ *
+ * Dynamic and static buffers (the rooms, updated once per frame and drawn once per material) are copied once per
+ * frame, at the first draw after a change. Stream buffers (circular buffers refilled for each draw) copy only the
+ * drawn vertices. Draws recorded before a change keep using the previous copy.
  */
 template <class Vertex>
 class VulkanVertexBuffer final : public VertexBuffer<Vertex> {
@@ -65,6 +68,7 @@ public:
 		, m_renderer(renderer)
 		, m_usage(usage)
 		, m_shadow(capacity)
+		, m_used(0)
 		, m_lockOffset(0)
 		, m_lockCount(0)
 		, m_lockFlags(0)
@@ -113,7 +117,8 @@ public:
 			return;
 		}
 
-		m_renderer->drawBuffer(VulkanVertexType<Vertex>::value, primitive, m_shadow.data() + offset, count);
+		m_renderer->drawBuffer(VulkanVertexType<Vertex>::value, primitive, m_shadow.data(), usedCount(), offset, count,
+		                       frameCopy());
 	}
 
 	void drawIndexed(Renderer::Primitive primitive, size_t count, size_t offset,
@@ -129,21 +134,33 @@ public:
 			return;
 		}
 
-		m_renderer->drawBufferIndexed(VulkanVertexType<Vertex>::value, primitive, m_shadow.data() + offset,
-		                              indices, nbindices);
+		m_renderer->drawBufferIndexed(VulkanVertexType<Vertex>::value, primitive, m_shadow.data(), usedCount(),
+		                              offset, indices, nbindices, frameCopy());
 	}
 
 private:
 
 	void upload(size_t offset, size_t count, BufferFlags flags) {
-		// TODO T1.4 copy static buffers into device-local memory
-		ARX_UNUSED(offset), ARX_UNUSED(count), ARX_UNUSED(flags);
+		ARX_UNUSED(flags);
+		m_used = std::max(m_used, offset + count);
+		m_copy.frame = 0;
+	}
+
+	//! Vertices written so far, the part of the buffer that is copied for the GPU (more if a draw needs them)
+	size_t usedCount() const {
+		return m_used;
+	}
+
+	VulkanRenderer::FrameCopy * frameCopy() const {
+		return (m_usage == Renderer::Stream) ? nullptr : &m_copy;
 	}
 
 	VulkanRenderer * m_renderer;
 	Renderer::BufferUsage m_usage;
 
 	std::vector<Vertex> m_shadow;
+	size_t m_used;
+	mutable VulkanRenderer::FrameCopy m_copy;
 
 	size_t m_lockOffset;
 	size_t m_lockCount;

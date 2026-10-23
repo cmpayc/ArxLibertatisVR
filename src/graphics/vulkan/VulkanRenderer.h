@@ -125,10 +125,26 @@ public:
 
 	int msaaSamples() const { return int(m_msaaSamples); }
 
-	//! Draw vertices of a vertex buffer
-	void drawBuffer(VertexType type, Primitive primitive, const void * vertices, size_t count);
-	void drawBufferIndexed(VertexType type, Primitive primitive, const void * vertices,
-	                       const unsigned short * indices, size_t nindices);
+	//! The copy of a vertex buffer in the memory of the current frame
+	struct FrameCopy {
+		uint64_t frame = 0; //!< 0 if the buffer changed since the copy
+		VkBuffer buffer = VK_NULL_HANDLE;
+		VkDeviceSize offset = 0;
+		size_t count = 0; //!< Copied vertices
+	};
+
+	/*!
+	 * Draw vertices of a vertex buffer
+	 *
+	 * \param vertices The vertices of the buffer
+	 * \param count The number of vertices used in the buffer
+	 * \param copy nullptr to copy only the drawn vertices for this draw (stream buffers), or the copy of the whole
+	 *             buffer which is made once per frame and reused for all draws until the buffer changes
+	 */
+	void drawBuffer(VertexType type, Primitive primitive, const void * vertices, size_t count, size_t first,
+	                size_t drawCount, FrameCopy * copy);
+	void drawBufferIndexed(VertexType type, Primitive primitive, const void * vertices, size_t count,
+	                       size_t baseVertex, const unsigned short * indices, size_t nindices, FrameCopy * copy);
 
 	void onTextureDestroyed(VulkanTexture * texture);
 
@@ -251,6 +267,9 @@ private:
 	glm::mat4x4 screenTransform() const;
 	//! Copy vertices into the ring buffer of the frame and bind them
 	bool bindVertices(VertexType type, const void * vertices, size_t count);
+	//! Bind the copy of a vertex buffer in the current frame, copying it first if needed
+	bool bindFrameCopy(VertexType type, const void * vertices, size_t count, FrameCopy & copy);
+	void bindVertexBuffer(VkBuffer buffer, VkDeviceSize offset);
 	bool bindIndices(const unsigned short * indices, size_t count);
 	//! Forget the state bound in the command buffer of the frame
 	void invalidateBoundState();
@@ -310,6 +329,7 @@ private:
 	Vec2i m_size;
 
 	Frame m_frames[FramesInFlight];
+	uint64_t m_frameSerial; //!< Unique number of the frame being recorded, see FrameCopy
 	UploadContext m_upload;
 	std::unordered_map<uint64_t, VkSampler> m_samplers;
 	size_t m_frameIndex;

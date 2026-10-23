@@ -128,6 +128,7 @@ VulkanRenderer::VulkanRenderer()
 	, m_depthFormat(VK_FORMAT_UNDEFINED)
 	, m_msaaSamples(VK_SAMPLE_COUNT_1_BIT)
 	, m_size(0)
+	, m_frameSerial(0)
 	, m_frameIndex(0)
 	, m_frameActive(false)
 	, m_renderingActive(false)
@@ -893,6 +894,9 @@ void VulkanRenderer::beginFrame() {
 
 	invalidateBoundState();
 
+	// Copies of vertex buffers made in earlier frames are gone with the ring buffer contents
+	m_frameSerial++;
+
 	m_frameActive = true;
 
 }
@@ -1570,13 +1574,37 @@ bool VulkanRenderer::bindVertices(VertexType type, const void * vertices, size_t
 	}
 	std::memcpy(allocation.data, vertices, count * stride);
 
-	if(allocation.buffer != m_boundVertexBuffer || allocation.offset != m_boundVertexOffset) {
-		vkCmdBindVertexBuffers(m_frames[m_frameIndex].commands, 0, 1, &allocation.buffer, &allocation.offset);
-		m_boundVertexBuffer = allocation.buffer;
-		m_boundVertexOffset = allocation.offset;
-	}
+	bindVertexBuffer(allocation.buffer, allocation.offset);
 
 	return true;
+}
+
+bool VulkanRenderer::bindFrameCopy(VertexType type, const void * vertices, size_t count, FrameCopy & copy) {
+
+	if(copy.frame != m_frameSerial || !copy.buffer || copy.count < count) {
+		size_t stride = vertexStride(type);
+		RingAllocation allocation;
+		if(!allocate(m_frames[m_frameIndex].vertices, VkDeviceSize(count * stride), 16, allocation)) {
+			return false;
+		}
+		std::memcpy(allocation.data, vertices, count * stride);
+		copy.frame = m_frameSerial;
+		copy.buffer = allocation.buffer;
+		copy.offset = allocation.offset;
+		copy.count = count;
+	}
+
+	bindVertexBuffer(copy.buffer, copy.offset);
+
+	return true;
+}
+
+void VulkanRenderer::bindVertexBuffer(VkBuffer buffer, VkDeviceSize offset) {
+	if(buffer != m_boundVertexBuffer || offset != m_boundVertexOffset) {
+		vkCmdBindVertexBuffers(m_frames[m_frameIndex].commands, 0, 1, &buffer, &offset);
+		m_boundVertexBuffer = buffer;
+		m_boundVertexOffset = offset;
+	}
 }
 
 bool VulkanRenderer::bindIndices(const unsigned short * indices, size_t count) {
@@ -1597,35 +1625,56 @@ bool VulkanRenderer::bindIndices(const unsigned short * indices, size_t count) {
 	return true;
 }
 
-void VulkanRenderer::drawBuffer(VertexType type, Primitive primitive, const void * vertices, size_t count) {
+void VulkanRenderer::drawBuffer(VertexType type, Primitive primitive, const void * vertices, size_t count,
+                                size_t first, size_t drawCount, FrameCopy * copy) {
 
-	if(count == 0 || !prepareDraw(type, primitive)) {
+	if(drawCount == 0 || !prepareDraw(type, primitive)) {
 		return;
 	}
 
-	// TODO T1.4 keep static vertex buffers in device-local memory
-	if(!bindVertices(type, vertices, count)) {
-		return;
+	if(copy) {
+		if(!bindFrameCopy(type, vertices, std::max(count, first + drawCount), *copy)) {
+			return;
+		}
+	} else {
+		const u8 * data = static_cast<const u8 *>(vertices) + first * vertexStride(type);
+		if(!bindVertices(type, data, drawCount)) {
+			return;
+		}
+		first = 0;
 	}
 
-	vkCmdDraw(m_frames[m_frameIndex].commands, uint32_t(count), 1, 0, 0);
+	vkCmdDraw(m_frames[m_frameIndex].commands, uint32_t(drawCount), 1, uint32_t(first), 0);
 
 }
 
-void VulkanRenderer::drawBufferIndexed(VertexType type, Primitive primitive, const void * vertices,
-                                       const unsigned short * indices, size_t nindices) {
+void VulkanRenderer::drawBufferIndexed(VertexType type, Primitive primitive, const void * vertices, size_t count,
+                                       size_t baseVertex, const unsigned short * indices, size_t nindices,
+                                       FrameCopy * copy) {
 
 	if(nindices == 0 || !prepareDraw(type, primitive)) {
 		return;
 	}
 
-	// TODO T1.4 keep static vertex buffers in device-local memory instead of copying the used vertices
-	size_t count = size_t(*std::max_element(indices, indices + nindices)) + 1;
-	if(!bindVertices(type, vertices, count) || !bindIndices(indices, nindices)) {
+	size_t used = size_t(*std::max_element(indices, indices + nindices)) + 1;
+	if(copy) {
+		if(!bindFrameCopy(type, vertices, std::max(count, baseVertex + used), *copy)) {
+			return;
+		}
+	} else {
+		// Only copy the vertices used by the indices
+		const u8 * data = static_cast<const u8 *>(vertices) + baseVertex * vertexStride(type);
+		if(!bindVertices(type, data, used)) {
+			return;
+		}
+		baseVertex = 0;
+	}
+
+	if(!bindIndices(indices, nindices)) {
 		return;
 	}
 
-	vkCmdDrawIndexed(m_frames[m_frameIndex].commands, uint32_t(nindices), 1, 0, 0, 0);
+	vkCmdDrawIndexed(m_frames[m_frameIndex].commands, uint32_t(nindices), 1, 0, int32_t(baseVertex), 0);
 
 }
 
@@ -1636,11 +1685,15 @@ void VulkanRenderer::drawIndexed(Primitive primitive, const TexturedVertex * ver
 		return;
 	}
 
-	if(!bindVertices(VertexTL, vertices, nvertices) || !bindIndices(indices, nindices)) {
+	// Models pass all their vertices with the indices of one texture: only copy the indexed range
+	auto [first, last] = std::minmax_element(indices, indices + nindices);
+	size_t begin = *first;
+	size_t end = std::min(size_t(*last) + 1, nvertices);
+	if(begin >= end || !bindVertices(VertexTL, vertices + begin, end - begin) || !bindIndices(indices, nindices)) {
 		return;
 	}
 
-	vkCmdDrawIndexed(m_frames[m_frameIndex].commands, uint32_t(nindices), 1, 0, 0, 0);
+	vkCmdDrawIndexed(m_frames[m_frameIndex].commands, uint32_t(nindices), 1, 0, -int32_t(begin), 0);
 
 }
 
