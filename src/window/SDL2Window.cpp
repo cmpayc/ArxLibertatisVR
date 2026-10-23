@@ -96,8 +96,8 @@ SDL2Window::SDL2Window()
 	#if ARX_HAVE_VULKAN
 	bool vulkan = (config.video.renderer == "Vulkan");
 	#if ARX_HAVE_OPENXR
-	// TODO VR with Vulkan (VR_STANDALONE.md phase 3), the VR runtime then uses OpenGL, see VRSystem::initInstance()
-	if(vulkan && g_vr) {
+	// The VR runtime may not support Vulkan, see VRSystem::initInstance()
+	if(vulkan && g_vr && !g_vr->usesVulkan()) {
 		LogInfo << "Using OpenGL instead of Vulkan for VR";
 		vulkan = false;
 	}

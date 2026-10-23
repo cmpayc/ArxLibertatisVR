@@ -1429,6 +1429,11 @@ if(ARX_HAVE_OPENXR)
 		list(APPEND GRAPHICS_SOURCES ${VR_D3D11_SOURCES})
 		set_source_files_properties(${VR_D3D11_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
 	endif()
+	if(ARX_HAVE_VULKAN)
+		set(VR_VULKAN_SOURCES src/vr/VRGraphicsVulkan.cpp)
+		list(APPEND GRAPHICS_SOURCES ${VR_VULKAN_SOURCES})
+		set_source_files_properties(${VR_VULKAN_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
+	endif()
 endif()
 
 # Windowing / input

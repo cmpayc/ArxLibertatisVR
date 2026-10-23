@@ -77,6 +77,8 @@ public:
 
 	//! \return true if the session uses Direct3D 11, else OpenGL (the renderer must match)
 	[[nodiscard]] bool usesDirect3D11() const;
+	//! The runtime creates the device of the Vulkan renderer, see VRGraphicsVulkan
+	[[nodiscard]] bool usesVulkan() const;
 
 	//! Create the session for the renderer: its Direct3D 11 device, or the OpenGL context current on this thread
 	bool createSession();

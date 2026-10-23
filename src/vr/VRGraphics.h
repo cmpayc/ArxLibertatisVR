@@ -56,6 +56,7 @@ public:
 	//! The OpenXR instance extension for the graphics API
 	[[nodiscard]] virtual const char * getExtension() const = 0;
 	[[nodiscard]] virtual bool isDirect3D11() const = 0;
+	[[nodiscard]] virtual bool isVulkan() const { return false; }
 	
 	//! Check the requirements of the runtime once the instance exists, before the renderer is created
 	virtual bool checkRequirements(XrInstance instance, XrSystemId system) = 0;
@@ -109,6 +110,9 @@ bool checkXrResult(XrInstance instance, XrResult result, const char * call);
 std::unique_ptr<VRGraphics> createVRGraphicsOpenGL();
 #if ARX_HAVE_D3D11
 std::unique_ptr<VRGraphics> createVRGraphicsD3D11();
+#endif
+#if ARX_HAVE_VULKAN
+std::unique_ptr<VRGraphics> createVRGraphicsVulkan();
 #endif
 
 #endif // ARX_VR_VRGRAPHICS_H

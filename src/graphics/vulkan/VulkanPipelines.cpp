@@ -178,12 +178,14 @@ struct PipelineState {
 	bool depthBias = false;
 	bool wireframe = false;
 	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+	bool premultipliedAlpha = false; //!< The VR interface layer, see setPremultipliedAlphaOutput()
 
 	uint64_t key() const {
 		return uint64_t(vertexType) | (uint64_t(topology) << 2) | (uint64_t(blendSrc) << 5)
 		       | (uint64_t(blendDst) << 9) | (uint64_t(alphaToCoverage) << 13) | (uint64_t(sampleShading) << 14)
 		       | (uint64_t(cull) << 15) | (uint64_t(depthTest) << 16) | (uint64_t(depthWrite) << 17)
-		       | (uint64_t(depthBias) << 18) | (uint64_t(wireframe) << 19) | (uint64_t(samples) << 20);
+		       | (uint64_t(depthBias) << 18) | (uint64_t(wireframe) << 19) | (uint64_t(samples) << 20)
+		       | (uint64_t(premultipliedAlpha) << 27);
 	}
 
 	static PipelineState fromKey(uint64_t key) {
@@ -200,6 +202,7 @@ struct PipelineState {
 		state.depthBias = ((key >> 18) & 1) != 0;
 		state.wireframe = ((key >> 19) & 1) != 0;
 		state.samples = VkSampleCountFlagBits((key >> 20) & 127);
+		state.premultipliedAlpha = ((key >> 27) & 1) != 0;
 		return state;
 	}
 
@@ -515,6 +518,17 @@ VkPipeline VulkanRenderer::getPipeline(uint64_t key) {
 	blend.alphaBlendOp = VK_BLEND_OP_ADD;
 	blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
 	                       | VK_COLOR_COMPONENT_A_BIT;
+	if(state.premultipliedAlpha) {
+		/*
+		 * Produce a premultiplied alpha image that can be composited over another one, like the other backends:
+		 * the color channels are blended as usual while the alpha channel accumulates coverage.
+		 * Additive and multiplicative blending do not add coverage.
+		 */
+		bool coverage = (state.blendDst != BlendOne && state.blendSrc != BlendZero);
+		blend.blendEnable = VK_TRUE;
+		blend.srcAlphaBlendFactor = coverage ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ZERO;
+		blend.dstAlphaBlendFactor = coverage ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
+	}
 
 	// The scene targets written by psMain (SV_Target1-3) don't exist yet, see beginRendering()
 	const VkFormat formats[] = { m_colorFormat, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
@@ -645,6 +659,7 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 	state.depthBias = (m_state.getDepthOffset() != 0);
 	state.wireframe = m_wireframe;
 	state.samples = m_msaaSamples;
+	state.premultipliedAlpha = m_premultipliedAlpha && !m_inScene;
 
 	VkPipeline pipeline = getPipeline(state.key());
 	if(!pipeline) {
@@ -659,8 +674,8 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 
 	if(!m_dynamicStateValid) {
 
-		// The game uses window pixels, the scaled 3D scene is smaller
-		Vec2i size = m_inScene ? m_sceneSize : m_size;
+		// The game uses window pixels, the scaled 3D scene is smaller (see drawViews for the stereo scene)
+		Vec2i size = targetSize();
 		Vec2f scale = targetScale();
 		Rect bounds(size.x, size.y);
 
@@ -674,7 +689,8 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 		viewport.maxDepth = 1.f;
 		vkCmdSetViewport(commands, 0, 1, &viewport);
 
-		Rect scissor = m_scissor.isValid() ? (toTargetRect(m_scissor) & bounds) : bounds;
+		// Screen-space scissor rectangles do not map to the stereo views
+		Rect scissor = (m_scissor.isValid() && !stereoActive()) ? (toTargetRect(m_scissor) & bounds) : bounds;
 		VkRect2D rect = { { 0, 0 }, { 0, 0 } };
 		if(scissor.isValid() && scissor.width() > 0 && scissor.height() > 0) {
 			rect = { { scissor.left, scissor.top }, { uint32_t(scissor.width()), uint32_t(scissor.height()) } };
@@ -697,36 +713,60 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 	VkDeviceSize alignment = std::max<VkDeviceSize>(m_properties.limits.minUniformBufferOffsetAlignment, 16);
 
 	{
-		VSConstants constants;
-		glm::mat4x4 transform = (type == VertexTL) ? screenTransform() : m_projection * m_view;
-		std::memcpy(constants.transform, &transform, sizeof(constants.transform));
-		std::memcpy(constants.prevTransform, &transform, sizeof(constants.prevTransform));
-		std::fill(std::begin(constants.jitter), std::end(constants.jitter), 0.f);
-		// The view matrix is a rotation and translation
-		Vec3f camera = -(glm::transpose(glm::mat3(m_view)) * Vec3f(m_view[3]));
-		constants.camera[0] = camera.x;
-		constants.camera[1] = camera.y;
-		constants.camera[2] = camera.z;
-		constants.camera[3] = 0.f;
-		// Pre-transformed vertices of models in the 3D scene go back to world space with the scene camera, for the
-		// per-pixel highlights. World coordinates are large, so this is computed in double precision.
+		// Pre-transformed vertices of models in the 3D scene go back to world space with the scene camera (the
+		// center camera in VR, which projected them), for the per-pixel highlights. World coordinates are large,
+		// so this is computed in double precision.
 		glm::mat4x4 modelToWorld(1.f);
 		if(type == VertexTL && m_drawingScene) {
 			modelToWorld = glm::mat4x4(glm::inverse(glm::dmat4(m_projection) * glm::dmat4(m_view))
 			                           * glm::dmat4(screenTransform()));
 		}
-		std::memcpy(constants.modelToWorld, &modelToWorld, sizeof(constants.modelToWorld));
-		glm::mat4x4 worldToClip = m_projection * m_view;
-		std::memcpy(constants.worldToClip, &worldToClip, sizeof(constants.worldToClip));
 
-		if(!m_vsConstants.buffer || m_vsConstantsData.size() != sizeof(constants)
-		   || std::memcmp(m_vsConstantsData.data(), &constants, sizeof(constants)) != 0) {
-			if(!allocate(m_frames[m_frameIndex].constants, sizeof(constants), alignment, m_vsConstants)) {
+		auto fill = [&](VSConstants & constants, const glm::mat4x4 & transform, const glm::mat4x4 & view,
+		                const glm::mat4x4 & projection) {
+			std::memcpy(constants.transform, &transform, sizeof(constants.transform));
+			std::memcpy(constants.prevTransform, &transform, sizeof(constants.prevTransform));
+			std::fill(std::begin(constants.jitter), std::end(constants.jitter), 0.f);
+			// The view matrix is a rotation and translation
+			Vec3f camera = -(glm::transpose(glm::mat3(view)) * Vec3f(view[3]));
+			constants.camera[0] = camera.x;
+			constants.camera[1] = camera.y;
+			constants.camera[2] = camera.z;
+			constants.camera[3] = 0.f;
+			std::memcpy(constants.modelToWorld, &modelToWorld, sizeof(constants.modelToWorld));
+			glm::mat4x4 worldToClip = projection * view;
+			std::memcpy(constants.worldToClip, &worldToClip, sizeof(constants.worldToClip));
+		};
+
+		// The eyes of the stereo scene have their own constants, both in one allocation, see drawViews()
+		const size_t MaxViews = 2; // See m_stereoVSOffsets
+		size_t views = stereoActive() ? std::min(m_stereoViews.size(), MaxViews) : 1;
+		VSConstants constants[MaxViews];
+		if(stereoActive()) {
+			for(size_t eye = 0; eye < views; eye++) {
+				const StereoView & view = m_stereoViews[eye];
+				// Pre-transformed vertices are re-projected from the center camera into the eye
+				glm::mat4x4 transform = (type == VertexTL) ? view.screenToClip : view.projection * view.view;
+				fill(constants[eye], transform, view.view, view.projection);
+			}
+		} else {
+			glm::mat4x4 transform = (type == VertexTL) ? screenTransform() : m_projection * m_view;
+			fill(constants[0], transform, m_view, m_projection);
+		}
+		size_t size = views * sizeof(VSConstants);
+
+		if(!m_vsConstants.buffer || m_vsConstantsData.size() != size
+		   || std::memcmp(m_vsConstantsData.data(), constants, size) != 0) {
+			VkDeviceSize stride = (sizeof(VSConstants) + alignment - 1) / alignment * alignment;
+			if(!allocate(m_frames[m_frameIndex].constants, stride * views, alignment, m_vsConstants)) {
 				return false;
 			}
-			std::memcpy(m_vsConstants.data, &constants, sizeof(constants));
-			m_vsConstantsData.assign(reinterpret_cast<const u8 *>(&constants),
-			                         reinterpret_cast<const u8 *>(&constants) + sizeof(constants));
+			for(size_t eye = 0; eye < views; eye++) {
+				std::memcpy(static_cast<u8 *>(m_vsConstants.data) + eye * stride, &constants[eye], sizeof(VSConstants));
+				m_stereoVSOffsets[eye] = uint32_t(m_vsConstants.offset + eye * stride);
+			}
+			m_vsConstantsData.assign(reinterpret_cast<const u8 *>(constants),
+			                         reinterpret_cast<const u8 *>(constants) + size);
 		}
 	}
 

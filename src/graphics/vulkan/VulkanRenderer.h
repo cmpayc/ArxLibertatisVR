@@ -37,6 +37,7 @@
 
 #include "graphics/Color.h"
 #include "graphics/Renderer.h"
+#include "graphics/StereoView.h"
 #include "graphics/texture/TextureStage.h"
 #include "graphics/vulkan/VulkanTexture.h"
 #include "math/Rectangle.h"
@@ -44,6 +45,7 @@
 
 struct SDL_Window;
 class VulkanTextureStage;
+namespace vulkan { class ExternalDevice; }
 
 /*!
  * Vulkan renderer backend.
@@ -218,6 +220,69 @@ public:
 	 */
 	void deferRelease(std::function<void()> release);
 
+	// VR, see VRGraphicsVulkan.cpp
+
+	VkInstance instance() const { return m_instance; }
+	VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
+	uint32_t queueFamily() const { return m_queueFamily; }
+	VkFormat colorFormat() const { return m_colorFormat; }
+	//! The instance and device were created by the VR runtime, see vulkan::setExternalDevice()
+	bool hasExternalDevice() const { return m_hasExternalDevice; }
+
+	/*!
+	 * Replicate every draw call of the 3D scene into the views of a stereo target, like the Direct3D 11 backend.
+	 * The scene is rendered with the eyes side by side, it stays bound after \ref endScene() for the overlays drawn
+	 * in the world (pointer, hand menus) until \ref finishStereoScene().
+	 *
+	 * \param views The views to draw into, or an empty list to disable
+	 * \param size  The size of the stereo output with both eyes side by side
+	 */
+	void setStereoViews(std::vector<StereoView> views, const Vec2i & size);
+
+	//! Apply the effects to the stereo scene and draw it into the stereo output, false if no scene was rendered
+	bool finishStereoScene();
+	//! Copy one eye of the stereo output into an image of the VR runtime (in the color attachment layout)
+	void copyStereoEyeToImage(size_t eye, VkImage image);
+
+	/*!
+	 * The interface layer: everything except the 3D scene is rendered into this target of the window size instead
+	 * of the window while it is active
+	 */
+	bool createOutputTarget(const Vec2i & size);
+	void destroyOutputTarget();
+	bool hasOutputTarget() const { return m_outputColor.image != VK_NULL_HANDLE; }
+	void setOutputTargetActive(bool active);
+	void copyOutputToImage(VkImage image);
+	bool copyOutputToTexture(Texture * texture, const Rect & area);
+	//! Copy the window into an image of the VR runtime, for frames drawn directly to the window
+	void copyWindowToImage(VkImage image);
+
+	//! Write premultiplied alpha coverage to the alpha channel, like the Direct3D 11 backend
+	void setPremultipliedAlphaOutput(bool enable);
+
+	struct OverlayVertex {
+		float position[4]; //!< Clip space
+		float uv[2];
+	};
+
+	enum OverlaySource {
+		StereoOutput, //!< Both eyes side by side, see finishStereoScene()
+		OutputTarget  //!< The interface layer, see createOutputTarget()
+	};
+
+	/*!
+	 * Draw a textured triangle strip into the window, for the VR desktop view
+	 *
+	 * \param blend Blend the premultiplied alpha texture over the window instead of replacing it
+	 */
+	void drawOverlay(OverlaySource source, const OverlayVertex * vertices, size_t count, bool blend);
+
+	//! Clear the window, also while the interface layer is active
+	void clearWindow();
+
+	//! Submit the commands recorded so far, images of the VR runtime must be written before they are released
+	void submitCommands();
+
 private:
 
 	struct ImageTarget {
@@ -341,7 +406,14 @@ private:
 		uint32_t constantsBinding = 0; //!< The constant buffer of the pixel shader, 0 if none
 		bool sceneMask = false; //!< The pixel shader reads the scene stencil (t4)
 	};
-	typedef std::tuple<VkShaderModule, VkFormat, bool> PostPipelineKey;
+	//! Pixel shader, target format, additive blending, overlay (vsOverlay triangle strip instead of vsBlit)
+	typedef std::tuple<VkShaderModule, VkFormat, bool, bool> PostPipelineKey;
+
+	//! A part of a full-screen pass: one eye of the stereo scene, or everything
+	struct PostRegion {
+		Vec4f rect; //!< In the source and target textures: offset and size in [0, 1]
+		const void * constants;
+	};
 
 	bool createPostProcessResources();
 	void releasePostProcessResources();
@@ -349,17 +421,34 @@ private:
 	void releasePostLayout(PostLayout & layout);
 	//! \param format VK_FORMAT_UNDEFINED for the window target
 	VkPipeline getPostPipeline(VkShaderModule pixelShader, const char * entry, const PostLayout & layout,
-	                           VkFormat format, bool additive);
-	//! Bind the pipeline, descriptors, viewport and scissor of a full-screen pass in the current rendering
-	bool bindPostPass(VkPipeline pipeline, const PostLayout & layout, VkImageView source, const Vec4f & sourceRect,
-	                  const void * constants, size_t constantsSize, const Vec2i & targetSize);
-	//! A full-screen pass from one image into another
+	                           VkFormat format, bool additive, bool overlay = false);
+	/*!
+	 * Bind the pipeline and descriptors of a full-screen pass in the current rendering and draw it into a part of
+	 * the target
+	 */
+	bool drawPostPass(VkPipeline pipeline, const PostLayout & layout, VkImageView source, const Vec4f & sourceRect,
+	                  const void * constants, size_t constantsSize, const Vec2i & targetSize,
+	                  const Vec4f & targetRect);
+	//! A full-screen pass from one image into another, for each region
 	void postPass(ImageTarget & target, VkFormat format, const Vec2i & targetSize, ImageTarget & source,
-	              VkShaderModule shader, const char * entry, const PostLayout & layout, const void * constants,
-	              size_t constantsSize, bool additive);
+	              VkShaderModule shader, const char * entry, const PostLayout & layout,
+	              const std::vector<PostRegion> & regions, size_t constantsSize, bool additive);
+	//! The views of the scene target: both eyes of the stereo scene, or the whole target
+	std::vector<Vec4f> sceneRegions() const;
 	void renderBloom(ImageTarget & scene);
-	//! Draw the scene into the window target, with the color grading
-	void composeScene(ImageTarget & scene);
+	//! Draw the scene into a target with the color grading, the window target for VK_FORMAT_UNDEFINED
+	void composeScene(ImageTarget & scene, ImageTarget * target, VkFormat format, const Vec2i & size,
+	                  bool vignette);
+
+	//! \return true while the 3D scene is drawn into the stereo target
+	bool stereoActive() const { return m_inScene && !m_stereoViews.empty(); }
+	//! The size of the target that is rendered into
+	Vec2i targetSize() const { return m_inScene ? m_sceneSize : m_outputActive ? m_outputSize : m_size; }
+	//! Record a draw once, or once for each eye of the stereo scene with its constants and viewport
+	template <class DrawFunction>
+	void drawViews(const DrawFunction & draw);
+	//! Copy a part of an image into an image of the VR runtime (in the color attachment layout)
+	void copyToRuntimeImage(ImageTarget & source, const Rect & area, VkImage image);
 	VkPipeline getReliefPipeline();
 	VkDescriptorSet allocateUploadDescriptorSet(VkDescriptorSetLayout layout);
 	//! Generate or release the relief maps of all textures after the setting changed
@@ -382,6 +471,8 @@ private:
 	std::chrono::steady_clock::time_point m_snapshotTime;
 
 	VkInstance m_instance;
+	vulkan::ExternalDevice * m_externalDevice; //!< Only while creating the device
+	bool m_hasExternalDevice;
 	VkDebugUtilsMessengerEXT m_debugMessenger;
 	VkSurfaceKHR m_surface;
 	VkPhysicalDevice m_physicalDevice;
@@ -465,6 +556,20 @@ private:
 	VkShaderModule m_bloomCompositeShader;
 	VkShaderModule m_gradingShader;
 	ImageTarget m_noSceneMask; //!< Bound as the scene stencil: no pixel is excluded from the effects
+	VkShaderModule m_overlayVertexShader;
+
+	// VR
+	std::vector<StereoView> m_stereoViews;
+	Vec2i m_stereoSize; //!< Both eyes side by side
+	Vec2i m_stereoEyeSize; //!< One eye in the scene target, with the render scale
+	ImageTarget m_stereoOutput;
+	uint32_t m_stereoVSOffsets[2]; //!< The VS constants of each eye, see drawViews()
+	Vec2i m_outputSize;
+	ImageTarget m_outputColor;
+	ImageTarget m_outputDepth;
+	ImageTarget m_outputResolved; //!< Only with MSAA, resolved at the end of rendering
+	bool m_outputActive;
+	bool m_premultipliedAlpha;
 
 	// Bloom and color grading of the 3D scene
 	static constexpr size_t BloomLevels = 6;

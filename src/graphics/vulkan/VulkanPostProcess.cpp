@@ -17,11 +17,13 @@
  * along with Arx Libertatis.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-// Effects of the 3D scene after it was rendered: bloom, color grading and the copy into the window target
+// Effects of the 3D scene after it was rendered (bloom, color grading), the copy into the window or the VR stereo
+// output, and the overlays of the VR desktop view
 
 #include "graphics/vulkan/VulkanRenderer.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <iterator>
 #include <vector>
@@ -34,6 +36,7 @@
 #include "psBloomUpsample.h"
 #include "psBloomComposite.h"
 #include "psColorGrading.h"
+#include "vsOverlay.h"
 
 namespace {
 
@@ -93,6 +96,8 @@ const ColorGradingPreset ColorGradingPresets[] = {
 // Bloom settings: brightness where the bloom starts, width of the soft transition
 const float BloomThreshold = 0.45f;
 const float BloomKnee = 0.2f;
+
+const Vec4f FullRect(0.f, 0.f, 1.f, 1.f);
 
 VkShaderModule createModule(VkDevice device, const unsigned char * code, size_t size, const char * name) {
 	std::vector<uint32_t> words((size + 3) / 4);
@@ -168,6 +173,7 @@ bool VulkanRenderer::createPostProcessResources() {
 	m_bloomCompositeShader = createModule(m_device, spirv_psBloomComposite, sizeof(spirv_psBloomComposite),
 	                                      "psBloomComposite");
 	m_gradingShader = createModule(m_device, spirv_psColorGrading, sizeof(spirv_psColorGrading), "psColorGrading");
+	m_overlayVertexShader = createModule(m_device, spirv_vsOverlay, sizeof(spirv_vsOverlay), "vsOverlay");
 
 	if(!createPostLayout(m_blitLayout, 0, false)
 	   || !createPostLayout(m_bloomPrefilterLayout, BloomConstantsBinding, true)
@@ -238,19 +244,21 @@ void VulkanRenderer::releasePostProcessResources() {
 	releasePostLayout(m_gradingLayout);
 
 	for(VkShaderModule * module : { &m_bloomPrefilterShader, &m_bloomDownsampleShader, &m_bloomUpsampleShader,
-	                                &m_bloomCompositeShader, &m_gradingShader }) {
+	                                &m_bloomCompositeShader, &m_gradingShader, &m_overlayVertexShader }) {
 		vkDestroyShaderModule(m_device, *module, nullptr);
 		*module = VK_NULL_HANDLE;
 	}
 
 	releaseImageTarget(m_noSceneMask);
+	releaseImageTarget(m_stereoOutput);
+	destroyOutputTarget();
 
 }
 
 VkPipeline VulkanRenderer::getPostPipeline(VkShaderModule pixelShader, const char * entry, const PostLayout & layout,
-                                           VkFormat format, bool additive) {
+                                           VkFormat format, bool additive, bool overlay) {
 
-	PostPipelineKey key(pixelShader, format, additive);
+	PostPipelineKey key(pixelShader, format, additive, overlay);
 	auto it = m_postPipelines.find(key);
 	if(it != m_postPipelines.end()) {
 		return it->second;
@@ -261,17 +269,28 @@ VkPipeline VulkanRenderer::getPostPipeline(VkShaderModule pixelShader, const cha
 		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO }
 	};
 	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-	stages[0].module = m_blitVertexShader;
-	stages[0].pName = "vsBlit";
+	stages[0].module = overlay ? m_overlayVertexShader : m_blitVertexShader;
+	stages[0].pName = overlay ? "vsOverlay" : "vsBlit";
 	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
 	stages[1].module = pixelShader;
 	stages[1].pName = entry;
 
-	// A full-screen triangle from SV_VertexID
+	// A full-screen triangle from SV_VertexID, or a triangle strip with clip space positions (OverlayVertex)
+	VkVertexInputBindingDescription binding = { 0, uint32_t(sizeof(OverlayVertex)), VK_VERTEX_INPUT_RATE_VERTEX };
+	const VkVertexInputAttributeDescription attributes[] = {
+		{ 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, uint32_t(offsetof(OverlayVertex, position)) },
+		{ 1, 0, VK_FORMAT_R32G32_SFLOAT, uint32_t(offsetof(OverlayVertex, uv)) },
+	};
 	VkPipelineVertexInputStateCreateInfo vertexInput = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+	if(overlay) {
+		vertexInput.vertexBindingDescriptionCount = 1;
+		vertexInput.pVertexBindingDescriptions = &binding;
+		vertexInput.vertexAttributeDescriptionCount = uint32_t(std::size(attributes));
+		vertexInput.pVertexAttributeDescriptions = attributes;
+	}
 	VkPipelineInputAssemblyStateCreateInfo inputAssembly
 		= { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	inputAssembly.topology = overlay ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 	VkPipelineViewportStateCreateInfo viewport = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
 	viewport.viewportCount = 1;
 	viewport.scissorCount = 1;
@@ -290,7 +309,9 @@ VkPipeline VulkanRenderer::getPostPipeline(VkShaderModule pixelShader, const cha
 	VkPipelineColorBlendAttachmentState blend = {};
 	blend.blendEnable = additive ? VK_TRUE : VK_FALSE;
 	blend.srcColorBlendFactor = blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-	blend.dstColorBlendFactor = blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	// Overlays blend premultiplied alpha images over the window, the effects add up
+	VkBlendFactor destination = overlay ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ONE;
+	blend.dstColorBlendFactor = blend.dstAlphaBlendFactor = destination;
 	blend.colorBlendOp = blend.alphaBlendOp = VK_BLEND_OP_ADD;
 	blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
 	                       | VK_COLOR_COMPONENT_A_BIT;
@@ -341,9 +362,9 @@ VkPipeline VulkanRenderer::getPostPipeline(VkShaderModule pixelShader, const cha
 	return pipeline;
 }
 
-bool VulkanRenderer::bindPostPass(VkPipeline pipeline, const PostLayout & layout, VkImageView source,
+bool VulkanRenderer::drawPostPass(VkPipeline pipeline, const PostLayout & layout, VkImageView source,
                                   const Vec4f & sourceRect, const void * constants, size_t constantsSize,
-                                  const Vec2i & targetSize) {
+                                  const Vec2i & targetSize, const Vec4f & targetRect) {
 
 	VkDeviceSize alignment = std::max<VkDeviceSize>(m_properties.limits.minUniformBufferOffsetAlignment, 16);
 
@@ -402,9 +423,13 @@ bool VulkanRenderer::bindPostPass(VkPipeline pipeline, const PostLayout & layout
 	                        layout.constantsBinding ? 2 : 1, offsets);
 
 	// Negative height: the y axis points up in clip space like in Direct3D
-	VkViewport viewport = { 0.f, float(targetSize.y), float(targetSize.x), -float(targetSize.y), 0.f, 1.f };
+	float x = targetRect.x * float(targetSize.x);
+	float y = targetRect.y * float(targetSize.y);
+	float width = targetRect.z * float(targetSize.x);
+	float height = targetRect.w * float(targetSize.y);
+	VkViewport viewport = { x, y + height, width, -height, 0.f, 1.f };
 	vkCmdSetViewport(commands, 0, 1, &viewport);
-	VkRect2D scissor = { { 0, 0 }, { uint32_t(targetSize.x), uint32_t(targetSize.y) } };
+	VkRect2D scissor = { { s32(x + 0.5f), s32(y + 0.5f) }, { uint32_t(width + 0.5f), uint32_t(height + 0.5f) } };
 	vkCmdSetScissor(commands, 0, 1, &scissor);
 
 	return true;
@@ -412,7 +437,7 @@ bool VulkanRenderer::bindPostPass(VkPipeline pipeline, const PostLayout & layout
 
 void VulkanRenderer::postPass(ImageTarget & target, VkFormat format, const Vec2i & targetSize, ImageTarget & source,
                               VkShaderModule shader, const char * entry, const PostLayout & layout,
-                              const void * constants, size_t constantsSize, bool additive) {
+                              const std::vector<PostRegion> & regions, size_t constantsSize, bool additive) {
 
 	endRendering();
 
@@ -434,12 +459,30 @@ void VulkanRenderer::postPass(ImageTarget & target, VkFormat format, const Vec2i
 	m_cmdBeginRendering(commands, &rendering);
 
 	VkPipeline pipeline = getPostPipeline(shader, entry, layout, format, additive);
-	if(bindPostPass(pipeline, layout, source.view, Vec4f(0.f, 0.f, 1.f, 1.f), constants, constantsSize, targetSize)) {
-		vkCmdDraw(commands, 3, 1, 0, 0);
+	for(const PostRegion & region : regions) {
+		if(drawPostPass(pipeline, layout, source.view, region.rect, region.constants, constantsSize, targetSize,
+		                region.rect)) {
+			vkCmdDraw(commands, 3, 1, 0, 0);
+		}
 	}
 
 	m_cmdEndRendering(commands);
 
+}
+
+std::vector<Vec4f> VulkanRenderer::sceneRegions() const {
+
+	if(m_stereoViews.empty()) {
+		return { FullRect };
+	}
+
+	// Each eye of the stereo scene is filtered on its own
+	std::vector<Vec4f> regions;
+	float width = 1.f / float(m_stereoViews.size());
+	for(size_t eye = 0; eye < m_stereoViews.size(); eye++) {
+		regions.emplace_back(float(eye) * width, 0.f, width, 1.f);
+	}
+	return regions;
 }
 
 void VulkanRenderer::renderBloom(ImageTarget & scene) {
@@ -449,51 +492,78 @@ void VulkanRenderer::renderBloom(ImageTarget & scene) {
 		return;
 	}
 
-	auto constants = [this](const Vec2i & sourceSize) {
-		BloomConstants result = { };
-		result.params[0] = BloomThreshold;
-		result.params[1] = BloomKnee;
-		// The upsampled levels add up, normalize the result
-		result.params[2] = 6.f * m_bloomStrength / float(BloomLevels);
-		result.source[0] = 1.f / float(sourceSize.x);
-		result.source[1] = 1.f / float(sourceSize.y);
-		result.source[2] = float(sourceSize.x);
-		result.source[3] = float(sourceSize.y);
-		result.clamp[0] = 0.5f * result.source[0];
-		result.clamp[1] = 0.5f * result.source[1];
-		result.clamp[2] = 1.f - 0.5f * result.source[0];
-		result.clamp[3] = 1.f - 0.5f * result.source[1];
-		return result;
+	std::vector<Vec4f> rects = sceneRegions();
+	std::vector<BloomConstants> constants(rects.size());
+	std::vector<PostRegion> regions(rects.size());
+
+	// The same part of every level, the samples are clamped to it
+	auto pass = [&](ImageTarget & target, const Vec2i & targetSize, ImageTarget & source, const Vec2i & sourceSize,
+	                VkShaderModule shader, const char * entry, const PostLayout & layout, VkFormat format,
+	                bool additive) {
+		for(size_t i = 0; i < rects.size(); i++) {
+			const Vec4f & rect = rects[i];
+			BloomConstants & bloom = constants[i];
+			bloom = BloomConstants();
+			bloom.params[0] = BloomThreshold;
+			bloom.params[1] = BloomKnee;
+			// The upsampled levels add up, normalize the result
+			bloom.params[2] = 6.f * m_bloomStrength / float(BloomLevels);
+			bloom.source[0] = 1.f / float(sourceSize.x);
+			bloom.source[1] = 1.f / float(sourceSize.y);
+			bloom.source[2] = float(sourceSize.x);
+			bloom.source[3] = float(sourceSize.y);
+			bloom.clamp[0] = rect.x + 0.5f * bloom.source[0];
+			bloom.clamp[1] = rect.y + 0.5f * bloom.source[1];
+			bloom.clamp[2] = rect.x + rect.z - 0.5f * bloom.source[0];
+			bloom.clamp[3] = rect.y + rect.w - 0.5f * bloom.source[1];
+			regions[i] = { rect, &bloom };
+		}
+		postPass(target, format, targetSize, source, shader, entry, layout, regions, sizeof(BloomConstants), additive);
 	};
 
-	BloomConstants pass = constants(m_sceneSize);
-	postPass(m_bloomTargets[0], m_bloomFormat, m_bloomSizes[0], scene, m_bloomPrefilterShader, "psBloomPrefilter",
-	         m_bloomPrefilterLayout, &pass, sizeof(pass), false);
+	pass(m_bloomTargets[0], m_bloomSizes[0], scene, m_sceneSize, m_bloomPrefilterShader, "psBloomPrefilter",
+	     m_bloomPrefilterLayout, m_bloomFormat, false);
 	for(size_t i = 1; i < BloomLevels; i++) {
-		pass = constants(m_bloomSizes[i - 1]);
-		postPass(m_bloomTargets[i], m_bloomFormat, m_bloomSizes[i], m_bloomTargets[i - 1], m_bloomDownsampleShader,
-		         "psBloomDownsample", m_bloomLayout, &pass, sizeof(pass), false);
+		pass(m_bloomTargets[i], m_bloomSizes[i], m_bloomTargets[i - 1], m_bloomSizes[i - 1], m_bloomDownsampleShader,
+		     "psBloomDownsample", m_bloomLayout, m_bloomFormat, false);
 	}
 	for(size_t i = BloomLevels - 1; i > 0; i--) {
-		pass = constants(m_bloomSizes[i]);
-		postPass(m_bloomTargets[i - 1], m_bloomFormat, m_bloomSizes[i - 1], m_bloomTargets[i], m_bloomUpsampleShader,
-		         "psBloomUpsample", m_bloomLayout, &pass, sizeof(pass), true);
+		pass(m_bloomTargets[i - 1], m_bloomSizes[i - 1], m_bloomTargets[i], m_bloomSizes[i], m_bloomUpsampleShader,
+		     "psBloomUpsample", m_bloomLayout, m_bloomFormat, true);
 	}
 
 	// Added to the scene
-	pass = constants(m_bloomSizes[0]);
-	postPass(scene, m_colorFormat, m_sceneSize, m_bloomTargets[0], m_bloomCompositeShader, "psBloomComposite",
-	         m_bloomLayout, &pass, sizeof(pass), true);
+	pass(scene, m_sceneSize, m_bloomTargets[0], m_bloomSizes[0], m_bloomCompositeShader, "psBloomComposite",
+	     m_bloomLayout, m_colorFormat, true);
 
 }
 
-void VulkanRenderer::composeScene(ImageTarget & scene) {
+void VulkanRenderer::composeScene(ImageTarget & scene, ImageTarget * target, VkFormat format, const Vec2i & size,
+                                  bool vignette) {
 
 	transition(scene, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 
-	beginRendering();
-	if(!m_renderingActive) {
-		return;
+	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+
+	if(target) {
+		endRendering();
+		transition(*target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+		VkRenderingAttachmentInfoKHR attachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+		attachment.imageView = target->view;
+		attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		VkRenderingInfoKHR rendering = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+		rendering.renderArea = { { 0, 0 }, { uint32_t(size.x), uint32_t(size.y) } };
+		rendering.layerCount = 1;
+		rendering.colorAttachmentCount = 1;
+		rendering.pColorAttachments = &attachment;
+		m_cmdBeginRendering(commands, &rendering);
+	} else {
+		beginRendering();
+		if(!m_renderingActive) {
+			return;
+		}
 	}
 
 	VkPipeline pipeline = VK_NULL_HANDLE;
@@ -503,8 +573,9 @@ void VulkanRenderer::composeScene(ImageTarget & scene) {
 		const ColorGradingPreset & preset = ColorGradingPresets[m_colorGrading];
 		constants.params[0] = preset.contrast;
 		constants.params[1] = preset.saturation;
-		constants.params[2] = preset.vignette;
-		constants.params[3] = float(m_size.x) / float(std::max<s32>(m_size.y, 1));
+		// The lenses darken the edges of the VR view already
+		constants.params[2] = vignette ? preset.vignette : 0.f;
+		constants.params[3] = float(size.x) / float(std::max<s32>(size.y, 1));
 		constants.tone[0] = preset.exposure;
 		constants.tone[1] = preset.gamma;
 		constants.tone[2] = ColorGradingPivot;
@@ -514,16 +585,88 @@ void VulkanRenderer::composeScene(ImageTarget & scene) {
 			constants.highlights[i] = preset.highlights[i];
 		}
 		layout = &m_gradingLayout;
-		pipeline = getPostPipeline(m_gradingShader, "psColorGrading", m_gradingLayout, VK_FORMAT_UNDEFINED, false);
+		pipeline = getPostPipeline(m_gradingShader, "psColorGrading", m_gradingLayout, format, false);
 	} else {
-		pipeline = getPostPipeline(m_blitPixelShader, "psBlit", m_blitLayout, VK_FORMAT_UNDEFINED, false);
+		pipeline = getPostPipeline(m_blitPixelShader, "psBlit", m_blitLayout, format, false);
 	}
 
-	if(bindPostPass(pipeline, *layout, scene.view, Vec4f(0.f, 0.f, 1.f, 1.f), &constants, sizeof(constants), m_size)) {
-		vkCmdDraw(m_frames[m_frameIndex].commands, 3, 1, 0, 0);
+	if(drawPostPass(pipeline, *layout, scene.view, FullRect, &constants, sizeof(constants), size, FullRect)) {
+		vkCmdDraw(commands, 3, 1, 0, 0);
+	}
+
+	if(target) {
+		m_cmdEndRendering(commands);
 	}
 
 	// The next draw binds its own state
+	invalidateBoundState();
+
+}
+
+bool VulkanRenderer::finishStereoScene() {
+
+	m_drawingScene = false;
+
+	if(!m_inScene || m_stereoViews.empty()) {
+		return false;
+	}
+
+	// Resolves the multisampled scene, see beginRendering()
+	endRendering();
+	m_inScene = false;
+	invalidateBoundState();
+
+	if(!m_stereoOutput.image) {
+		if(!createImageTarget(m_stereoOutput, m_colorFormat,
+		                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+		                      | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+		                      VK_IMAGE_ASPECT_COLOR_BIT, m_stereoSize, VK_SAMPLE_COUNT_1_BIT)) {
+			LogError << "Failed to create the " << m_stereoSize.x << "x" << m_stereoSize.y << " Vulkan stereo output";
+			return false;
+		}
+	}
+
+	ImageTarget & scene = m_sceneResolved.image ? m_sceneResolved : m_sceneColor;
+
+	if(m_bloom) {
+		renderBloom(scene);
+	}
+
+	composeScene(scene, &m_stereoOutput, m_colorFormat, m_stereoSize, false);
+
+	return true;
+}
+
+void VulkanRenderer::drawOverlay(OverlaySource source, const OverlayVertex * vertices, size_t count, bool blend) {
+
+	ImageTarget & image = (source == StereoOutput) ? m_stereoOutput
+	                      : (m_outputResolved.image ? m_outputResolved : m_outputColor);
+	if(!image.image || !vertices || count < 3 || !m_overlayVertexShader || m_inScene || m_outputActive) {
+		return;
+	}
+
+	endRendering();
+	transition(image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+	VkImageView texture = image.view;
+
+	beginRendering();
+	if(!m_renderingActive) {
+		return;
+	}
+
+	RingAllocation allocation;
+	if(!allocate(m_frames[m_frameIndex].vertices, VkDeviceSize(count * sizeof(OverlayVertex)), 16, allocation)) {
+		return;
+	}
+	std::memcpy(allocation.data, vertices, count * sizeof(OverlayVertex));
+
+	VkPipeline pipeline = getPostPipeline(m_blitPixelShader, "psBlit", m_blitLayout, VK_FORMAT_UNDEFINED, blend, true);
+	if(drawPostPass(pipeline, m_blitLayout, texture, FullRect, nullptr, 0, m_size, FullRect)) {
+		VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+		vkCmdBindVertexBuffers(commands, 0, 1, &allocation.buffer, &allocation.offset);
+		vkCmdDraw(commands, uint32_t(count), 1, 0, 0);
+	}
+
 	invalidateBoundState();
 
 }

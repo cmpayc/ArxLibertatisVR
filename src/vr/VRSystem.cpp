@@ -452,6 +452,10 @@ bool VRSystem::usesDirect3D11() const {
 	return m_graphics && m_graphics->isDirect3D11();
 }
 
+bool VRSystem::usesVulkan() const {
+	return m_graphics && m_graphics->isVulkan();
+}
+
 bool VRSystem::isPanelTextureFlipped() const {
 	return m_graphics && m_graphics->isPanelCopyFlipped();
 }
@@ -461,10 +465,15 @@ bool VRSystem::initInstance() {
 	arx_assert(m_instance == XR_NULL_HANDLE);
 
 	/*
-	 * The graphics API of the renderer: Direct3D 11 if it is selected and a runtime supports it, else OpenGL (the
-	 * window then creates an OpenGL renderer). The first runtime that supports it is used.
+	 * The graphics API of the renderer: Vulkan or Direct3D 11 if it is selected and a runtime supports it, else
+	 * OpenGL (the window then creates an OpenGL renderer). The first runtime that supports it is used.
 	 */
 	std::vector<std::unique_ptr<VRGraphics>> apis;
+	#if ARX_HAVE_VULKAN
+	if(config.video.renderer == "Vulkan") {
+		apis.push_back(createVRGraphicsVulkan());
+	}
+	#endif
 	#if ARX_HAVE_D3D11
 	if(config.video.renderer == "Direct3D 11") {
 		apis.push_back(createVRGraphicsD3D11());

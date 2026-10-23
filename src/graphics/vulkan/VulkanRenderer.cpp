@@ -38,6 +38,7 @@
 #include "core/Config.h"
 #include "gui/Credits.h"
 #include "graphics/Vertex.h"
+#include "graphics/vulkan/VulkanExternalDevice.h"
 #include "graphics/vulkan/VulkanTexture.h"
 #include "graphics/vulkan/VulkanTextureStage.h"
 #include "graphics/vulkan/VulkanVertexBuffer.h"
@@ -53,6 +54,9 @@ namespace {
 const size_t TextureStageCount = 3;
 
 VulkanRenderer * g_vulkanRenderer = nullptr;
+
+// See vulkan::setExternalDevice()
+vulkan::ExternalDevice * g_externalDevice = nullptr;
 
 bool checkVk(VkResult result, const char * call) {
 	if(result == VK_SUCCESS) {
@@ -110,6 +114,8 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBits
 VulkanRenderer::VulkanRenderer()
 	: m_window(nullptr)
 	, m_instance(VK_NULL_HANDLE)
+	, m_externalDevice(nullptr)
+	, m_hasExternalDevice(false)
 	, m_debugMessenger(VK_NULL_HANDLE)
 	, m_surface(VK_NULL_HANDLE)
 	, m_physicalDevice(VK_NULL_HANDLE)
@@ -167,6 +173,13 @@ VulkanRenderer::VulkanRenderer()
 	, m_bloomFormat(VK_FORMAT_UNDEFINED)
 	, m_bloomSizes()
 	, m_colorGrading(0)
+	, m_overlayVertexShader(VK_NULL_HANDLE)
+	, m_stereoSize(0)
+	, m_stereoEyeSize(0)
+	, m_stereoVSOffsets()
+	, m_outputSize(0)
+	, m_outputActive(false)
+	, m_premultipliedAlpha(false)
 	, m_reliefPixelShader(VK_NULL_HANDLE)
 	, m_reliefPipeline(VK_NULL_HANDLE)
 	, m_fullRectConstants(VK_NULL_HANDLE)
@@ -287,8 +300,14 @@ bool VulkanRenderer::create(SDL_Window * window, int maxMSAALevel) {
 		                 + std::chrono::milliseconds(static_cast<long long>(double(seconds) * 1000.0));
 	}
 
-	if(!createInstance(window) || !selectPhysicalDevice() || !createDevice() || !createFrames()) {
+	bool created = createInstance(window) && selectPhysicalDevice() && createDevice();
+	m_hasExternalDevice = created && m_externalDevice;
+	m_externalDevice = nullptr;
+	if(!created || !createFrames()) {
 		return false;
+	}
+	if(m_hasExternalDevice) {
+		LogInfo << "Vulkan device created by the VR runtime";
 	}
 
 	// Multisampling of the color + depth target
@@ -340,6 +359,10 @@ bool VulkanRenderer::createInstance(SDL_Window * window) {
 		return false;
 	}
 	m_apiVersion = std::min(instanceVersion, uint32_t(VK_API_VERSION_1_3));
+	m_externalDevice = g_externalDevice;
+	if(m_externalDevice) {
+		m_apiVersion = std::min(m_apiVersion, m_externalDevice->getMaxApiVersion());
+	}
 
 	unsigned int count = 0;
 	if(!SDL_Vulkan_GetInstanceExtensions(window, &count, nullptr)) {
@@ -391,7 +414,10 @@ bool VulkanRenderer::createInstance(SDL_Window * window) {
 	info.enabledLayerCount = uint32_t(layers.size());
 	info.ppEnabledLayerNames = layers.data();
 
-	if(!checkVk(vkCreateInstance(&info, nullptr, &m_instance), "vkCreateInstance")) {
+	VkResult result = m_externalDevice ? m_externalDevice->createInstance(getInstanceProcAddr, info, m_instance)
+	                                   : vkCreateInstance(&info, nullptr, &m_instance);
+	if(!checkVk(result, "vkCreateInstance")) {
+		m_instance = VK_NULL_HANDLE;
 		return false;
 	}
 	volkLoadInstance(m_instance);
@@ -422,6 +448,16 @@ bool VulkanRenderer::selectPhysicalDevice() {
 	vkEnumeratePhysicalDevices(m_instance, &count, nullptr);
 	std::vector<VkPhysicalDevice> devices(count);
 	vkEnumeratePhysicalDevices(m_instance, &count, devices.data());
+
+	// The VR runtime renders on the GPU the headset is connected to
+	if(m_externalDevice) {
+		VkPhysicalDevice required = m_externalDevice->getPhysicalDevice(m_instance);
+		if(!required) {
+			LogError << "The VR runtime did not select a Vulkan device";
+			return false;
+		}
+		devices.assign(1, required);
+	}
 
 	int bestScore = 0;
 
@@ -544,7 +580,11 @@ bool VulkanRenderer::createDevice() {
 	info.enabledExtensionCount = uint32_t(extensions.size());
 	info.ppEnabledExtensionNames = extensions.data();
 
-	if(!checkVk(vkCreateDevice(m_physicalDevice, &info, nullptr, &m_device), "vkCreateDevice")) {
+	VkResult result = m_externalDevice
+	                  ? m_externalDevice->createDevice(vkGetInstanceProcAddr, m_physicalDevice, info, m_device)
+	                  : vkCreateDevice(m_physicalDevice, &info, nullptr, &m_device);
+	if(!checkVk(result, "vkCreateDevice")) {
+		m_device = VK_NULL_HANDLE;
 		return false;
 	}
 	volkLoadDevice(m_device);
@@ -1014,13 +1054,19 @@ void VulkanRenderer::beginScene() {
 		m_effectTime = float(std::fmod(seconds, 20.0 * 3.14159265358979323846));
 	}
 
-	// The scene has its own targets for the render scale and the effects applied after it
-	if(m_sceneScale >= 1.f && !m_bloom && m_colorGrading == 0) {
-		return;
-	}
-
 	Vec2i size(std::max<s32>(s32(float(m_size.x) * m_sceneScale + 0.5f), 1),
 	           std::max<s32>(s32(float(m_size.y) * m_sceneScale + 0.5f), 1));
+
+	if(!m_stereoViews.empty()) {
+		// The stereo scene always has its own targets, the eyes side by side with an even width each
+		Vec2i eye(m_stereoSize.x / s32(m_stereoViews.size()), m_stereoSize.y);
+		m_stereoEyeSize = Vec2i(std::max<s32>((s32(float(eye.x) * m_sceneScale + 0.5f) + 1) / 2 * 2, 2),
+		                        std::max<s32>(s32(float(eye.y) * m_sceneScale + 0.5f), 1));
+		size = Vec2i(m_stereoEyeSize.x * s32(m_stereoViews.size()), m_stereoEyeSize.y);
+	} else if(m_sceneScale >= 1.f && !m_bloom && m_colorGrading == 0) {
+		// The scene has its own targets for the render scale and the effects applied after it
+		return;
+	}
 	if((size != m_sceneSize || bool(m_bloomTargets[0].image) != m_bloom) && !createSceneTargets(size)) {
 		return;
 	}
@@ -1036,7 +1082,8 @@ void VulkanRenderer::endScene() {
 
 	m_drawingScene = false;
 
-	if(!m_inScene) {
+	// The stereo scene stays bound for the overlays drawn in the world, see finishStereoScene()
+	if(!m_inScene || !m_stereoViews.empty()) {
 		return;
 	}
 
@@ -1053,7 +1100,7 @@ void VulkanRenderer::endScene() {
 	}
 
 	// Upscale the scene to the window
-	composeScene(scene);
+	composeScene(scene, nullptr, VK_FORMAT_UNDEFINED, m_size, true);
 
 	// The interface is drawn on top of the scene, with its own depth
 	Clear(DepthBuffer);
@@ -1187,17 +1234,19 @@ void VulkanRenderer::beginRendering() {
 
 	beginFrame();
 
-	// The 3D scene has its own targets, see beginScene()
-	ImageTarget & colorTarget = m_inScene ? m_sceneColor : m_colorTarget;
-	ImageTarget & depthTarget = m_inScene ? m_sceneDepth : m_depthTarget;
-	Vec2i size = m_inScene ? m_sceneSize : m_size;
+	// The 3D scene has its own targets (see beginScene), the VR interface layer too (see setOutputTargetActive)
+	bool output = !m_inScene && m_outputActive;
+	ImageTarget & colorTarget = m_inScene ? m_sceneColor : output ? m_outputColor : m_colorTarget;
+	ImageTarget & depthTarget = m_inScene ? m_sceneDepth : output ? m_outputDepth : m_depthTarget;
+	ImageTarget & resolveTarget = m_inScene ? m_sceneResolved : m_outputResolved;
+	Vec2i size = m_inScene ? m_sceneSize : output ? m_outputSize : m_size;
 
 	transition(colorTarget, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 	transition(depthTarget, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 	           VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
-	bool resolve = m_inScene && m_sceneResolved.image;
+	bool resolve = (m_inScene || output) && resolveTarget.image;
 	if(resolve) {
-		transition(m_sceneResolved, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+		transition(resolveTarget, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
 	}
 
 	/*
@@ -1216,7 +1265,7 @@ void VulkanRenderer::beginRendering() {
 	if(resolve) {
 		// Resolving while rendering keeps the samples in tile memory on tiled GPUs
 		color.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-		color.resolveImageView = m_sceneResolved.view;
+		color.resolveImageView = resolveTarget.view;
 		color.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	}
 
@@ -1438,8 +1487,16 @@ void VulkanRenderer::Clear(BufferFlags bufferFlags, Color clearColor, float clea
 		attachment.clearValue.depthStencil = { clearDepth, 0 };
 	}
 
-	Vec2i size = m_inScene ? m_sceneSize : m_size;
+	Vec2i size = targetSize();
 	Rect bounds(size.x, size.y);
+
+	if(nrects != 0 && stereoActive()) {
+		/*
+		 * Screen rectangles do not map to the stereo views, and clearing the whole target instead would erase the
+		 * scene (cinematic borders clear the depth buffer to 0). These are only used for letterboxing.
+		 */
+		return;
+	}
 
 	std::vector<VkClearRect> rects;
 	if(nrects == 0) {
@@ -1813,6 +1870,35 @@ void VulkanRenderer::invalidateBoundState() {
 	m_psConstants = RingAllocation();
 }
 
+template <class DrawFunction>
+void VulkanRenderer::drawViews(const DrawFunction & draw) {
+
+	if(!stereoActive()) {
+		draw();
+		return;
+	}
+
+	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+
+	// The eyes are side by side in the scene target, each with its own constants (see prepareDraw)
+	for(size_t eye = 0; eye < m_stereoViews.size() && eye < std::size(m_stereoVSOffsets); eye++) {
+		VkViewport viewport = {
+			float(s32(eye) * m_stereoEyeSize.x), float(m_stereoEyeSize.y),
+			float(m_stereoEyeSize.x), -float(m_stereoEyeSize.y), 0.f, 1.f
+		};
+		vkCmdSetViewport(commands, 0, 1, &viewport);
+		uint32_t offsets[3] = { m_stereoVSOffsets[eye], m_boundConstantOffsets[1], m_boundConstantOffsets[2] };
+		vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1,
+		                        &m_boundDescriptorSet, uint32_t(std::size(offsets)), offsets);
+		draw();
+	}
+
+	// The next draw sets the viewport and the constants again
+	m_dynamicStateValid = false;
+	m_boundConstantOffsets[0] = std::numeric_limits<uint32_t>::max();
+
+}
+
 static size_t vertexStride(VulkanRenderer::VertexType type) {
 	switch(type) {
 		case VulkanRenderer::VertexTL: return sizeof(TexturedVertex);
@@ -1901,7 +1987,10 @@ void VulkanRenderer::drawBuffer(VertexType type, Primitive primitive, const void
 		first = 0;
 	}
 
-	vkCmdDraw(m_frames[m_frameIndex].commands, uint32_t(drawCount), 1, uint32_t(first), 0);
+	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+	drawViews([&]() {
+		vkCmdDraw(commands, uint32_t(drawCount), 1, uint32_t(first), 0);
+	});
 
 }
 
@@ -1931,7 +2020,10 @@ void VulkanRenderer::drawBufferIndexed(VertexType type, Primitive primitive, con
 		return;
 	}
 
-	vkCmdDrawIndexed(m_frames[m_frameIndex].commands, uint32_t(nindices), 1, 0, int32_t(baseVertex), 0);
+	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+	drawViews([&]() {
+		vkCmdDrawIndexed(commands, uint32_t(nindices), 1, 0, int32_t(baseVertex), 0);
+	});
 
 }
 
@@ -1950,7 +2042,10 @@ void VulkanRenderer::drawIndexed(Primitive primitive, const TexturedVertex * ver
 		return;
 	}
 
-	vkCmdDrawIndexed(m_frames[m_frameIndex].commands, uint32_t(nindices), 1, 0, -int32_t(begin), 0);
+	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+	drawViews([&]() {
+		vkCmdDrawIndexed(commands, uint32_t(nindices), 1, 0, -int32_t(begin), 0);
+	});
 
 }
 
@@ -2079,6 +2174,222 @@ bool VulkanRenderer::getSnapshot(Image & image, size_t width, size_t height) {
 	return true;
 }
 
+void VulkanRenderer::setStereoViews(std::vector<StereoView> views, const Vec2i & size) {
+
+	if(views.size() > std::size(m_stereoVSOffsets)) {
+		views.resize(std::size(m_stereoVSOffsets));
+	}
+
+	if(views.empty() && stereoActive()) {
+		// The stereo scene was not finished, it is not shown
+		endRendering();
+		m_inScene = false;
+		m_drawingScene = false;
+	}
+
+	m_stereoViews = std::move(views);
+
+	if(!m_stereoViews.empty() && size != m_stereoSize) {
+		releaseImageTarget(m_stereoOutput);
+		m_stereoSize = size;
+	}
+
+	invalidateBoundState();
+
+}
+
+bool VulkanRenderer::createOutputTarget(const Vec2i & size) {
+
+	destroyOutputTarget();
+
+	if(size.x <= 0 || size.y <= 0) {
+		return false;
+	}
+
+	// Same format and samples as the window, so that the same pipelines can be used
+	bool multisampled = (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT);
+	VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+	                          | (multisampled ? 0 : VK_IMAGE_USAGE_SAMPLED_BIT);
+	if(!createImageTarget(m_outputColor, m_colorFormat, usage, VK_IMAGE_ASPECT_COLOR_BIT, size, m_msaaSamples)
+	   || !createImageTarget(m_outputDepth, m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+	                         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, size, m_msaaSamples)
+	   || (multisampled
+	       && !createImageTarget(m_outputResolved, m_colorFormat,
+	                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+	                             | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+	                             VK_IMAGE_ASPECT_COLOR_BIT, size, VK_SAMPLE_COUNT_1_BIT))) {
+		LogError << "Failed to create the " << size.x << "x" << size.y << " Vulkan interface target";
+		destroyOutputTarget();
+		return false;
+	}
+
+	m_outputSize = size;
+
+	return true;
+}
+
+void VulkanRenderer::destroyOutputTarget() {
+
+	setOutputTargetActive(false);
+
+	releaseImageTarget(m_outputColor);
+	releaseImageTarget(m_outputDepth);
+	releaseImageTarget(m_outputResolved);
+	m_outputSize = Vec2i(0);
+
+}
+
+void VulkanRenderer::setOutputTargetActive(bool active) {
+
+	active = active && hasOutputTarget();
+	if(active == m_outputActive) {
+		return;
+	}
+
+	// Resolves the interface layer when it was active, see beginRendering()
+	endRendering();
+	m_outputActive = active;
+	invalidateBoundState();
+
+}
+
+void VulkanRenderer::setPremultipliedAlphaOutput(bool enable) {
+	m_premultipliedAlpha = enable;
+}
+
+void VulkanRenderer::clearWindow() {
+
+	bool output = m_outputActive;
+	setOutputTargetActive(false);
+	Clear(ColorBuffer, Color::black);
+	setOutputTargetActive(output);
+
+}
+
+void VulkanRenderer::copyToRuntimeImage(ImageTarget & source, const Rect & area, VkImage image) {
+
+	if(!source.image || !image || area.width() <= 0 || area.height() <= 0) {
+		return;
+	}
+
+	beginFrame();
+	endRendering();
+
+	transition(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	// Images of the VR runtime are in the color attachment layout, also after the copy
+	ImageTarget target;
+	target.image = image;
+	target.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	transition(target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	// Unchanged bytes: the gamma-encoded colors are decoded correctly by an sRGB image with the same channel order
+	VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	VkImageCopy region = {
+		layers, { area.left, area.top, 0 }, layers, { 0, 0, 0 },
+		{ uint32_t(area.width()), uint32_t(area.height()), 1 }
+	};
+	vkCmdCopyImage(m_frames[m_frameIndex].commands, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+	               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+	transition(target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+}
+
+void VulkanRenderer::copyStereoEyeToImage(size_t eye, VkImage image) {
+
+	if(m_stereoViews.empty() && m_stereoSize.x <= 0) {
+		return;
+	}
+
+	s32 width = m_stereoSize.x / 2;
+	copyToRuntimeImage(m_stereoOutput, Rect(s32(eye) * width, 0, s32(eye + 1) * width, m_stereoSize.y), image);
+
+}
+
+void VulkanRenderer::copyOutputToImage(VkImage image) {
+
+	setOutputTargetActive(false);
+
+	ImageTarget & source = m_outputResolved.image ? m_outputResolved : m_outputColor;
+	copyToRuntimeImage(source, Rect(m_outputSize.x, m_outputSize.y), image);
+
+}
+
+bool VulkanRenderer::copyOutputToTexture(Texture * texture, const Rect & area) {
+
+	VulkanTexture * target = static_cast<VulkanTexture *>(texture);
+	if(!target || !target->m_texture || !hasOutputTarget() || area.width() <= 0 || area.height() <= 0) {
+		return false;
+	}
+
+	beginFrame();
+	endRendering();
+
+	ImageTarget & source = m_outputResolved.image ? m_outputResolved : m_outputColor;
+	transition(source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	ImageTarget destination;
+	destination.image = target->m_texture;
+	destination.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	transition(destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	// A blit converts between the channel orders of the window format and the RGBA textures
+	VkImageBlit blit = {};
+	blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	blit.srcOffsets[0] = { area.left, area.top, 0 };
+	blit.srcOffsets[1] = { area.right, area.bottom, 1 };
+	blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	blit.dstOffsets[1] = { area.width(), area.height(), 1 };
+	vkCmdBlitImage(m_frames[m_frameIndex].commands, source.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	               destination.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+
+	transition(destination, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	return true;
+}
+
+void VulkanRenderer::copyWindowToImage(VkImage image) {
+
+	if(!m_colorTarget.image) {
+		return;
+	}
+
+	beginFrame();
+	endRendering();
+
+	Rect area(m_size.x, m_size.y);
+
+	if(m_msaaSamples == VK_SAMPLE_COUNT_1_BIT) {
+		copyToRuntimeImage(m_colorTarget, area, image);
+		return;
+	}
+
+	// Resolved through the interface layer, which is not used in this frame
+	if(!m_outputResolved.image || m_outputSize != m_size) {
+		return;
+	}
+	transition(m_colorTarget, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+	transition(m_outputResolved, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+	VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	VkImageResolve region = { layers, { 0, 0, 0 }, layers, { 0, 0, 0 }, { uint32_t(m_size.x), uint32_t(m_size.y), 1 } };
+	vkCmdResolveImage(m_frames[m_frameIndex].commands, m_colorTarget.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                  m_outputResolved.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+	copyToRuntimeImage(m_outputResolved, area, image);
+
+}
+
+void VulkanRenderer::submitCommands() {
+
+	if(!m_frameActive || m_deviceLost) {
+		return;
+	}
+
+	// The rest of the frame continues in the next command buffer
+	endFrame(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
+
+}
+
 void VulkanRenderer::setVSync(int vsync) {
 	if(vsync != m_vsync) {
 		m_vsync = vsync;
@@ -2186,6 +2497,10 @@ void VulkanRenderer::present() {
 }
 
 namespace vulkan {
+
+void setExternalDevice(ExternalDevice * device) {
+	g_externalDevice = device;
+}
 
 Renderer * createRenderer() {
 	return new VulkanRenderer;
