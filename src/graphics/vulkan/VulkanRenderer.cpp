@@ -20,6 +20,7 @@
 #include "graphics/vulkan/VulkanRenderer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
@@ -130,6 +131,9 @@ VulkanRenderer::VulkanRenderer()
 	, m_depthFormat(VK_FORMAT_UNDEFINED)
 	, m_msaaSamples(VK_SAMPLE_COUNT_1_BIT)
 	, m_size(0)
+	, m_sceneScale(1.f)
+	, m_inScene(false)
+	, m_sceneSize(0)
 	, m_frameSerial(0)
 	, m_frameIndex(0)
 	, m_frameActive(false)
@@ -151,6 +155,11 @@ VulkanRenderer::VulkanRenderer()
 	, m_descriptorSetLayout(VK_NULL_HANDLE)
 	, m_pipelineLayout(VK_NULL_HANDLE)
 	, m_pipelineCache(VK_NULL_HANDLE)
+	, m_blitVertexShader(VK_NULL_HANDLE)
+	, m_blitPixelShader(VK_NULL_HANDLE)
+	, m_blitSetLayout(VK_NULL_HANDLE)
+	, m_blitPipelineLayout(VK_NULL_HANDLE)
+	, m_blitPipeline(VK_NULL_HANDLE)
 	, m_lightConstants(VK_NULL_HANDLE)
 	, m_lightConstantsAllocation(VK_NULL_HANDLE)
 	, m_boundPipeline(VK_NULL_HANDLE)
@@ -765,15 +774,15 @@ void VulkanRenderer::releaseSwapchain() {
 }
 
 bool VulkanRenderer::createImageTarget(ImageTarget & target, VkFormat format, VkImageUsageFlags usage,
-                                       VkImageAspectFlags aspect) {
+                                       VkImageAspectFlags aspect, const Vec2i & size, VkSampleCountFlagBits samples) {
 
 	VkImageCreateInfo image = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	image.imageType = VK_IMAGE_TYPE_2D;
 	image.format = format;
-	image.extent = { uint32_t(m_size.x), uint32_t(m_size.y), 1 };
+	image.extent = { uint32_t(size.x), uint32_t(size.y), 1 };
 	image.mipLevels = 1;
 	image.arrayLayers = 1;
-	image.samples = m_msaaSamples;
+	image.samples = samples;
 	image.tiling = VK_IMAGE_TILING_OPTIMAL;
 	image.usage = usage;
 	image.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -832,13 +841,13 @@ bool VulkanRenderer::createSizeDependentResources() {
 
 	if(!createImageTarget(m_colorTarget, m_colorFormat,
 	                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-	                      VK_IMAGE_ASPECT_COLOR_BIT)) {
+	                      VK_IMAGE_ASPECT_COLOR_BIT, m_size, m_msaaSamples)) {
 		LogError << "Failed to create " << m_size.x << "x" << m_size.y << " Vulkan color target";
 		return false;
 	}
 
 	if(!createImageTarget(m_depthTarget, m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-	                      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+	                      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, m_size, m_msaaSamples)) {
 		LogError << "Failed to create " << m_size.x << "x" << m_size.y << " Vulkan depth target";
 		return false;
 	}
@@ -857,6 +866,129 @@ void VulkanRenderer::releaseSizeDependentResources() {
 
 	releaseImageTarget(m_colorTarget);
 	releaseImageTarget(m_depthTarget);
+
+	releaseSceneTargets();
+
+}
+
+bool VulkanRenderer::createSceneTargets(const Vec2i & size) {
+
+	releaseSceneTargets();
+
+	// The multisampled scene is resolved at the end of rendering into an image that is sampled by the effects
+	VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	if(m_msaaSamples == VK_SAMPLE_COUNT_1_BIT) {
+		usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+	}
+	if(!createImageTarget(m_sceneColor, m_colorFormat, usage, VK_IMAGE_ASPECT_COLOR_BIT, size, m_msaaSamples)
+	   || !createImageTarget(m_sceneDepth, m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+	                         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, size, m_msaaSamples)
+	   || (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT
+	       && !createImageTarget(m_sceneResolved, m_colorFormat,
+	                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+	                             VK_IMAGE_ASPECT_COLOR_BIT, size, VK_SAMPLE_COUNT_1_BIT))) {
+		LogError << "Failed to create " << size.x << "x" << size.y << " Vulkan scene targets";
+		releaseSceneTargets();
+		return false;
+	}
+
+	m_sceneSize = size;
+
+	return true;
+}
+
+void VulkanRenderer::releaseSceneTargets() {
+
+	if(m_inScene) {
+		endRendering();
+		m_inScene = false;
+		invalidateBoundState();
+	}
+
+	releaseImageTarget(m_sceneColor);
+	releaseImageTarget(m_sceneDepth);
+	releaseImageTarget(m_sceneResolved);
+	m_sceneSize = Vec2i(0);
+
+}
+
+Vec2f VulkanRenderer::targetScale() const {
+
+	if(!m_inScene || m_size.x <= 0 || m_size.y <= 0) {
+		return Vec2f(1.f);
+	}
+
+	return Vec2f(m_sceneSize) / Vec2f(m_size);
+}
+
+Rect VulkanRenderer::toTargetRect(const Rect & rect) const {
+
+	Vec2f scale = targetScale();
+
+	return Rect(s32(std::floor(float(rect.left) * scale.x + 0.5f)), s32(std::floor(float(rect.top) * scale.y + 0.5f)),
+	            s32(std::floor(float(rect.right) * scale.x + 0.5f)),
+	            s32(std::floor(float(rect.bottom) * scale.y + 0.5f)));
+}
+
+void VulkanRenderer::setSceneScale(float scale) {
+
+	scale = std::clamp(scale, 0.25f, 1.f);
+	if(scale == m_sceneScale) {
+		return;
+	}
+
+	m_sceneScale = scale;
+
+	if(!m_inScene) {
+		releaseSceneTargets();
+	}
+
+}
+
+void VulkanRenderer::beginScene() {
+
+	if(m_inScene || !m_colorTarget.image) {
+		return;
+	}
+
+	// TODO Phase 2: also for the effects
+	if(m_sceneScale >= 1.f) {
+		return;
+	}
+
+	Vec2i size(std::max<s32>(s32(float(m_size.x) * m_sceneScale + 0.5f), 1),
+	           std::max<s32>(s32(float(m_size.y) * m_sceneScale + 0.5f), 1));
+	if(size != m_sceneSize && !createSceneTargets(size)) {
+		return;
+	}
+
+	endRendering();
+
+	m_inScene = true;
+	invalidateBoundState();
+
+}
+
+void VulkanRenderer::endScene() {
+
+	if(!m_inScene) {
+		return;
+	}
+
+	// Resolves the multisampled scene, see beginRendering()
+	endRendering();
+
+	m_inScene = false;
+	invalidateBoundState();
+
+	ImageTarget & scene = m_sceneResolved.image ? m_sceneResolved : m_sceneColor;
+	transition(scene, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	// Upscale the scene to the window
+	composeScene(scene.view);
+
+	// The interface is drawn on top of the scene, with its own depth
+	Clear(DepthBuffer);
 
 }
 
@@ -987,9 +1119,18 @@ void VulkanRenderer::beginRendering() {
 
 	beginFrame();
 
-	transition(m_colorTarget, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-	transition(m_depthTarget, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+	// The 3D scene has its own targets, see beginScene()
+	ImageTarget & colorTarget = m_inScene ? m_sceneColor : m_colorTarget;
+	ImageTarget & depthTarget = m_inScene ? m_sceneDepth : m_depthTarget;
+	Vec2i size = m_inScene ? m_sceneSize : m_size;
+
+	transition(colorTarget, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+	transition(depthTarget, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
 	           VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+	bool resolve = m_inScene && m_sceneResolved.image;
+	if(resolve) {
+		transition(m_sceneResolved, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+	}
 
 	/*
 	 * psMain also writes the motion, surface and shading targets of the 3D scene (SV_Target1-3), these writes are
@@ -1000,19 +1141,25 @@ void VulkanRenderer::beginRendering() {
 		attachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
 	}
 	VkRenderingAttachmentInfoKHR & color = colors[0];
-	color.imageView = m_colorTarget.view;
+	color.imageView = colorTarget.view;
 	color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	if(resolve) {
+		// Resolving while rendering keeps the samples in tile memory on tiled GPUs
+		color.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+		color.resolveImageView = m_sceneResolved.view;
+		color.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	}
 
 	VkRenderingAttachmentInfoKHR depth = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
-	depth.imageView = m_depthTarget.view;
+	depth.imageView = depthTarget.view;
 	depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 	depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
 	VkRenderingInfoKHR info = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
-	info.renderArea = { { 0, 0 }, { uint32_t(m_size.x), uint32_t(m_size.y) } };
+	info.renderArea = { { 0, 0 }, { uint32_t(size.x), uint32_t(size.y) } };
 	info.layerCount = 1;
 	info.colorAttachmentCount = uint32_t(std::size(colors));
 	info.pColorAttachments = colors;
@@ -1223,14 +1370,16 @@ void VulkanRenderer::Clear(BufferFlags bufferFlags, Color clearColor, float clea
 		attachment.clearValue.depthStencil = { clearDepth, 0 };
 	}
 
-	Rect bounds(m_size.x, m_size.y);
+	Vec2i size = m_inScene ? m_sceneSize : m_size;
+	Rect bounds(size.x, size.y);
 
 	std::vector<VkClearRect> rects;
 	if(nrects == 0) {
-		rects.push_back({ { { 0, 0 }, { uint32_t(m_size.x), uint32_t(m_size.y) } }, 0, 1 });
+		rects.push_back({ { { 0, 0 }, { uint32_t(size.x), uint32_t(size.y) } }, 0, 1 });
 	} else {
 		for(size_t i = 0; i < nrects; i++) {
-			Rect r = rect[i] & bounds;
+			// The rectangles are in window pixels, also for the scaled scene
+			Rect r = toTargetRect(rect[i]) & bounds;
 			if(r.isValid() && r.width() > 0 && r.height() > 0) {
 				rects.push_back({ { { r.left, r.top }, { uint32_t(r.width()), uint32_t(r.height()) } }, 0, 1 });
 			}
@@ -1510,7 +1659,7 @@ void VulkanRenderer::releaseRing(RingBuffer & ring) {
 	ring.pos = 0;
 }
 
-VkDescriptorSet VulkanRenderer::allocateDescriptorSet() {
+VkDescriptorSet VulkanRenderer::allocateDescriptorSet(VkDescriptorSetLayout layout) {
 
 	Frame & frame = m_frames[m_frameIndex];
 
@@ -1538,7 +1687,7 @@ VkDescriptorSet VulkanRenderer::allocateDescriptorSet() {
 		VkDescriptorSetAllocateInfo info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
 		info.descriptorPool = frame.descriptorPools[frame.descriptorPool];
 		info.descriptorSetCount = 1;
-		info.pSetLayouts = &m_descriptorSetLayout;
+		info.pSetLayouts = &layout;
 		VkDescriptorSet set = VK_NULL_HANDLE;
 		VkResult result = vkAllocateDescriptorSets(m_device, &info, &set);
 		if(result == VK_SUCCESS) {

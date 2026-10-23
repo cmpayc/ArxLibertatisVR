@@ -118,6 +118,11 @@ public:
 	bool getSnapshot(Image & image) override;
 	bool getSnapshot(Image & image, size_t width, size_t height) override;
 
+	bool supportsSceneScale() const override { return true; }
+	void setSceneScale(float scale) override;
+	void beginScene() override;
+	void endScene() override;
+
 	VulkanTextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<VulkanTextureStage *>(Renderer::GetTextureStage(textureStage));
 	}
@@ -253,7 +258,7 @@ private:
 	bool allocate(RingBuffer & ring, VkDeviceSize size, VkDeviceSize alignment, RingAllocation & allocation);
 	void releaseRing(RingBuffer & ring);
 	void flushRing(RingBuffer & ring);
-	VkDescriptorSet allocateDescriptorSet();
+	VkDescriptorSet allocateDescriptorSet(VkDescriptorSetLayout layout);
 
 	// Shaders and pipelines, see VulkanPipelines.cpp
 	bool createPipelineResources();
@@ -285,8 +290,16 @@ private:
 	bool createSizeDependentResources();
 	void releaseSizeDependentResources();
 	bool createImageTarget(ImageTarget & target, VkFormat format, VkImageUsageFlags usage,
-	                       VkImageAspectFlags aspect);
+	                       VkImageAspectFlags aspect, const Vec2i & size, VkSampleCountFlagBits samples);
 	void releaseImageTarget(ImageTarget & target);
+	bool createSceneTargets(const Vec2i & size);
+	void releaseSceneTargets();
+	//! Size of the current target relative to the window, the game uses window pixels
+	Vec2f targetScale() const;
+	Rect toTargetRect(const Rect & rect) const;
+	//! Draw the scene into the window target
+	void composeScene(VkImageView scene);
+	VkPipeline getBlitPipeline();
 
 	void reinit();
 	void shutdown();
@@ -333,6 +346,14 @@ private:
 	ImageTarget m_depthTarget;
 	Vec2i m_size;
 
+	// The 3D scene, rendered at a lower resolution, see beginScene()
+	float m_sceneScale;
+	bool m_inScene;
+	Vec2i m_sceneSize;
+	ImageTarget m_sceneColor;
+	ImageTarget m_sceneDepth;
+	ImageTarget m_sceneResolved; //!< Only with MSAA, resolved at the end of rendering
+
 	Frame m_frames[FramesInFlight];
 	uint64_t m_frameSerial; //!< Unique number of the frame being recorded, see FrameCopy
 	UploadContext m_upload;
@@ -367,6 +388,11 @@ private:
 	VkPipelineLayout m_pipelineLayout;
 	VkPipelineCache m_pipelineCache;
 	std::unordered_map<uint64_t, VkPipeline> m_pipelines;
+	VkShaderModule m_blitVertexShader;
+	VkShaderModule m_blitPixelShader;
+	VkDescriptorSetLayout m_blitSetLayout;
+	VkPipelineLayout m_blitPipelineLayout;
+	VkPipeline m_blitPipeline;
 	VkBuffer m_lightConstants; //!< No per-pixel lights yet
 	VmaAllocation m_lightConstantsAllocation;
 	std::unique_ptr<VulkanTexture> m_whiteTexture; //!< Bound to the texture slots without a texture

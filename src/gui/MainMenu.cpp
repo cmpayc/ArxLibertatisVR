@@ -1365,9 +1365,9 @@ private:
 	void setUpscalerState() {
 		
 		bool direct3D = (config.video.renderer == "Direct3D 11");
-		
+
 		if(m_renderScaleCycleText) {
-			m_renderScaleCycleText->setEnabled(direct3D);
+			m_renderScaleCycleText->setEnabled(direct3D || config.video.renderer == "Vulkan");
 		}
 		if(m_upscalerCycleText) {
 			m_upscalerCycleText->setEnabled(direct3D && m_anyUpscalerAvailable);
