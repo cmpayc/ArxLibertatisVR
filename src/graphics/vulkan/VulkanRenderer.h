@@ -20,8 +20,10 @@
 #ifndef ARX_GRAPHICS_VULKAN_VULKANRENDERER_H
 #define ARX_GRAPHICS_VULKAN_VULKANRENDERER_H
 
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -298,6 +300,9 @@ private:
 	void transition(ImageTarget & target, VkImageLayout layout, VkImageAspectFlags aspect);
 
 	SDL_Window * m_window;
+
+	std::string m_snapshotPath; //!< ARX_VULKAN_SNAPSHOT
+	std::chrono::steady_clock::time_point m_snapshotTime;
 
 	VkInstance m_instance;
 	VkDebugUtilsMessengerEXT m_debugMessenger;

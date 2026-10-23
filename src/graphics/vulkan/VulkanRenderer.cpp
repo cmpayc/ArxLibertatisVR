@@ -41,6 +41,8 @@
 #include "graphics/vulkan/VulkanTextureStage.h"
 #include "graphics/vulkan/VulkanVertexBuffer.h"
 #include "graphics/vulkan/VulkanWindow.h"
+#include "graphics/image/Image.h"
+#include "io/fs/FilePath.h"
 #include "io/log/Logger.h"
 #include "platform/CrashHandler.h"
 #include "window/RenderWindow.h"
@@ -247,6 +249,15 @@ VulkanRenderer::~VulkanRenderer() {
 bool VulkanRenderer::create(SDL_Window * window, int maxMSAALevel) {
 
 	m_window = window;
+
+	// Debug snapshot of the frame after a number of seconds, for testing without capturing the screen
+	if(const char * path = std::getenv("ARX_VULKAN_SNAPSHOT")) {
+		m_snapshotPath = path;
+		const char * time = std::getenv("ARX_VULKAN_SNAPSHOT_TIME");
+		float seconds = time ? float(std::atof(time)) : 20.f;
+		m_snapshotTime = std::chrono::steady_clock::now()
+		                 + std::chrono::milliseconds(static_cast<long long>(double(seconds) * 1000.0));
+	}
 
 	if(!createInstance(window) || !selectPhysicalDevice() || !createDevice() || !createFrames()) {
 		return false;
@@ -1698,14 +1709,128 @@ void VulkanRenderer::drawIndexed(Primitive primitive, const TexturedVertex * ver
 }
 
 bool VulkanRenderer::getSnapshot(Image & image) {
-	// TODO T1.5 read back the color target
-	ARX_UNUSED(image);
-	return false;
+
+	if(!m_colorTarget.image || m_deviceLost) {
+		return false;
+	}
+
+	/*
+	 * The commands recorded so far are submitted together with the copy and waited for, the rest of the frame
+	 * continues in the next command buffer. The target keeps its contents for present().
+	 */
+	beginFrame();
+	endRendering();
+
+	uint32_t width = uint32_t(m_size.x);
+	uint32_t height = uint32_t(m_size.y);
+	VkDeviceSize size = VkDeviceSize(width) * height * 4;
+
+	VkBuffer buffer = VK_NULL_HANDLE;
+	VmaAllocation memory = VK_NULL_HANDLE;
+	VmaAllocationInfo memoryInfo = {};
+	{
+		VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+		info.size = size;
+		info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		VmaAllocationCreateInfo allocation = {};
+		allocation.usage = VMA_MEMORY_USAGE_AUTO;
+		allocation.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		if(!checkVk(vmaCreateBuffer(m_allocator, &info, &allocation, &buffer, &memory, &memoryInfo),
+		            "vmaCreateBuffer")) {
+			return false;
+		}
+	}
+
+	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+
+	transition(m_colorTarget, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	// Multisampled images cannot be copied to buffers
+	ImageTarget resolved;
+	VkImage source = m_colorTarget.image;
+	if(m_msaaSamples != VK_SAMPLE_COUNT_1_BIT) {
+		VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+		info.imageType = VK_IMAGE_TYPE_2D;
+		info.format = m_colorFormat;
+		info.extent = { width, height, 1 };
+		info.mipLevels = 1;
+		info.arrayLayers = 1;
+		info.samples = VK_SAMPLE_COUNT_1_BIT;
+		info.tiling = VK_IMAGE_TILING_OPTIMAL;
+		info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		VmaAllocationCreateInfo allocation = {};
+		allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+		if(!checkVk(vmaCreateImage(m_allocator, &info, &allocation, &resolved.image, &resolved.allocation, nullptr),
+		            "vmaCreateImage")) {
+			vmaDestroyBuffer(m_allocator, buffer, memory);
+			return false;
+		}
+		transition(resolved, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+		VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+		VkImageResolve region = { layers, { 0, 0, 0 }, layers, { 0, 0, 0 }, { width, height, 1 } };
+		vkCmdResolveImage(commands, m_colorTarget.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, resolved.image,
+		                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+		transition(resolved, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+		source = resolved.image;
+	}
+
+	VkBufferImageCopy copy = {};
+	copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	copy.imageExtent = { width, height, 1 };
+	vkCmdCopyImageToBuffer(commands, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &copy);
+
+	VkBufferMemoryBarrier barrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer = buffer;
+	barrier.size = VK_WHOLE_SIZE;
+	vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
+	                     &barrier, 0, nullptr);
+
+	VkFence fence = m_frames[m_frameIndex].fence;
+	endFrame(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
+	bool success = !m_deviceLost
+	               && vkWaitForFences(m_device, 1, &fence, VK_TRUE, std::numeric_limits<uint64_t>::max()) == VK_SUCCESS;
+
+	if(success) {
+		vmaInvalidateAllocation(m_allocator, memory, 0, VK_WHOLE_SIZE);
+		bool bgra = (m_colorFormat == VK_FORMAT_B8G8R8A8_UNORM || m_colorFormat == VK_FORMAT_B8G8R8A8_SRGB);
+		image.create(size_t(width), size_t(height), Image::Format_R8G8B8);
+		const u8 * in = static_cast<const u8 *>(memoryInfo.pMappedData);
+		u8 * out = image.getData();
+		for(size_t i = 0; i < size_t(width) * height; i++, in += 4, out += 3) {
+			out[0] = in[bgra ? 2 : 0];
+			out[1] = in[1];
+			out[2] = in[bgra ? 0 : 2];
+		}
+	}
+
+	// The GPU is done with them
+	if(resolved.image) {
+		vmaDestroyImage(m_allocator, resolved.image, resolved.allocation);
+	}
+	vmaDestroyBuffer(m_allocator, buffer, memory);
+
+	return success;
 }
 
 bool VulkanRenderer::getSnapshot(Image & image, size_t width, size_t height) {
-	ARX_UNUSED(image), ARX_UNUSED(width), ARX_UNUSED(height);
-	return false;
+
+	// TODO handle scaling on the GPU so we don't need to download the whole image
+
+	Image fullsize;
+	if(!getSnapshot(fullsize)) {
+		return false;
+	}
+
+	image.resizeFrom(fullsize, width, height);
+
+	return true;
 }
 
 void VulkanRenderer::setVSync(int vsync) {
@@ -1719,6 +1844,16 @@ void VulkanRenderer::present() {
 
 	if(!m_device || m_deviceLost) {
 		return;
+	}
+
+	if(!m_snapshotPath.empty() && std::chrono::steady_clock::now() >= m_snapshotTime) {
+		Image image;
+		if(getSnapshot(image) && image.save(fs::path(m_snapshotPath))) {
+			LogInfo << "Saved debug snapshot to " << m_snapshotPath;
+		} else {
+			LogError << "Failed to save debug snapshot to " << m_snapshotPath;
+		}
+		m_snapshotPath.clear();
 	}
 
 	if(m_swapchainDirty || !m_swapchain) {
