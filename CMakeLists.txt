@@ -1050,6 +1050,7 @@ set(GRAPHICS_SOURCES
 	src/graphics/spells/Spells05.cpp
 	src/graphics/texture/PackedTexture.cpp
 	src/graphics/texture/Texture.cpp
+	src/graphics/texture/TextureMaterial.cpp
 	src/graphics/texture/TextureStage.cpp
 )
 

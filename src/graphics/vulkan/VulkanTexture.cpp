@@ -31,6 +31,11 @@ VulkanTexture::VulkanTexture(VulkanRenderer * renderer)
 	, m_texture(VK_NULL_HANDLE)
 	, m_allocation(VK_NULL_HANDLE)
 	, m_view(VK_NULL_HANDLE)
+	, m_textureSize(0)
+	, m_textureMipmaps(false)
+	, m_relief(VK_NULL_HANDLE)
+	, m_reliefAllocation(VK_NULL_HANDLE)
+	, m_reliefView(VK_NULL_HANDLE)
 	, m_isNPOT(false)
 { }
 
@@ -45,6 +50,8 @@ bool VulkanTexture::create() {
 
 	Vec2i nextPowerOfTwo(GetNextPowerOf2(unsigned(getSize().x)), GetNextPowerOf2(unsigned(getSize().y)));
 	m_isNPOT = (getSize() != nextPowerOfTwo);
+
+	m_material = guessTextureMaterial(getFileName().string());
 
 	return true;
 }
@@ -161,12 +168,7 @@ void VulkanTexture::upload() {
 
 	uint32_t width = uint32_t(size.x);
 	uint32_t height = uint32_t(size.y);
-	uint32_t levels = 1;
-	if(hasMipmaps()) {
-		while((std::max(width, height) >> levels) != 0) {
-			levels++;
-		}
-	}
+	uint32_t levels = hasMipmaps() ? vulkanMipLevels(width, height) : 1;
 
 	VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	info.imageType = VK_IMAGE_TYPE_2D;
@@ -223,14 +225,85 @@ void VulkanTexture::upload() {
 	copy.imageExtent = { width, height, 1 };
 	vkCmdCopyBufferToImage(commands, staging, m_texture, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
+	recordVulkanMipmaps(commands, m_texture, width, height, levels, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+	m_textureSize = size;
+	m_textureMipmaps = (levels > 1);
+
+	// The contents changed
+	updateReliefMap();
+
+}
+
+void VulkanTexture::updateReliefMap() {
+
+	// Only textures for the 3D scene have mipmaps
+	if(m_reliefView || !m_view || !m_textureMipmaps || !m_renderer || !m_renderer->reliefMapsEnabled()) {
+		return;
+	}
+
+	m_renderer->createReliefMap(m_view, m_textureSize, m_relief, m_reliefAllocation, m_reliefView);
+
+}
+
+void VulkanTexture::releaseReliefMap() {
+
+	if(!m_relief || !m_renderer) {
+		return;
+	}
+
+	VkDevice device = m_renderer->device();
+	VmaAllocator allocator = m_renderer->allocator();
+	VkImage image = m_relief;
+	VmaAllocation allocation = m_reliefAllocation;
+	VkImageView view = m_reliefView;
+	m_renderer->deferRelease([device, allocator, image, allocation, view]() {
+		if(view) {
+			vkDestroyImageView(device, view, nullptr);
+		}
+		vmaDestroyImage(allocator, image, allocation);
+	});
+
+	m_relief = VK_NULL_HANDLE;
+	m_reliefAllocation = VK_NULL_HANDLE;
+	m_reliefView = VK_NULL_HANDLE;
+
+}
+
+uint32_t vulkanMipLevels(uint32_t width, uint32_t height) {
+	uint32_t levels = 1;
+	while((std::max(width, height) >> levels) != 0) {
+		levels++;
+	}
+	return levels;
+}
+
+void recordVulkanMipmaps(VkCommandBuffer commands, VkImage image, uint32_t width, uint32_t height, uint32_t levels,
+                         VkImageLayout firstLayout, VkPipelineStageFlags firstStage, VkAccessFlags firstAccess) {
+
+	if(levels <= 1) {
+		imageBarrier(commands, image, 0, 1, firstLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, firstStage,
+		             firstAccess, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+		return;
+	}
+
+	imageBarrier(commands, image, 1, levels - 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
 	// Box-filtered mipmaps like glGenerateMipmap and Direct3D 11 GenerateMips
 	int32_t levelWidth = int32_t(width);
 	int32_t levelHeight = int32_t(height);
 	for(uint32_t level = 1; level < levels; level++) {
 
-		imageBarrier(commands, m_texture, level - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-		             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+		if(level == 1) {
+			imageBarrier(commands, image, 0, 1, firstLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, firstStage,
+			             firstAccess, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+		} else {
+			imageBarrier(commands, image, level - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			             VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+		}
 
 		int32_t nextWidth = std::max(levelWidth / 2, 1);
 		int32_t nextHeight = std::max(levelHeight / 2, 1);
@@ -240,25 +313,25 @@ void VulkanTexture::upload() {
 		blit.srcOffsets[1] = { levelWidth, levelHeight, 1 };
 		blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1 };
 		blit.dstOffsets[1] = { nextWidth, nextHeight, 1 };
-		vkCmdBlitImage(commands, m_texture, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_texture,
-		               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+		vkCmdBlitImage(commands, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		               1, &blit, VK_FILTER_LINEAR);
 
 		levelWidth = nextWidth;
 		levelHeight = nextHeight;
 	}
 
-	if(levels > 1) {
-		imageBarrier(commands, m_texture, 0, levels - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
-		             VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-	}
-	imageBarrier(commands, m_texture, levels - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	imageBarrier(commands, image, 0, levels - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	             VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+	imageBarrier(commands, image, levels - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 	             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
 	             VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 
 }
 
 void VulkanTexture::releaseImage() {
+
+	releaseReliefMap();
 
 	if(!m_texture || !m_renderer) {
 		return;

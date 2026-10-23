@@ -160,8 +160,18 @@ VulkanRenderer::VulkanRenderer()
 	, m_blitSetLayout(VK_NULL_HANDLE)
 	, m_blitPipelineLayout(VK_NULL_HANDLE)
 	, m_blitPipeline(VK_NULL_HANDLE)
-	, m_lightConstants(VK_NULL_HANDLE)
-	, m_lightConstantsAllocation(VK_NULL_HANDLE)
+	, m_reliefPixelShader(VK_NULL_HANDLE)
+	, m_reliefPipeline(VK_NULL_HANDLE)
+	, m_fullRectConstants(VK_NULL_HANDLE)
+	, m_fullRectAllocation(VK_NULL_HANDLE)
+	, m_pixelLighting(false)
+	, m_normalMapStrength(0.f)
+	, m_parallaxStrength(0.f)
+	, m_specularStrength(0.f)
+	, m_waterSurface(false)
+	, m_drawingScene(false)
+	, m_effectTime(0.f)
+	, m_lightDataSize(0)
 	, m_boundPipeline(VK_NULL_HANDLE)
 	, m_boundVertexBuffer(VK_NULL_HANDLE)
 	, m_boundVertexOffset(0)
@@ -235,6 +245,7 @@ VulkanRenderer::~VulkanRenderer() {
 		}
 		vkDestroyFence(m_device, m_upload.fence, nullptr);
 		vkDestroyCommandPool(m_device, m_upload.commandPool, nullptr);
+		vkDestroyDescriptorPool(m_device, m_upload.descriptorPool, nullptr);
 
 		if(m_allocator) {
 			vmaDestroyAllocator(m_allocator);
@@ -612,6 +623,24 @@ bool VulkanRenderer::createFrames() {
 		return false;
 	}
 
+	// Full-screen passes recorded with the uploads (relief maps)
+	{
+		const uint32_t sets = 256;
+		const VkDescriptorPoolSize sizes[] = {
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, sets },
+			{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sets },
+			{ VK_DESCRIPTOR_TYPE_SAMPLER, sets },
+		};
+		VkDescriptorPoolCreateInfo info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+		info.maxSets = sets;
+		info.poolSizeCount = uint32_t(std::size(sizes));
+		info.pPoolSizes = sizes;
+		if(!checkVk(vkCreateDescriptorPool(m_device, &info, nullptr, &m_upload.descriptorPool),
+		            "vkCreateDescriptorPool")) {
+			return false;
+		}
+	}
+
 	return true;
 }
 
@@ -951,7 +980,15 @@ void VulkanRenderer::beginScene() {
 		return;
 	}
 
-	// TODO Phase 2: also for the effects
+	m_drawingScene = true;
+
+	{
+		// The lava animation repeats, see LavaTimePeriod
+		double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		m_effectTime = float(std::fmod(seconds, 20.0 * 3.14159265358979323846));
+	}
+
+	// TODO Phase 2: also for the effects that need the scene targets
 	if(m_sceneScale >= 1.f) {
 		return;
 	}
@@ -970,6 +1007,8 @@ void VulkanRenderer::beginScene() {
 }
 
 void VulkanRenderer::endScene() {
+
+	m_drawingScene = false;
 
 	if(!m_inScene) {
 		return;
@@ -1508,6 +1547,36 @@ void VulkanRenderer::flushUploads() {
 	m_upload.staging.clear();
 	m_upload.stagingSize = 0;
 
+	for(std::function<void()> & release : m_upload.releases) {
+		release();
+	}
+	m_upload.releases.clear();
+	vkResetDescriptorPool(m_device, m_upload.descriptorPool, 0);
+
+}
+
+VkDescriptorSet VulkanRenderer::allocateUploadDescriptorSet(VkDescriptorSetLayout layout) {
+
+	for(int attempt = 0; attempt < 2; attempt++) {
+		VkDescriptorSetAllocateInfo info = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+		info.descriptorPool = m_upload.descriptorPool;
+		info.descriptorSetCount = 1;
+		info.pSetLayouts = &layout;
+		VkDescriptorSet set = VK_NULL_HANDLE;
+		VkResult result = vkAllocateDescriptorSets(m_device, &info, &set);
+		if(result == VK_SUCCESS) {
+			return set;
+		}
+		if(result != VK_ERROR_OUT_OF_POOL_MEMORY && result != VK_ERROR_FRAGMENTED_POOL) {
+			checkVk(result, "vkAllocateDescriptorSets");
+			return VK_NULL_HANDLE;
+		}
+		// The pool is full: execute the recorded uploads, which frees their descriptor sets
+		flushUploads();
+	}
+
+	return VK_NULL_HANDLE;
+
 }
 
 VkSampler VulkanRenderer::getSampler(TextureStage::WrapMode wrapMode, TextureStage::FilterMode minFilter,
@@ -1668,8 +1737,7 @@ VkDescriptorSet VulkanRenderer::allocateDescriptorSet(VkDescriptorSetLayout layo
 		if(frame.descriptorPool == frame.descriptorPools.size()) {
 			const uint32_t sets = 1024;
 			const VkDescriptorPoolSize sizes[] = {
-				{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 2 * sets },
-				{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, sets },
+				{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3 * sets },
 				{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4 * sets },
 				{ VK_DESCRIPTOR_TYPE_SAMPLER, 3 * sets },
 			};

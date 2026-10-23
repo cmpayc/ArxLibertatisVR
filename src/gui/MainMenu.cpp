@@ -1365,9 +1365,10 @@ private:
 	void setUpscalerState() {
 		
 		bool direct3D = (config.video.renderer == "Direct3D 11");
+		bool vulkan = (config.video.renderer == "Vulkan");
 
 		if(m_renderScaleCycleText) {
-			m_renderScaleCycleText->setEnabled(direct3D || config.video.renderer == "Vulkan");
+			m_renderScaleCycleText->setEnabled(direct3D || vulkan);
 		}
 		if(m_upscalerCycleText) {
 			m_upscalerCycleText->setEnabled(direct3D && m_anyUpscalerAvailable);
@@ -1391,19 +1392,19 @@ private:
 			m_shadowsCycleText->setEnabled(direct3D);
 		}
 		if(m_normalMapsCycleText) {
-			m_normalMapsCycleText->setEnabled(direct3D);
+			m_normalMapsCycleText->setEnabled(direct3D || vulkan);
 		}
 		if(m_parallaxMappingCycleText) {
-			m_parallaxMappingCycleText->setEnabled(direct3D);
+			m_parallaxMappingCycleText->setEnabled(direct3D || vulkan);
 		}
 		if(m_specularCycleText) {
-			m_specularCycleText->setEnabled(direct3D);
+			m_specularCycleText->setEnabled(direct3D || vulkan);
 		}
 		if(m_reflectionsCycleText) {
 			m_reflectionsCycleText->setEnabled(direct3D);
 		}
 		if(m_pixelLightingCheckbox) {
-			m_pixelLightingCheckbox->setEnabled(direct3D);
+			m_pixelLightingCheckbox->setEnabled(direct3D || vulkan);
 		}
 		
 	}

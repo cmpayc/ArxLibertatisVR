@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "core/Config.h"
@@ -46,6 +47,7 @@
 #include "psMainSampleShading.h"
 #include "vsBlit.h"
 #include "psBlit.h"
+#include "psNormalMap.h"
 
 /*
  * Shader resources: Direct3D 11 has separate slots for each shader stage, they are mapped to the bindings of
@@ -97,6 +99,23 @@ struct PSConstants {
 };
 
 const size_t MaxPixelLights = 128;
+
+// Same as the Direct3D 11 backend
+
+// Normal map slope at full strength, the generated slope is the brightness change per texel
+const float NormalMapSlopeScale = 6.f;
+
+// Parallax depth at full strength, relative to the texture size
+const float ParallaxDepthScale = 0.05f;
+
+// Highlight strength of the shiniest materials at full strength
+const float SpecularScale = 1.5f;
+
+// Highlights and reflections of water surfaces
+const TextureMaterial WaterMaterial = { 1.f, 96.f, 0.f, 1.f };
+
+// The lava animation repeats after this time, the frequencies of its waves are multiples of 0.1
+const float LavaTimePeriod = 20.f * glm::pi<float>();
 
 struct LightConstants {
 	s32 count[4];
@@ -233,6 +252,8 @@ bool VulkanRenderer::createPipelineResources() {
 	if(!m_blitVertexShader || !m_blitPixelShader) {
 		return false;
 	}
+	// Relief maps for normal and parallax mapping are optional
+	m_reliefPixelShader = createShaderModule(m_device, spirv_psNormalMap, sizeof(spirv_psNormalMap), "psNormalMap");
 	// Per-sample shading of alpha cutouts (SV_SampleIndex)
 	if(m_features.sampleRateShading) {
 		m_pixelShaderSampleShading = createShaderModule(m_device, spirv_psMainSampleShading,
@@ -250,7 +271,8 @@ bool VulkanRenderer::createPipelineResources() {
 	};
 	addBinding(VSConstantsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_SHADER_STAGE_VERTEX_BIT);
 	addBinding(PSConstantsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_SHADER_STAGE_FRAGMENT_BIT);
-	addBinding(LightConstantsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	// The lights change during the frame, they are copied into the memory of the frame like the other constants
+	addBinding(LightConstantsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_SHADER_STAGE_FRAGMENT_BIT);
 	for(uint32_t i = 0; i < TextureSlotCount; i++) {
 		addBinding(TextureBinding + i, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT);
 	}
@@ -308,24 +330,30 @@ bool VulkanRenderer::createPipelineResources() {
 		}
 	}
 
-	// No per-pixel lights yet, the shader still reads the light count
+	// Full-screen passes outside of frames (relief maps) read the whole source
 	{
 		VkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-		info.size = sizeof(LightConstants);
+		info.size = sizeof(BlitConstants);
 		info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 		info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 		VmaAllocationCreateInfo allocation = {};
 		allocation.usage = VMA_MEMORY_USAGE_AUTO;
 		allocation.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
 		VmaAllocationInfo allocationInfo = {};
-		if(vmaCreateBuffer(m_allocator, &info, &allocation, &m_lightConstants, &m_lightConstantsAllocation,
+		if(vmaCreateBuffer(m_allocator, &info, &allocation, &m_fullRectConstants, &m_fullRectAllocation,
 		                   &allocationInfo) != VK_SUCCESS) {
-			LogError << "Failed to create the Vulkan light constants";
+			LogError << "Failed to create the Vulkan blit constants";
 			return false;
 		}
-		std::memset(allocationInfo.pMappedData, 0, sizeof(LightConstants));
-		vmaFlushAllocation(m_allocator, m_lightConstantsAllocation, 0, VK_WHOLE_SIZE);
+		BlitConstants constants = { { 0.f, 0.f, 1.f, 1.f } };
+		std::memcpy(allocationInfo.pMappedData, &constants, sizeof(constants));
+		vmaFlushAllocation(m_allocator, m_fullRectAllocation, 0, VK_WHOLE_SIZE);
 	}
+
+	// No per-pixel lights until setPixelLights(), the shader still reads the light count
+	m_lightData.assign(sizeof(LightConstants), 0);
+	m_lightDataSize = sizeof(LightConstants::count);
+	m_lights = FrameCopy();
 
 	// Texture slots without a texture still need a valid image
 	{
@@ -381,10 +409,15 @@ void VulkanRenderer::releasePipelineResources() {
 		m_whiteTexture.reset();
 	}
 
-	if(m_lightConstants) {
-		vmaDestroyBuffer(m_allocator, m_lightConstants, m_lightConstantsAllocation);
-		m_lightConstants = VK_NULL_HANDLE;
+	if(m_fullRectConstants) {
+		vmaDestroyBuffer(m_allocator, m_fullRectConstants, m_fullRectAllocation);
+		m_fullRectConstants = VK_NULL_HANDLE;
 	}
+
+	vkDestroyPipeline(m_device, m_reliefPipeline, nullptr);
+	m_reliefPipeline = VK_NULL_HANDLE;
+	vkDestroyShaderModule(m_device, m_reliefPixelShader, nullptr);
+	m_reliefPixelShader = VK_NULL_HANDLE;
 
 	vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
 	m_pipelineLayout = VK_NULL_HANDLE;
@@ -698,7 +731,13 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 		constants.camera[1] = camera.y;
 		constants.camera[2] = camera.z;
 		constants.camera[3] = 0.f;
+		// Pre-transformed vertices of models in the 3D scene go back to world space with the scene camera, for the
+		// per-pixel highlights. World coordinates are large, so this is computed in double precision.
 		glm::mat4x4 modelToWorld(1.f);
+		if(type == VertexTL && m_drawingScene) {
+			modelToWorld = glm::mat4x4(glm::inverse(glm::dmat4(m_projection) * glm::dmat4(m_view))
+			                           * glm::dmat4(screenTransform()));
+		}
 		std::memcpy(constants.modelToWorld, &modelToWorld, sizeof(constants.modelToWorld));
 		glm::mat4x4 worldToClip = m_projection * m_view;
 		std::memcpy(constants.worldToClip, &worldToClip, sizeof(constants.worldToClip));
@@ -727,9 +766,57 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 			constants.stages[i][0] = s32(stage->getColorOp());
 			constants.stages[i][1] = s32(stage->getAlphaOp());
 			constants.stages[i][2] = texture ? 1 : 0;
-			constants.stages[i][3] = 0; // No relief map yet
 		}
 		descriptors.views[3] = m_whiteTexture->view();
+
+		// Material of the main texture, same as the Direct3D 11 backend (without the model tessellation)
+		if(VulkanTexture * texture = GetTextureStage(0)->getActiveTexture()) {
+
+			const TextureMaterial & material = texture->material();
+
+			// Relief map for normal mapping and parallax mapping of world geometry
+			if(type == VertexWorld && reliefMapsEnabled() && texture->reliefView()) {
+				descriptors.views[3] = texture->reliefView();
+				constants.stages[0][3] = 1;
+				constants.relief[0] = m_normalMapStrength * NormalMapSlopeScale;
+				constants.relief[1] = m_parallaxStrength * ParallaxDepthScale;
+			}
+
+			// Highlights from the material of the main texture
+			if((type == VertexWorld || (type == VertexTL && m_drawingScene)) && m_specularStrength > 0.f) {
+				constants.specular[0] = material.strength * m_specularStrength * SpecularScale;
+				constants.specular[1] = material.exponent;
+				constants.specular[2] = material.metallic;
+				constants.specular[3] = m_specularStrength * SpecularScale;
+				// Metal and leather parts of armor in the 3D scene
+				if(type == VertexTL) {
+					constants.material[0] = material.metalParts;
+					constants.material[1] = material.leather;
+				}
+			}
+
+			// Lava glows and flows in the 3D scene
+			if((type == VertexWorld || type == VertexTL) && m_drawingScene && material.glow > 0.f) {
+				constants.effect[0] = m_effectTime;
+				constants.effect[1] = material.glow;
+			}
+			// Ice looks deep, cold and sparkles in the 3D scene, crystals and gems (also items) look clear and deep
+			if(type == VertexWorld && m_drawingScene) {
+				constants.effect[2] = material.ice;
+			}
+			if((type == VertexWorld || type == VertexTL) && m_drawingScene) {
+				constants.effect[3] = material.crystal;
+			}
+
+		}
+
+		// Water is drawn without normals, with an animated texture
+		if(type == VertexWorld3 && m_waterSurface) {
+			constants.specular[0] = WaterMaterial.strength * m_specularStrength * SpecularScale;
+			constants.specular[1] = WaterMaterial.exponent;
+			constants.specular[2] = WaterMaterial.metallic;
+			constants.surface[2] = 1.f;
+		}
 
 		constants.fogColor[0] = m_fogColor.r;
 		constants.fogColor[1] = m_fogColor.g;
@@ -754,10 +841,24 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 		}
 	}
 
+	// The lights of the frame, copied once per frame and again when they change
+	if(m_lights.frame != m_frameSerial || !m_lights.buffer) {
+		RingAllocation lights;
+		if(!allocate(m_frames[m_frameIndex].constants, sizeof(LightConstants), alignment, lights)) {
+			return false;
+		}
+		// Only the lights in use are read
+		std::memcpy(lights.data, m_lightData.data(), m_lightDataSize);
+		m_lights.frame = m_frameSerial;
+		m_lights.buffer = lights.buffer;
+		m_lights.offset = lights.offset;
+	}
+
 	// Descriptors
 
 	descriptors.vsConstants = m_vsConstants.buffer;
 	descriptors.psConstants = m_psConstants.buffer;
+	descriptors.lightConstants = m_lights.buffer;
 
 	bool setChanged = false;
 	if(!m_boundDescriptorSet || !(descriptors == m_boundDescriptors)) {
@@ -769,7 +870,7 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 
 		VkDescriptorBufferInfo vsBuffer = { descriptors.vsConstants, 0, sizeof(VSConstants) };
 		VkDescriptorBufferInfo psBuffer = { descriptors.psConstants, 0, sizeof(PSConstants) };
-		VkDescriptorBufferInfo lightBuffer = { m_lightConstants, 0, sizeof(LightConstants) };
+		VkDescriptorBufferInfo lightBuffer = { descriptors.lightConstants, 0, sizeof(LightConstants) };
 		VkDescriptorImageInfo images[TextureSlotCount];
 		for(size_t i = 0; i < TextureSlotCount; i++) {
 			images[i] = { VK_NULL_HANDLE, descriptors.views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -792,7 +893,7 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 		writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		writes[1].pBufferInfo = &psBuffer;
 		writes[2].dstBinding = LightConstantsBinding;
-		writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 		writes[2].pBufferInfo = &lightBuffer;
 		// Consecutive bindings of the same type can be written as an array
 		writes[3].dstBinding = TextureBinding;
@@ -810,12 +911,16 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 		setChanged = true;
 	}
 
+	// Dynamic offsets in the order of the bindings
 	if(setChanged || m_boundConstantOffsets[0] != uint32_t(m_vsConstants.offset)
-	   || m_boundConstantOffsets[1] != uint32_t(m_psConstants.offset)) {
+	   || m_boundConstantOffsets[1] != uint32_t(m_psConstants.offset)
+	   || m_boundConstantOffsets[2] != uint32_t(m_lights.offset)) {
 		m_boundConstantOffsets[0] = uint32_t(m_vsConstants.offset);
 		m_boundConstantOffsets[1] = uint32_t(m_psConstants.offset);
+		m_boundConstantOffsets[2] = uint32_t(m_lights.offset);
 		vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout, 0, 1,
-		                        &m_boundDescriptorSet, 2, m_boundConstantOffsets);
+		                        &m_boundDescriptorSet, uint32_t(std::size(m_boundConstantOffsets)),
+		                        m_boundConstantOffsets);
 	}
 
 	return true;
@@ -960,4 +1065,302 @@ void VulkanRenderer::composeScene(VkImageView scene) {
 	// The next draw binds its own state
 	invalidateBoundState();
 	
+}
+
+void VulkanRenderer::setPixelLighting(bool enabled) {
+
+	m_pixelLighting = enabled;
+
+	if(!enabled) {
+		setPixelLights(nullptr, 0);
+	}
+
+}
+
+void VulkanRenderer::setPixelLights(const PixelLight * lights, size_t count) {
+
+	if(m_lightData.size() != sizeof(LightConstants)) {
+		return;
+	}
+
+	// Lights that only add highlights come last and are dropped first
+	size_t diffuseCount = 0;
+	while(diffuseCount < count && !lights[diffuseCount].specularOnly) {
+		diffuseCount++;
+	}
+	if(diffuseCount > MaxPixelLights) {
+		static bool warned = false;
+		if(!warned) {
+			LogWarning << "Too many lights for per-pixel lighting: " << diffuseCount << " > " << MaxPixelLights;
+			warned = true;
+		}
+	}
+	count = std::min(count, MaxPixelLights);
+	diffuseCount = std::min(diffuseCount, count);
+
+	LightConstants & constants = *reinterpret_cast<LightConstants *>(m_lightData.data());
+	if(count == 0 && constants.count[2] == 0) {
+		return;
+	}
+	constants.count[0] = s32(diffuseCount);
+	constants.count[1] = 0; // No debug views
+	constants.count[2] = s32(count);
+	constants.count[3] = 0;
+	for(size_t i = 0; i < count; i++) {
+		const PixelLight & light = lights[i];
+		float * a = constants.lights[i * 2];
+		float * b = constants.lights[i * 2 + 1];
+		a[0] = light.position.x;
+		a[1] = light.position.y;
+		a[2] = light.position.z;
+		a[3] = light.fallStart;
+		b[0] = light.color.r * light.intensity;
+		b[1] = light.color.g * light.intensity;
+		b[2] = light.color.b * light.intensity;
+		b[3] = light.fallEnd;
+	}
+	m_lightDataSize = sizeof(LightConstants::count) + count * 2 * sizeof(LightConstants::lights[0]);
+
+	// Copied again for the next draw, draws recorded before keep the old lights
+	m_lights.frame = 0;
+
+}
+
+void VulkanRenderer::setNormalMaps(float strength) {
+
+	bool wasEnabled = reliefMapsEnabled();
+	m_normalMapStrength = glm::clamp(strength, 0.f, 1.f);
+	updateReliefMaps(wasEnabled);
+
+}
+
+void VulkanRenderer::setParallaxMapping(float strength) {
+
+	bool wasEnabled = reliefMapsEnabled();
+	m_parallaxStrength = glm::clamp(strength, 0.f, 1.f);
+	updateReliefMaps(wasEnabled);
+
+}
+
+void VulkanRenderer::setSpecular(float strength) {
+	m_specularStrength = glm::clamp(strength, 0.f, 1.f);
+}
+
+void VulkanRenderer::updateReliefMaps(bool wasEnabled) {
+
+	bool enabled = reliefMapsEnabled();
+	if(enabled == wasEnabled) {
+		return;
+	}
+
+	// Generate the relief maps for the loaded textures, or free them
+	for(VulkanTexture & texture : m_textures) {
+		if(enabled) {
+			texture.updateReliefMap();
+		} else {
+			texture.releaseReliefMap();
+		}
+	}
+
+}
+
+VkPipeline VulkanRenderer::getReliefPipeline() {
+
+	if(m_reliefPipeline || !m_reliefPixelShader) {
+		return m_reliefPipeline;
+	}
+
+	VkPipelineShaderStageCreateInfo stages[2] = {
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO }
+	};
+	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	stages[0].module = m_blitVertexShader;
+	stages[0].pName = "vsBlit";
+	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stages[1].module = m_reliefPixelShader;
+	stages[1].pName = "psNormalMap";
+
+	VkPipelineVertexInputStateCreateInfo vertexInput = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly
+		= { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	VkPipelineViewportStateCreateInfo viewport = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+	viewport.viewportCount = 1;
+	viewport.scissorCount = 1;
+	VkPipelineRasterizationStateCreateInfo rasterization
+		= { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+	rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterization.cullMode = VK_CULL_MODE_NONE;
+	rasterization.lineWidth = 1.f;
+	VkPipelineMultisampleStateCreateInfo multisample = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+	multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	VkPipelineDepthStencilStateCreateInfo depthStencil = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+	VkPipelineColorBlendAttachmentState blend = {};
+	blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
+	                       | VK_COLOR_COMPONENT_A_BIT;
+	VkPipelineColorBlendStateCreateInfo colorBlend = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+	colorBlend.attachmentCount = 1;
+	colorBlend.pAttachments = &blend;
+	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamic = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+	dynamic.dynamicStateCount = uint32_t(std::size(dynamicStates));
+	dynamic.pDynamicStates = dynamicStates;
+
+	const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+	VkPipelineRenderingCreateInfoKHR rendering = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR };
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachmentFormats = &format;
+
+	VkGraphicsPipelineCreateInfo info = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+	info.pNext = &rendering;
+	info.stageCount = uint32_t(std::size(stages));
+	info.pStages = stages;
+	info.pVertexInputState = &vertexInput;
+	info.pInputAssemblyState = &inputAssembly;
+	info.pViewportState = &viewport;
+	info.pRasterizationState = &rasterization;
+	info.pMultisampleState = &multisample;
+	info.pDepthStencilState = &depthStencil;
+	info.pColorBlendState = &colorBlend;
+	info.pDynamicState = &dynamic;
+	info.layout = m_blitPipelineLayout;
+
+	if(vkCreateGraphicsPipelines(m_device, m_pipelineCache, 1, &info, nullptr, &m_reliefPipeline) != VK_SUCCESS) {
+		LogError << "Failed to create the Vulkan relief map pipeline";
+		m_reliefPipeline = VK_NULL_HANDLE;
+		// Do not try again for every texture
+		vkDestroyShaderModule(m_device, m_reliefPixelShader, nullptr);
+		m_reliefPixelShader = VK_NULL_HANDLE;
+	}
+
+	return m_reliefPipeline;
+}
+
+void VulkanRenderer::createReliefMap(VkImageView color, const Vec2i & size, VkImage & image,
+                                     VmaAllocation & allocation, VkImageView & view) {
+
+	VkPipeline pipeline = getReliefPipeline();
+	if(!pipeline || !color || size.x <= 0 || size.y <= 0) {
+		return;
+	}
+
+	uint32_t width = uint32_t(size.x);
+	uint32_t height = uint32_t(size.y);
+	uint32_t levels = vulkanMipLevels(width, height);
+
+	VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	info.imageType = VK_IMAGE_TYPE_2D;
+	info.format = VK_FORMAT_R8G8B8A8_UNORM;
+	info.extent = { width, height, 1 };
+	info.mipLevels = levels;
+	info.arrayLayers = 1;
+	info.samples = VK_SAMPLE_COUNT_1_BIT;
+	info.tiling = VK_IMAGE_TILING_OPTIMAL;
+	info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+	             | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VmaAllocationCreateInfo create = {};
+	create.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	if(vmaCreateImage(m_allocator, &info, &create, &image, &allocation, nullptr) != VK_SUCCESS) {
+		LogError << "Failed to create " << size.x << "x" << size.y << " Vulkan relief map";
+		image = VK_NULL_HANDLE;
+		allocation = VK_NULL_HANDLE;
+		return;
+	}
+
+	// All levels for sampling, the first one for rendering
+	VkImageView target = VK_NULL_HANDLE;
+	VkImageViewCreateInfo viewInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	viewInfo.image = image;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.format = info.format;
+	viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1 };
+	bool success = (vkCreateImageView(m_device, &viewInfo, nullptr, &view) == VK_SUCCESS);
+	viewInfo.subresourceRange.levelCount = 1;
+	success = success && (vkCreateImageView(m_device, &viewInfo, nullptr, &target) == VK_SUCCESS);
+
+	VkDescriptorSet set = success ? allocateUploadDescriptorSet(m_blitSetLayout) : VK_NULL_HANDLE;
+	if(!set) {
+		LogError << "Failed to prepare the Vulkan relief map";
+		vkDestroyImageView(m_device, target, nullptr);
+		vkDestroyImageView(m_device, view, nullptr);
+		vmaDestroyImage(m_allocator, image, allocation);
+		image = VK_NULL_HANDLE;
+		allocation = VK_NULL_HANDLE;
+		view = VK_NULL_HANDLE;
+		return;
+	}
+
+	VkDescriptorBufferInfo buffer = { m_fullRectConstants, 0, sizeof(BlitConstants) };
+	VkDescriptorImageInfo source = { VK_NULL_HANDLE, color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+	VkDescriptorImageInfo sampler = {
+		getSampler(TextureStage::WrapClamp, TextureStage::FilterNearest, TextureStage::FilterNearest, false, 0.f),
+		VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED
+	};
+	VkWriteDescriptorSet writes[3];
+	for(VkWriteDescriptorSet & write : writes) {
+		write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+		write.dstSet = set;
+		write.descriptorCount = 1;
+	}
+	writes[0].dstBinding = BlitConstantsBinding;
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+	writes[0].pBufferInfo = &buffer;
+	writes[1].dstBinding = TextureBinding;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	writes[1].pImageInfo = &source;
+	writes[2].dstBinding = SamplerBinding;
+	writes[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+	writes[2].pImageInfo = &sampler;
+	vkUpdateDescriptorSets(m_device, uint32_t(std::size(writes)), writes, 0, nullptr);
+
+	// After the upload of the texture and its mipmaps, see VulkanTexture::upload()
+	VkCommandBuffer commands = beginUpload();
+
+	VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+	barrier.srcAccessMask = 0;
+	barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = image;
+	barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+	                     0, nullptr, 0, nullptr, 1, &barrier);
+
+	VkRenderingAttachmentInfoKHR attachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+	attachment.imageView = target;
+	attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	VkRenderingInfoKHR rendering = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+	rendering.renderArea = { { 0, 0 }, { width, height } };
+	rendering.layerCount = 1;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachments = &attachment;
+	m_cmdBeginRendering(commands, &rendering);
+
+	vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	uint32_t offset = 0;
+	vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, m_blitPipelineLayout, 0, 1, &set, 1, &offset);
+	VkViewport viewport = { 0.f, float(height), float(width), -float(height), 0.f, 1.f };
+	vkCmdSetViewport(commands, 0, 1, &viewport);
+	VkRect2D scissor = { { 0, 0 }, { width, height } };
+	vkCmdSetScissor(commands, 0, 1, &scissor);
+	vkCmdDraw(commands, 3, 1, 0, 0);
+
+	m_cmdEndRendering(commands);
+
+	recordVulkanMipmaps(commands, image, width, height, levels, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+	                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+
+	// The view for rendering is only used by the upload commands
+	VkDevice device = m_device;
+	m_upload.releases.push_back([device, target]() {
+		vkDestroyImageView(device, target, nullptr);
+	});
+
 }

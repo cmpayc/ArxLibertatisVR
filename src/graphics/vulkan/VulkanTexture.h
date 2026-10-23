@@ -26,9 +26,21 @@
 #include <boost/intrusive/list_hook.hpp>
 
 #include "graphics/texture/Texture.h"
+#include "graphics/texture/TextureMaterial.h"
 #include "platform/Platform.h"
 
 class VulkanRenderer;
+
+/*!
+ * Record the box-filtered mip levels of an image from its first level, like glGenerateMipmap
+ *
+ * The other levels can have any contents. All levels end up in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL.
+ */
+void recordVulkanMipmaps(VkCommandBuffer commands, VkImage image, uint32_t width, uint32_t height, uint32_t levels,
+                         VkImageLayout firstLayout, VkPipelineStageFlags firstStage, VkAccessFlags firstAccess);
+
+//! Mip levels of a full mip chain
+uint32_t vulkanMipLevels(uint32_t width, uint32_t height);
 
 typedef boost::intrusive::list_base_hook<boost::intrusive::link_mode<boost::intrusive::auto_unlink>> VulkanTextureListHook;
 
@@ -51,6 +63,16 @@ public:
 
 	VkImageView view() const { return m_view; }
 
+	//! Slope and height of the texture brightness for normal and parallax mapping, VK_NULL_HANDLE if not generated
+	VkImageView reliefView() const { return m_reliefView; }
+
+	//! Generate the relief map if the texture can be used for normal mapping and does not have one yet
+	void updateReliefMap();
+	void releaseReliefMap();
+
+	//! Specular highlights and reflections of the surface, guessed from the material in the file name
+	const TextureMaterial & material() const { return m_material; }
+
 	//! NPOT textures are always clamped to match the OpenGL backend.
 	bool isNPOT() const { return m_isNPOT; }
 
@@ -63,7 +85,14 @@ private:
 	VkImage m_texture;
 	VmaAllocation m_allocation;
 	VkImageView m_view;
+	Vec2i m_textureSize;
+	bool m_textureMipmaps;
 
+	VkImage m_relief;
+	VmaAllocation m_reliefAllocation;
+	VkImageView m_reliefView;
+
+	TextureMaterial m_material;
 	bool m_isNPOT;
 
 	friend class VulkanRenderer;

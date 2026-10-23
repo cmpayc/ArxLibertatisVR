@@ -25,6 +25,7 @@
 #include <boost/intrusive/list_hook.hpp>
 
 #include "graphics/texture/Texture.h"
+#include "graphics/texture/TextureMaterial.h"
 #include "platform/Platform.h"
 
 class D3D11Renderer;
@@ -55,20 +56,7 @@ public:
 	void releaseNormalMap();
 	
 	//! Specular highlights and reflections of the surface, guessed from the material in the file name
-	struct Specular {
-		float strength = 0.f;
-		float exponent = 1.f; //!< Larger for sharper highlights
-		float metallic = 0.f; //!< How much the texture color tints the highlights
-		float reflectivity = 0.f; //!< Strength of the screen-space reflections, only water and ice reflect for now
-		float glow = 0.f; //!< Glowing, flowing lava
-		float ice = 0.f; //!< Deep, cold and sparkling ice on the bright, bluish parts of the texture
-		float crystal = 0.f; //!< Like ice, but clear and on the whole texture
-		//! Armor: grey parts brighter than this are steel and yellow ones brass, only they get the highlights and
-		//! reflect, 0 if the whole texture is one material
-		float metalParts = 0.f;
-		float leather = 0.f; //!< Soft sheen of the parts of armor that are not metal (leather, cloth, flesh)
-		float relief = 1.f; //!< Strength of the normal map of models, for engraved or embossed armor
-	};
+	typedef TextureMaterial Specular;
 	const Specular & specular() const { return m_specular; }
 	
 	//! NPOT textures are always clamped to match the OpenGL backend.

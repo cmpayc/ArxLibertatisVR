@@ -123,6 +123,30 @@ public:
 	void beginScene() override;
 	void endScene() override;
 
+	bool supportsPixelLighting() const override { return true; }
+	void setPixelLighting(bool enabled) override;
+	bool usesPixelLighting() const override { return m_pixelLighting; }
+	void setPixelLights(const PixelLight * lights, size_t count) override;
+	bool supportsNormalMaps() const override { return true; }
+	void setNormalMaps(float strength) override;
+	bool supportsParallaxMapping() const override { return true; }
+	void setParallaxMapping(float strength) override;
+	bool supportsSpecular() const override { return true; }
+	void setSpecular(float strength) override;
+	void setWaterSurface(bool water) override { m_waterSurface = water; }
+
+	bool reliefMapsEnabled() const {
+		return (m_normalMapStrength > 0.f || m_parallaxStrength > 0.f) && m_reliefPixelShader;
+	}
+
+	/*!
+	 * Generate the relief map (brightness slope and height) of a texture with mipmaps, see psNormalMap
+	 *
+	 * Recorded with the uploads, after the uploads of the texture.
+	 */
+	void createReliefMap(VkImageView color, const Vec2i & size, VkImage & image, VmaAllocation & allocation,
+	                     VkImageView & view);
+
 	VulkanTextureStage * GetTextureStage(size_t textureStage) {
 		return reinterpret_cast<VulkanTextureStage *>(Renderer::GetTextureStage(textureStage));
 	}
@@ -234,6 +258,7 @@ private:
 	struct DescriptorKey {
 		VkBuffer vsConstants = VK_NULL_HANDLE;
 		VkBuffer psConstants = VK_NULL_HANDLE;
+		VkBuffer lightConstants = VK_NULL_HANDLE;
 		VkImageView views[4] = {};
 		VkSampler samplers[3] = {};
 		bool operator==(const DescriptorKey & o) const;
@@ -246,6 +271,8 @@ private:
 		bool recording = false;
 		std::vector<std::pair<VkBuffer, VmaAllocation>> staging;
 		VkDeviceSize stagingSize = 0;
+		VkDescriptorPool descriptorPool = VK_NULL_HANDLE; //!< Reset after the uploads were executed
+		std::vector<std::function<void()>> releases; //!< Run after the uploads were executed
 	};
 
 	static constexpr size_t FramesInFlight = 2;
@@ -300,6 +327,10 @@ private:
 	//! Draw the scene into the window target
 	void composeScene(VkImageView scene);
 	VkPipeline getBlitPipeline();
+	VkPipeline getReliefPipeline();
+	VkDescriptorSet allocateUploadDescriptorSet(VkDescriptorSetLayout layout);
+	//! Generate or release the relief maps of all textures after the setting changed
+	void updateReliefMaps(bool wasEnabled);
 
 	void reinit();
 	void shutdown();
@@ -393,8 +424,22 @@ private:
 	VkDescriptorSetLayout m_blitSetLayout;
 	VkPipelineLayout m_blitPipelineLayout;
 	VkPipeline m_blitPipeline;
-	VkBuffer m_lightConstants; //!< No per-pixel lights yet
-	VmaAllocation m_lightConstantsAllocation;
+	VkShaderModule m_reliefPixelShader;
+	VkPipeline m_reliefPipeline;
+	VkBuffer m_fullRectConstants; //!< BlitConstants for vsBlit covering the whole source
+	VmaAllocation m_fullRectAllocation;
+
+	// Effects of the 3D scene, like the Direct3D 11 backend
+	bool m_pixelLighting;
+	float m_normalMapStrength;
+	float m_parallaxStrength;
+	float m_specularStrength;
+	bool m_waterSurface;
+	bool m_drawingScene; //!< Between beginScene() and endScene(), also without the scene targets
+	float m_effectTime; //!< Seconds, repeating, for the lava
+	std::vector<u8> m_lightData; //!< LightConstants, see setPixelLights()
+	size_t m_lightDataSize; //!< The part of m_lightData used by the lights
+	FrameCopy m_lights; //!< m_lightData in the memory of the current frame
 	std::unique_ptr<VulkanTexture> m_whiteTexture; //!< Bound to the texture slots without a texture
 
 	// State bound in the command buffer of the current frame
@@ -407,7 +452,7 @@ private:
 	float m_boundDepthBias;
 	DescriptorKey m_boundDescriptors;
 	VkDescriptorSet m_boundDescriptorSet;
-	uint32_t m_boundConstantOffsets[2];
+	uint32_t m_boundConstantOffsets[3]; //!< VS, PS and light constants
 	RingAllocation m_vsConstants;
 	RingAllocation m_psConstants;
 	std::vector<u8> m_vsConstantsData;
