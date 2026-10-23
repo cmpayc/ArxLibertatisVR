@@ -609,9 +609,12 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 		TestNone,
 	};
 
-	bool useSS = m_hasMSAA && m_pixelShaderSampleShading
+	// The scene has its own sample count in VR, the window none
+	VkSampleCountFlagBits samples = m_inScene ? m_sceneSamples : m_msaaSamples;
+	bool hasMSAA = m_hasMSAA && samples != VK_SAMPLE_COUNT_1_BIT;
+	bool useSS = hasMSAA && m_pixelShaderSampleShading
 	             && config.video.alphaCutoutAntialiasing == int(CrispAlphaCutoutAA);
-	bool useA2C = m_hasMSAA && config.video.alphaCutoutAntialiasing == int(FuzzyAlphaCutoutAA);
+	bool useA2C = hasMSAA && config.video.alphaCutoutAntialiasing == int(FuzzyAlphaCutoutAA);
 
 	/* When rendering alpha cutouts with alpha blending enabled we still
 	 * need to 'discard' transparent texels, as blending might not use the src alpha!
@@ -658,7 +661,7 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 	state.depthWrite = m_state.getDepthWrite();
 	state.depthBias = (m_state.getDepthOffset() != 0);
 	state.wireframe = m_wireframe;
-	state.samples = m_msaaSamples;
+	state.samples = samples;
 	state.premultipliedAlpha = m_premultipliedAlpha && !m_inScene;
 
 	VkPipeline pipeline = getPipeline(state.key());

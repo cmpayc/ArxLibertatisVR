@@ -140,6 +140,8 @@ VulkanRenderer::VulkanRenderer()
 	, m_sceneScale(1.f)
 	, m_inScene(false)
 	, m_sceneSize(0)
+	, m_sceneSamples(VK_SAMPLE_COUNT_1_BIT)
+	, m_stereoSamples(VK_SAMPLE_COUNT_1_BIT)
 	, m_frameSerial(0)
 	, m_frameIndex(0)
 	, m_frameActive(false)
@@ -317,6 +319,14 @@ bool VulkanRenderer::create(SDL_Window * window, int maxMSAALevel) {
 	for(VkSampleCountFlagBits samples : { VK_SAMPLE_COUNT_8_BIT, VK_SAMPLE_COUNT_4_BIT, VK_SAMPLE_COUNT_2_BIT }) {
 		if(int(samples) <= maxMSAALevel && (counts & samples)) {
 			m_msaaSamples = samples;
+			break;
+		}
+	}
+	// VR: the window is not multisampled, but the stereo scene is (like StereoMaxSamples in Direct3D 11)
+	m_stereoSamples = VK_SAMPLE_COUNT_1_BIT;
+	for(VkSampleCountFlagBits samples : { VK_SAMPLE_COUNT_4_BIT, VK_SAMPLE_COUNT_2_BIT }) {
+		if(counts & samples) {
+			m_stereoSamples = samples;
 			break;
 		}
 	}
@@ -948,19 +958,19 @@ void VulkanRenderer::releaseSizeDependentResources() {
 
 }
 
-bool VulkanRenderer::createSceneTargets(const Vec2i & size) {
+bool VulkanRenderer::createSceneTargets(const Vec2i & size, VkSampleCountFlagBits samples) {
 
 	releaseSceneTargets();
 
 	// The multisampled scene is resolved at the end of rendering into an image that is sampled by the effects
 	VkImageUsageFlags usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-	if(m_msaaSamples == VK_SAMPLE_COUNT_1_BIT) {
+	if(samples == VK_SAMPLE_COUNT_1_BIT) {
 		usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 	}
-	if(!createImageTarget(m_sceneColor, m_colorFormat, usage, VK_IMAGE_ASPECT_COLOR_BIT, size, m_msaaSamples)
+	if(!createImageTarget(m_sceneColor, m_colorFormat, usage, VK_IMAGE_ASPECT_COLOR_BIT, size, samples)
 	   || !createImageTarget(m_sceneDepth, m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-	                         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, size, m_msaaSamples)
-	   || (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT
+	                         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, size, samples)
+	   || (samples != VK_SAMPLE_COUNT_1_BIT
 	       && !createImageTarget(m_sceneResolved, m_colorFormat,
 	                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 	                             VK_IMAGE_ASPECT_COLOR_BIT, size, VK_SAMPLE_COUNT_1_BIT))) {
@@ -985,6 +995,7 @@ bool VulkanRenderer::createSceneTargets(const Vec2i & size) {
 	}
 
 	m_sceneSize = size;
+	m_sceneSamples = samples;
 
 	return true;
 }
@@ -1004,6 +1015,7 @@ void VulkanRenderer::releaseSceneTargets() {
 		releaseImageTarget(target);
 	}
 	m_sceneSize = Vec2i(0);
+	m_sceneSamples = VK_SAMPLE_COUNT_1_BIT;
 
 }
 
@@ -1056,8 +1068,11 @@ void VulkanRenderer::beginScene() {
 
 	Vec2i size(std::max<s32>(s32(float(m_size.x) * m_sceneScale + 0.5f), 1),
 	           std::max<s32>(s32(float(m_size.y) * m_sceneScale + 0.5f), 1));
+	VkSampleCountFlagBits samples = m_msaaSamples;
 
 	if(!m_stereoViews.empty()) {
+		// The window is not multisampled in VR, the stereo scene is
+		samples = config.video.antialiasing ? m_stereoSamples : VK_SAMPLE_COUNT_1_BIT;
 		// The stereo scene always has its own targets, the eyes side by side with an even width each
 		Vec2i eye(m_stereoSize.x / s32(m_stereoViews.size()), m_stereoSize.y);
 		m_stereoEyeSize = Vec2i(std::max<s32>((s32(float(eye.x) * m_sceneScale + 0.5f) + 1) / 2 * 2, 2),
@@ -1067,7 +1082,8 @@ void VulkanRenderer::beginScene() {
 		// The scene has its own targets for the render scale and the effects applied after it
 		return;
 	}
-	if((size != m_sceneSize || bool(m_bloomTargets[0].image) != m_bloom) && !createSceneTargets(size)) {
+	if((size != m_sceneSize || samples != m_sceneSamples || bool(m_bloomTargets[0].image) != m_bloom)
+	   && !createSceneTargets(size, samples)) {
 		return;
 	}
 
@@ -1340,6 +1356,7 @@ void VulkanRenderer::initialize() {
 			totalVRAM += memory.memoryHeaps[i].size;
 		}
 	}
+	LogInfo << " ├─ MSAA: " << int(m_msaaSamples) << "x, VR scene " << int(m_stereoSamples) << "x";
 	LogInfo << " └─ VRAM: " << (totalVRAM / 1024 / 1024) << " MiB";
 	CrashHandler::setVariable("VRAM size", totalVRAM);
 
@@ -1532,7 +1549,8 @@ void VulkanRenderer::SetAntialiasing(bool enable) {
 		return;
 	}
 
-	if(m_msaaSamples == VK_SAMPLE_COUNT_1_BIT) {
+	// The window is not multisampled in VR, but the stereo scene is
+	if(m_msaaSamples == VK_SAMPLE_COUNT_1_BIT && m_stereoSamples == VK_SAMPLE_COUNT_1_BIT) {
 		return;
 	}
 

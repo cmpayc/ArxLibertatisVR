@@ -391,7 +391,7 @@ private:
 	bool createImageTarget(ImageTarget & target, VkFormat format, VkImageUsageFlags usage,
 	                       VkImageAspectFlags aspect, const Vec2i & size, VkSampleCountFlagBits samples);
 	void releaseImageTarget(ImageTarget & target);
-	bool createSceneTargets(const Vec2i & size);
+	bool createSceneTargets(const Vec2i & size, VkSampleCountFlagBits samples);
 	void releaseSceneTargets();
 	//! Size of the current target relative to the window, the game uses window pixels
 	Vec2f targetScale() const;
@@ -508,6 +508,8 @@ private:
 	ImageTarget m_sceneColor;
 	ImageTarget m_sceneDepth;
 	ImageTarget m_sceneResolved; //!< Only with MSAA, resolved at the end of rendering
+	VkSampleCountFlagBits m_sceneSamples;
+	VkSampleCountFlagBits m_stereoSamples; //!< For the VR stereo scene, independent of the window
 
 	Frame m_frames[FramesInFlight];
 	uint64_t m_frameSerial; //!< Unique number of the frame being recorded, see FrameCopy
