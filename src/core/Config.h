@@ -273,6 +273,8 @@ public:
 		bool showHud;
 		//! Draw the in-world hand ray for debugging
 		bool debugRay;
+		//! Show frame rate and frame time statistics at the top of the view (see VRPerf)
+		bool showPerf;
 		/*!
 		 * The desktop window while playing in VR: "fullscreen" (at the video resolution, even if the video settings
 		 * say windowed), "window" (at windowResolution) or "off" (a 1280x720 window that is not drawn to). The
@@ -286,6 +288,9 @@ public:
 
 		//! Darken the edges of the view while moving with the stick or turning smoothly: 0 (off) to 3 (strongest)
 		int vignette;
+
+		//! MSAA samples of the 3D scene in VR with antialiasing on: 2 or 4 (2 is cheaper on standalone headsets)
+		int msaaSamples;
 
 		//! A shield raised towards a melee attacker blocks part of the hit, more with the Defense skill (VRCombat)
 		bool shieldBlock;

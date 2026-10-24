@@ -197,7 +197,7 @@ bool VRGraphicsOpenGL::createStereoTarget(const Vec2i & eyeSize) {
 	
 	GLint maxSamples = 0;
 	glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
-	GLsizei samples = config.video.antialiasing ? std::min(GLint(4), maxSamples) : 0;
+	GLsizei samples = config.video.antialiasing ? std::min(GLint(config.vr.msaaSamples), maxSamples) : 0;
 	
 	glGenRenderbuffers(1, &m_stereoColor);
 	glBindRenderbuffer(GL_RENDERBUFFER, m_stereoColor);

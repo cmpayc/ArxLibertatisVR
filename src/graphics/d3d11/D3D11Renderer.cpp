@@ -2609,7 +2609,8 @@ void D3D11Renderer::beginScene() {
 		                        std::max<s32>(s32(float(eye.y) * scale + 0.5f), 1));
 		size = Vec2i(m_stereoEyeSize.x * s32(m_stereoViews.size()), m_stereoEyeSize.y);
 		// Temporal upscalers need a scene without MSAA
-		samples = (config.video.antialiasing && !stereoUpscaling()) ? m_stereoSamples : 1;
+		samples = (config.video.antialiasing && !stereoUpscaling())
+		          ? std::min(m_stereoSamples, UINT(config.vr.msaaSamples)) : 1;
 	} else if(!sceneEnabled()) {
 		return;
 	}

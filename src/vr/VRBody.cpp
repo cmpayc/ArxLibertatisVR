@@ -882,8 +882,9 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 			return;
 		}
 		glm::quat rotation = glm::angleAxis(glm::radians(degrees), axis);
-		size_t group = size_t(fistBone);
-		if(fist > 0.f && fistAnim && fistBone && group < fistAnim->nb_groups() && group < fistAnim->groups.size()
+		// Converting an invalid handle tells the compiler it is valid: Clang then dropped the check (Android)
+		size_t group = fistBone ? size_t(fistBone) : std::numeric_limits<size_t>::max();
+		if(fist > 0.f && fistAnim && group < fistAnim->nb_groups() && group < fistAnim->groups.size()
 		   && !fistAnim->voidgroups[group]) {
 			glm::quat pose = fistAnim->groups[group].quat;
 			if(mirrorFist) {

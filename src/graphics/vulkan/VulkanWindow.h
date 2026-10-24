@@ -48,6 +48,22 @@ void setVSync(Renderer & renderer, int vsync);
 
 void present(Renderer & renderer);
 
+//! Work done since the last call to \ref takeStats()
+struct Stats {
+	double gpuMilliseconds = 0.0; //!< Execution time of the submitted command buffers (0 without timestamps)
+	double fenceWaitMilliseconds = 0.0; //!< CPU time spent waiting for older command buffers to finish
+	double beginMilliseconds = 0.0; //!< CPU time starting command buffers, including the fence wait
+	double endCommandsMilliseconds = 0.0; //!< CPU time in vkEndCommandBuffer
+	double submitMilliseconds = 0.0; //!< CPU time in vkQueueSubmit
+	double maxSubmitMilliseconds = 0.0; //!< The longest vkQueueSubmit
+	unsigned submissions = 0;
+	unsigned draws = 0;
+	unsigned textureUploads = 0; //!< Batches of texture uploads submitted with a frame
+	double uploadedMegabytes = 0.0; //!< Vertices, indices and constants copied into the ring buffers
+};
+
+Stats takeStats(Renderer & renderer);
+
 } // namespace vulkan
 
 #endif // ARX_GRAPHICS_VULKAN_VULKANWINDOW_H

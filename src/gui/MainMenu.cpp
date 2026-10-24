@@ -971,7 +971,9 @@ public:
 			// Menu entry and config value of each renderer
 			std::vector<std::pair<std::string_view, std::string_view>> renderers = {
 				{ "Auto-Select", "auto" },
+				#if ARX_HAVE_OPENGL
 				{ "OpenGL", "OpenGL" },
+				#endif
 				#if ARX_HAVE_D3D11
 				{ "DirectX 11", "Direct3D 11" },
 				#endif
@@ -1366,6 +1368,9 @@ private:
 		
 		bool direct3D = (config.video.renderer == "Direct3D 11");
 		bool vulkan = (config.video.renderer == "Vulkan");
+		#if ARX_HAVE_VULKAN && !ARX_HAVE_OPENGL
+		vulkan = vulkan || config.video.renderer == "auto"; // The only renderer (Android)
+		#endif
 
 		if(m_renderScaleCycleText) {
 			m_renderScaleCycleText->setEnabled(direct3D || vulkan);
@@ -1803,6 +1808,19 @@ public:
 			cb->setValue(config.vr.vignette);
 			cb->valueChanged = [](int pos, std::string_view /* string */) noexcept {
 				config.vr.vignette = pos;
+			};
+			addCenter(std::move(cb));
+		}
+
+		{
+			// Only with antialiasing on in the video options
+			std::string_view label = getLocalised("system_menus_options_vr_msaa", "Antialiasing");
+			auto cb = std::make_unique<CycleTextWidget>(sliderSize(), hFontMenu, label);
+			cb->addEntry("2x");
+			cb->addEntry("4x");
+			cb->setValue(config.vr.msaaSamples <= 2 ? 0 : 1);
+			cb->valueChanged = [](int pos, std::string_view /* string */) noexcept {
+				config.vr.msaaSamples = (pos == 0) ? 2 : 4;
 			};
 			addCenter(std::move(cb));
 		}

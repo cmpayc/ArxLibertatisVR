@@ -51,6 +51,16 @@
 // To avoid conflicts with potential other classes/namespaces
 namespace {
 
+/*
+ * Standalone headsets (Android: Quest, Steam Frame) start with cheaper graphics: 2x MSAA, no bloom, per-pixel lighting
+ * and surface effects or model smoothing, the natural color grading instead, and a medium comfort vignette
+ */
+#ifdef __ANDROID__
+constexpr bool Standalone = true;
+#else
+constexpr bool Standalone = false;
+#endif
+
 /* Default values for config */
 namespace Default {
 
@@ -64,6 +74,8 @@ constexpr const std::string_view
 	audio,
 	#if ARX_HAVE_D3D11
 	renderer = "Direct3D 11",
+	#elif ARX_HAVE_VULKAN && !ARX_HAVE_OPENGL
+	renderer = "Vulkan", // The only renderer (Android)
 	#else
 	renderer = "auto",
 	#endif
@@ -77,7 +89,7 @@ constexpr const std::string_view
 	bufferUpload,
 	extensionOverride,
 	upscaler = "off",
-	colorGrading = "off",
+	colorGrading = Standalone ? "natural" : "off",
 	dlssPreset = "K",
 	upscalerPath,
 	thumbnailSize = BOOST_PP_STRINGIZE(THUMBNAIL_DEFAULT_WIDTH) "x"
@@ -92,8 +104,8 @@ constexpr const int
 	vsync = -1,
 	fpsLimit = -1,
 	maxAnisotropicFiltering = 9001,
-	characterSmoothing = 2,
-	objectSmoothing = 2,
+	characterSmoothing = Standalone ? 0 : 2,
+	objectSmoothing = Standalone ? 0 : 2,
 	shadows = 2,
 	alphaCutoutAntialiasing = 2,
 	cinematicWidescreenMode = CinematicFadeEdges,
@@ -108,7 +120,8 @@ constexpr const int
 	bufferSize = 0,
 	quickLevelTransition = JumpToChangeLevel,
 	vrSnapTurnAngle = 30,
-	vrVignette = 0;
+	vrVignette = Standalone ? 2 : 0,
+	vrMSAASamples = Standalone ? 2 : 4;
 
 constexpr const bool
 	fullscreen = true,
@@ -117,7 +130,7 @@ constexpr const bool
 	showCrosshair = true,
 	antialiasing = true,
 	colorkeyAntialiasing = true,
-	pixelLighting = true,
+	pixelLighting = !Standalone,
 	limitSpeechWidth = true,
 	hudScaleInteger = true,
 	bookScaleInteger = false,
@@ -139,6 +152,7 @@ constexpr const bool
 	vrLeftHanded = false,
 	vrShowHud = false,
 	vrDebugRay = false,
+	vrShowPerf = false,
 	vrShieldBlock = true,
 	vrImprovedRuneDrawing = false;
 
@@ -155,10 +169,10 @@ constexpr const float
 	renderScale = 1.f,
 	fsrSharpness = 0.f,
 	ambientOcclusion = 0.5f,
-	bloom = 0.5f,
-	normalMaps = 0.5f,
-	parallaxMapping = 0.5f,
-	specular = 0.5f,
+	bloom = Standalone ? 0.f : 0.5f,
+	normalMaps = Standalone ? 0.f : 0.5f,
+	parallaxMapping = Standalone ? 0.f : 0.5f,
+	specular = Standalone ? 0.f : 0.5f,
 	reflections = 0.5f,
 	hudScale = 0.5f,
 	bookScale = 1.f,
@@ -358,11 +372,13 @@ constexpr const std::string_view
 	vrThrowStrength = "throw_strength",
 	vrShowHud = "show_hud",
 	vrDebugRay = "debug_ray",
+	vrShowPerf = "show_perf",
 	vrShieldBlock = "shield_block",
 	vrImprovedRuneDrawing = "improved_rune_drawing",
 	vrDesktopView = "desktop_view",
 	vrWindowResolution = "window_resolution",
-	vrVignette = "vignette";
+	vrVignette = "vignette",
+	vrMSAASamples = "msaa_samples";
 
 // Input key options
 constexpr const std::string_view actions[NUM_ACTION_KEY] = {
@@ -667,6 +683,7 @@ bool Config::save() {
 	writer.writeKey(Key::vrThrowStrength, vr.throwStrength);
 	writer.writeKey(Key::vrShowHud, vr.showHud);
 	writer.writeKey(Key::vrDebugRay, vr.debugRay);
+	writer.writeKey(Key::vrShowPerf, vr.showPerf);
 	writer.writeKey(Key::vrShieldBlock, vr.shieldBlock);
 	writer.writeKey(Key::vrImprovedRuneDrawing, vr.improvedRuneDrawing);
 	writer.writeKey(Key::vrDesktopView, vr.desktopView);
@@ -676,6 +693,7 @@ bool Config::save() {
 		writer.writeKey(Key::vrWindowResolution, size.str());
 	}
 	writer.writeKey(Key::vrVignette, vr.vignette);
+	writer.writeKey(Key::vrMSAASamples, vr.msaaSamples);
 
 	// key
 	writer.beginSection(Section::Key);
@@ -866,12 +884,14 @@ bool Config::init(const fs::path & file) {
 	vr.throwStrength = glm::clamp(reader.getKey(Section::VR, Key::vrThrowStrength, Default::vrThrowStrength), 0.f, 5.f);
 	vr.showHud = reader.getKey(Section::VR, Key::vrShowHud, Default::vrShowHud);
 	vr.debugRay = reader.getKey(Section::VR, Key::vrDebugRay, Default::vrDebugRay);
+	vr.showPerf = reader.getKey(Section::VR, Key::vrShowPerf, Default::vrShowPerf);
 	vr.shieldBlock = reader.getKey(Section::VR, Key::vrShieldBlock, Default::vrShieldBlock);
 	vr.improvedRuneDrawing = reader.getKey(Section::VR, Key::vrImprovedRuneDrawing, Default::vrImprovedRuneDrawing);
 	vr.desktopView = reader.getKey(Section::VR, Key::vrDesktopView, Default::vrDesktopView);
 	std::string_view vrWindowResolution = reader.getKey(Section::VR, Key::vrWindowResolution, Default::vrWindowResolution);
 	vr.windowResolution = parseResolution(vrWindowResolution, Vec2i(1280, 720));
 	vr.vignette = glm::clamp(reader.getKey(Section::VR, Key::vrVignette, Default::vrVignette), 0, 3);
+	vr.msaaSamples = (reader.getKey(Section::VR, Key::vrMSAASamples, Default::vrMSAASamples) <= 2) ? 2 : 4;
 
 	// Get action key settings
 	for(size_t i = 0; i < NUM_ACTION_KEY; i++) {

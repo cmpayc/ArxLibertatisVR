@@ -181,6 +181,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "vr/VRCombat.h"
 #include "vr/VRControls.h"
 #include "vr/VRGrab.h"
+#include "vr/VRPerf.h"
 #include "vr/VRSystem.h"
 #include "vr/VRText.h"
 #endif
@@ -1323,6 +1324,7 @@ void ArxGame::doFrame() {
 void ArxGame::presentFrame() {
 
 	#if ARX_HAVE_OPENXR
+	VRPerfTimer timer(VRPerfSubmit);
 	if(g_vr && g_vr->hasSession()) {
 		Vec2i windowSize = m_MainWindow->getSize();
 		// In-game, the interface is drawn over the 3D scene and follows the head, otherwise it is a fixed screen
@@ -2207,8 +2209,19 @@ void ArxGame::render() {
 		cinematicRender();
 	} else {
 		benchmark::begin(cinematicBorder.CINEMA_DECAL != 0.f ? benchmark::Cutscene : benchmark::Scene);
+		#if ARX_HAVE_OPENXR
+		{
+			VRPerfTimer timer(VRPerfUpdate);
+			updateLevel();
+		}
+		{
+			VRPerfTimer timer(VRPerfRender);
+			renderLevel();
+		}
+		#else
 		updateLevel();
 		renderLevel();
+		#endif
 		#ifdef ARX_DEBUG
 		if(g_debugToggles[9]) {
 			renderLevel();

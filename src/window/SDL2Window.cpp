@@ -82,6 +82,11 @@ struct ARX_SDL_SysWMinfo {
 
 SDL2Window * SDL2Window::s_mainWindow = nullptr;
 
+#ifdef __ANDROID__
+//! The virtual window size on Android, see SDL2Window::updateSize()
+static const Vec2i AndroidWindowSize(1920, 1080);
+#endif
+
 SDL2Window::SDL2Window()
 	: m_window(nullptr)
 	, m_glcontext(nullptr)
@@ -889,6 +894,12 @@ void SDL2Window::updateSize(bool force) {
 	
 	int w, h;
 	SDL_GetWindowSize(m_window, &w, &h);
+	#ifdef __ANDROID__
+	// The Android surface (4128x2208 on Quest 3) is never shown, only the OpenXR layers are: the game and the VR
+	// interface layer use a fixed virtual window size instead
+	w = AndroidWindowSize.x;
+	h = AndroidWindowSize.y;
+	#endif
 	m_mode.resolution = Vec2i(w, h);
 	
 	int display = SDL_GetWindowDisplayIndex(m_window);
@@ -973,6 +984,9 @@ void SDL2Window::processEvents(bool waitForEvent) {
 					
 					case SDL_WINDOWEVENT_SIZE_CHANGED: {
 						Vec2i newSize(event.window.data1, event.window.data2);
+						#ifdef __ANDROID__
+						newSize = AndroidWindowSize; // See updateSize()
+						#endif
 						if(newSize != m_mode.resolution && !m_fullscreen) {
 							m_renderer->beforeResize(false);
 							updateSize();

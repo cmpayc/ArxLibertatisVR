@@ -43,6 +43,7 @@
 
 #include "graphics/Draw.h"
 #include "graphics/Renderer.h"
+#include "graphics/font/Font.h"
 #include "graphics/texture/Texture.h"
 
 #ifdef __ANDROID__
@@ -70,6 +71,7 @@
 #include "game/Spells.h"
 #include "gui/Dragging.h"
 #include "gui/Interface.h"
+#include "gui/Text.h"
 #include "input/Input.h"
 #include "input/Mouse.h"
 #include "io/log/Logger.h"
@@ -83,6 +85,7 @@
 #include "vr/VRGrab.h"
 #include "vr/VRGraphics.h"
 #include "vr/VRHud.h"
+#include "vr/VRPerf.h"
 
 
 VRSystem * g_vr = nullptr;
@@ -166,6 +169,50 @@ u64 getMilliseconds() {
 }
 
 #endif
+
+//! Start of the stereo scene, for VRPerfScene
+std::chrono::steady_clock::time_point g_stereoStart;
+
+//! XR_EXT_performance_settings: standalone headsets run apps at low clocks unless they ask for more
+PFN_xrPerfSettingsSetPerformanceLevelEXT g_setPerformanceLevel = nullptr;
+
+//! The frame statistics in the interface layer with the "show_perf" option, empty otherwise
+Rect g_perfArea;
+
+//! Draw the frame statistics at the top left of the interface layer, one line per group
+Rect drawPerfOverlay() {
+
+	const std::string & summary = getVRPerfSummary();
+	if(!config.vr.showPerf || summary.empty() || !hFontDebug) {
+		return Rect();
+	}
+
+	std::vector<std::string_view> lines;
+	std::string_view rest = summary;
+	for(size_t separator; (separator = rest.find(" | ")) != std::string_view::npos; rest = rest.substr(separator + 3)) {
+		lines.push_back(rest.substr(0, separator));
+	}
+	lines.push_back(rest);
+
+	const s32 margin = 8;
+	s32 lineHeight = hFontDebug->getLineHeight();
+	s32 width = 0;
+	for(std::string_view line : lines) {
+		width = std::max(width, hFontDebug->getTextSize(line).width());
+	}
+	Rect area(0, 0, width + 2 * margin, s32(lines.size()) * lineHeight + 2 * margin);
+
+	{
+		// Darken behind the text, like the wrist icon backings
+		UseRenderState state(render2D().blend(BlendZero, BlendSrcAlpha));
+		EERIEDrawBitmap(Rectf(area), 0.f, nullptr, Color(0, 0, 0, 179));
+	}
+	for(size_t i = 0; i < lines.size(); i++) {
+		hFontDebug->draw(Vec2i(margin, margin + s32(i) * lineHeight), lines[i], Color::white);
+	}
+
+	return area;
+}
 
 //! Rate limit for repeated per-frame errors: log the first few, then every 1000th
 bool shouldLogRepeatedError(u64 & count) {
@@ -624,10 +671,14 @@ bool VRSystem::initInstance() {
 	}
 
 	bool hasTimeConversion = hasExtension(extensions, TimeConversionExtension);
+	bool hasPerformanceSettings = hasExtension(extensions, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
 
 	std::vector<const char *> enabledExtensions = { m_graphics->getExtension() };
 	if(hasTimeConversion) {
 		enabledExtensions.push_back(TimeConversionExtension);
+	}
+	if(hasPerformanceSettings) {
+		enabledExtensions.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
 	}
 
 	XrInstanceCreateInfo createInfo = { XR_TYPE_INSTANCE_CREATE_INFO };
@@ -661,6 +712,11 @@ bool VRSystem::initInstance() {
 	if(hasTimeConversion) {
 		xrGetInstanceProcAddr(m_instance, TimeConversionFunction,
 		                      reinterpret_cast<PFN_xrVoidFunction *>(&g_convertTime));
+	}
+	g_setPerformanceLevel = nullptr;
+	if(hasPerformanceSettings) {
+		xrGetInstanceProcAddr(m_instance, "xrPerfSettingsSetPerformanceLevelEXT",
+		                      reinterpret_cast<PFN_xrVoidFunction *>(&g_setPerformanceLevel));
 	}
 
 	if(!m_input.init(m_instance)) {
@@ -817,6 +873,17 @@ bool VRSystem::createSession() {
 
 	m_input.attach(m_session);
 
+	if(g_setPerformanceLevel) {
+		// The highest level that can be kept up indefinitely (boost is only for loading)
+		bool cpu = check(g_setPerformanceLevel(m_session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT,
+		                                       XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT), "xrPerfSettingsSetPerformanceLevelEXT");
+		bool gpu = check(g_setPerformanceLevel(m_session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT,
+		                                       XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT), "xrPerfSettingsSetPerformanceLevelEXT");
+		if(cpu && gpu) {
+			LogInfo << "OpenXR: CPU and GPU performance level set to sustained high";
+		}
+	}
+
 	LogInfo << "OpenXR session created";
 
 	return true;
@@ -841,7 +908,8 @@ bool VRSystem::createSwapchains() {
 	for(EyeSwapchain & swapchain : m_swapchains) {
 
 		XrSwapchainCreateInfo info = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-		info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+		info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT
+		                  | m_graphics->getExtraSwapchainUsage();
 		info.format = m_colorFormat;
 		info.sampleCount = 1;
 		info.width = uint32_t(m_eyeSize.x);
@@ -1082,17 +1150,20 @@ bool VRSystem::beginFrame() {
 		return false;
 	}
 
-	XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
-	m_frameState = { XR_TYPE_FRAME_STATE };
-	if(!check(xrWaitFrame(m_session, &waitInfo, &m_frameState), "xrWaitFrame")) {
-		return false;
-	}
-
-	XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
-	if(!check(xrBeginFrame(m_session, &beginInfo), "xrBeginFrame")) {
-		return false;
+	{
+		VRPerfTimer timer(VRPerfWait);
+		XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
+		m_frameState = { XR_TYPE_FRAME_STATE };
+		if(!check(xrWaitFrame(m_session, &waitInfo, &m_frameState), "xrWaitFrame")) {
+			return false;
+		}
+		XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
+		if(!check(xrBeginFrame(m_session, &beginInfo), "xrBeginFrame")) {
+			return false;
+		}
 	}
 	m_frameActive = true;
+	countVRPerfFrame();
 
 	/*
 	 * The time to locate the head and the controllers at. After the headset reconnects the runtime's prediction can be
@@ -1221,6 +1292,7 @@ u64 VRSystem::acquireSwapchainImage(EyeSwapchain & swapchain) {
 	arx_assert(m_shouldRender);
 	arx_assert(!swapchain.acquired);
 
+	VRPerfTimer timer(VRPerfImageAcquire);
 	XrSwapchainImageAcquireInfo acquireInfo = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
 	uint32_t index = 0;
 	if(!check(xrAcquireSwapchainImage(swapchain.handle, &acquireInfo, &index), "xrAcquireSwapchainImage")) {
@@ -1243,6 +1315,7 @@ void VRSystem::releaseSwapchainImage(EyeSwapchain & swapchain) {
 
 	arx_assert(swapchain.acquired);
 
+	VRPerfTimer timer(VRPerfImageRelease);
 	XrSwapchainImageReleaseInfo releaseInfo = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
 	check(xrReleaseSwapchainImage(swapchain.handle, &releaseInfo), "xrReleaseSwapchainImage");
 	swapchain.acquired = false;
@@ -1364,6 +1437,7 @@ bool VRSystem::beginStereoRender() {
 	}
 
 	m_stereoActive = true;
+	g_stereoStart = std::chrono::steady_clock::now();
 
 	return true;
 }
@@ -1375,6 +1449,7 @@ void VRSystem::endStereoRender(const Vec2i & windowSize) {
 	}
 
 	m_stereoActive = false;
+	VRPerfTimer timer(VRPerfEyes);
 	if(!m_graphics->endStereo(m_uiActive)) {
 		return;
 	}
@@ -1384,7 +1459,10 @@ void VRSystem::endStereoRender(const Vec2i & windowSize) {
 		if(!image) {
 			continue;
 		}
-		m_graphics->copyEyeToImage(eye, image);
+		{
+			VRPerfTimer copyTimer(VRPerfImageCopy);
+			m_graphics->copyEyeToImage(eye, image);
+		}
 		releaseEyeImage(eye);
 	}
 
@@ -1394,6 +1472,7 @@ void VRSystem::endStereoRender(const Vec2i & windowSize) {
 	}
 
 	m_stereoRendered = true;
+	addVRPerfTime(VRPerfScene, std::chrono::steady_clock::now() - g_stereoStart);
 
 }
 
@@ -1406,7 +1485,8 @@ bool VRSystem::createUITarget(const Vec2i & size) {
 	}
 
 	XrSwapchainCreateInfo info = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-	info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+	info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT
+	                  | m_graphics->getExtraSwapchainUsage();
 	info.format = m_colorFormat;
 	info.sampleCount = 1;
 	info.width = uint32_t(size.x);
@@ -1537,6 +1617,7 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 	if(overScene && !config.vr.showHud) {
 		drawWristIconBackings();
 	}
+	g_perfArea = drawPerfOverlay();
 
 	m_graphics->endUI();
 	m_uiActive = false;
@@ -1544,7 +1625,10 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 
 	u64 image = acquireSwapchainImage(m_uiSwapchain);
 	if(image) {
-		m_graphics->copyUIToImage(image);
+		{
+			VRPerfTimer copyTimer(VRPerfImageCopy);
+			m_graphics->copyUIToImage(image);
+		}
 		releaseSwapchainImage(m_uiSwapchain);
 	}
 
@@ -1582,6 +1666,11 @@ void VRSystem::updateGamePanels() {
 	VRHudAreas areas = getVRHudAreas();
 	m_otherInventoryArea = areas.otherInventory;
 	updateBookPanel(areas);
+	if(!g_perfArea.empty()) {
+		// The frame statistics at the top of the view
+		updateUIPlacement(true);
+		addScreenPanel(g_perfArea, false, true);
+	}
 	// The texts above and below the view do not depend on the book or a note being held (user request)
 	if(!areas.subtitles.empty()) {
 		// Subtitles of in-game cutscenes: below the view, where they are on the screen
@@ -1964,8 +2053,12 @@ bool VRSystem::getInventoryPanel(Texture *& texture, Vec3f & position, glm::quat
 
 bool VRSystem::isDesktopViewShown() {
 	// As the game started: changing the setting takes effect after a restart (like the window it was created with)
+	#ifdef __ANDROID__
+	return false; // Only the OpenXR layers are shown, see PresentToWindow in VulkanRenderer
+	#else
 	static const bool shown = (config.vr.desktopView != "off");
 	return shown;
+	#endif
 }
 
 VRHand VRSystem::getPointerHand() const {

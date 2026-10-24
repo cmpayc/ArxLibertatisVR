@@ -57,6 +57,8 @@ public:
 	[[nodiscard]] virtual const char * getExtension() const = 0;
 	[[nodiscard]] virtual bool isDirect3D11() const = 0;
 	[[nodiscard]] virtual bool isVulkan() const { return false; }
+	//! Usage flags needed for the swapchain images in addition to color attachment and transfer destination
+	[[nodiscard]] virtual XrSwapchainUsageFlags getExtraSwapchainUsage() const { return 0; }
 	
 	//! Check the requirements of the runtime once the instance exists, before the renderer is created
 	virtual bool checkRequirements(XrInstance instance, XrSystemId system) = 0;

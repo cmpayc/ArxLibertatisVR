@@ -40,6 +40,7 @@
 #include "graphics/StereoView.h"
 #include "graphics/texture/TextureStage.h"
 #include "graphics/vulkan/VulkanTexture.h"
+#include "graphics/vulkan/VulkanWindow.h"
 #include "math/Rectangle.h"
 #include "platform/Platform.h"
 
@@ -226,6 +227,7 @@ public:
 	VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
 	uint32_t queueFamily() const { return m_queueFamily; }
 	VkFormat colorFormat() const { return m_colorFormat; }
+	vulkan::Stats takeStats();
 	//! The instance and device were created by the VR runtime, see vulkan::setExternalDevice()
 	bool hasExternalDevice() const { return m_hasExternalDevice; }
 
@@ -313,6 +315,15 @@ private:
 		void * data = nullptr;
 	};
 
+	//! Texture uploads recorded together, with the resources that live until they were executed
+	struct UploadBatch {
+		VkCommandPool commandPool = VK_NULL_HANDLE;
+		VkCommandBuffer commands = VK_NULL_HANDLE;
+		std::vector<std::pair<VkBuffer, VmaAllocation>> staging;
+		VkDescriptorPool descriptorPool = VK_NULL_HANDLE; //!< Reset after the uploads were executed
+		std::vector<std::function<void()>> releases; //!< Run after the uploads were executed
+	};
+
 	struct Frame {
 		VkCommandPool commandPool = VK_NULL_HANDLE;
 		VkCommandBuffer commands = VK_NULL_HANDLE;
@@ -324,6 +335,9 @@ private:
 		RingBuffer constants;
 		std::vector<VkDescriptorPool> descriptorPools;
 		size_t descriptorPool = 0;
+		VkQueryPool timestamps = VK_NULL_HANDLE; //!< Start and end of the command buffer
+		bool timed = false; //!< The submitted command buffer wrote both timestamps
+		std::vector<UploadBatch> uploads; //!< Submitted before the command buffer, recycled after its fence
 	};
 
 	//! The resources bound to the descriptor set of a draw
@@ -336,18 +350,24 @@ private:
 		bool operator==(const DescriptorKey & o) const;
 	};
 
-	struct UploadContext {
-		VkCommandPool commandPool = VK_NULL_HANDLE;
-		VkCommandBuffer commands = VK_NULL_HANDLE;
-		VkFence fence = VK_NULL_HANDLE;
+	//! The batch being recorded
+	struct UploadContext : UploadBatch {
+		VkFence fence = VK_NULL_HANDLE; //!< For flushUploads()
 		bool recording = false;
-		std::vector<std::pair<VkBuffer, VmaAllocation>> staging;
 		VkDeviceSize stagingSize = 0;
-		VkDescriptorPool descriptorPool = VK_NULL_HANDLE; //!< Reset after the uploads were executed
-		std::vector<std::function<void()>> releases; //!< Run after the uploads were executed
+		std::vector<UploadBatch> spare; //!< Executed batches, ready to be recorded again
 	};
 
-	static constexpr size_t FramesInFlight = 2;
+	bool createUploadBatch(UploadBatch & batch);
+	//! Free the resources of an executed batch and keep it for reuse
+	void recycleUploadBatch(UploadBatch & batch);
+	void destroyUploadBatch(UploadBatch & batch);
+
+	/*
+	 * Command buffers in flight. In VR a frame is submitted in parts (each copy into an OpenXR image is submitted
+	 * before the image is released, about 4 per frame): with only 2 the CPU waited for the GPU within every frame.
+	 */
+	static constexpr size_t FramesInFlight = 8;
 	//! Staging memory after which the uploads are submitted early (while loading levels)
 	static constexpr VkDeviceSize MaxPendingUploadSize = VkDeviceSize(64) * 1024 * 1024;
 
@@ -449,6 +469,12 @@ private:
 	void drawViews(const DrawFunction & draw);
 	//! Copy a part of an image into an image of the VR runtime (in the color attachment layout)
 	void copyToRuntimeImage(ImageTarget & source, const Rect & area, VkImage image);
+	/*!
+	 * Draw a part of a sampled image into an image of the VR runtime (in the color attachment layout), see
+	 * VulkanPostProcess.cpp: on Quest (Adreno) recording vkCmdCopyImage into these images blocks the CPU until the GPU
+	 * has finished all earlier work
+	 */
+	void drawToRuntimeImage(ImageTarget & source, const Vec2i & sourceSize, const Rect & area, VkImage image);
 	VkPipeline getReliefPipeline();
 	VkDescriptorSet allocateUploadDescriptorSet(VkDescriptorSetLayout layout);
 	//! Generate or release the relief maps of all textures after the setting changed
@@ -510,9 +536,13 @@ private:
 	ImageTarget m_sceneResolved; //!< Only with MSAA, resolved at the end of rendering
 	VkSampleCountFlagBits m_sceneSamples;
 	VkSampleCountFlagBits m_stereoSamples; //!< For the VR stereo scene, independent of the window
+	VkSampleCountFlags m_stereoSampleCounts = 0; //!< Supported by the stereo scene targets
 
 	Frame m_frames[FramesInFlight];
 	uint64_t m_frameSerial; //!< Unique number of the frame being recorded, see FrameCopy
+	double m_timestampPeriod = 0.0; //!< Nanoseconds per timestamp tick, 0 without timestamp support
+	uint64_t m_timestampMask = 0;
+	vulkan::Stats m_stats;
 	UploadContext m_upload;
 	std::unordered_map<uint64_t, VkSampler> m_samplers;
 	size_t m_frameIndex;

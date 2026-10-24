@@ -256,11 +256,19 @@ VulkanRenderer::~VulkanRenderer() {
 		releasePipelineResources();
 
 		for(Frame & frame : m_frames) {
+			for(UploadBatch & batch : frame.uploads) {
+				destroyUploadBatch(batch);
+			}
+			frame.uploads.clear();
 			for(std::function<void()> & release : frame.releases) {
 				release();
 			}
 			frame.releases.clear();
 		}
+		for(UploadBatch & batch : m_upload.spare) {
+			destroyUploadBatch(batch);
+		}
+		m_upload.spare.clear();
 
 		for(Frame & frame : m_frames) {
 			releaseRing(frame.vertices);
@@ -271,12 +279,12 @@ VulkanRenderer::~VulkanRenderer() {
 			}
 			frame.descriptorPools.clear();
 			vkDestroySemaphore(m_device, frame.imageAcquired, nullptr);
+			vkDestroyQueryPool(m_device, frame.timestamps, nullptr);
 			vkDestroyFence(m_device, frame.fence, nullptr);
 			vkDestroyCommandPool(m_device, frame.commandPool, nullptr);
 		}
 		vkDestroyFence(m_device, m_upload.fence, nullptr);
-		vkDestroyCommandPool(m_device, m_upload.commandPool, nullptr);
-		vkDestroyDescriptorPool(m_device, m_upload.descriptorPool, nullptr);
+		destroyUploadBatch(m_upload);
 
 		if(m_allocator) {
 			vmaDestroyAllocator(m_allocator);
@@ -332,6 +340,7 @@ bool VulkanRenderer::create(SDL_Window * window, int maxMSAALevel) {
 	}
 	// VR: the window is not multisampled, but the stereo scene is (like StereoMaxSamples in Direct3D 11)
 	m_stereoSamples = VK_SAMPLE_COUNT_1_BIT;
+	m_stereoSampleCounts = counts;
 	for(VkSampleCountFlagBits samples : { VK_SAMPLE_COUNT_4_BIT, VK_SAMPLE_COUNT_2_BIT }) {
 		if(counts & samples) {
 			m_stereoSamples = samples;
@@ -669,19 +678,28 @@ bool VulkanRenderer::createFrames() {
 
 	}
 
-	VkCommandPoolCreateInfo pool = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-	pool.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-	pool.queueFamilyIndex = m_queueFamily;
-	if(!checkVk(vkCreateCommandPool(m_device, &pool, nullptr, &m_upload.commandPool), "vkCreateCommandPool")) {
-		return false;
-	}
-
-	VkCommandBufferAllocateInfo commands = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-	commands.commandPool = m_upload.commandPool;
-	commands.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	commands.commandBufferCount = 1;
-	if(!checkVk(vkAllocateCommandBuffers(m_device, &commands, &m_upload.commands), "vkAllocateCommandBuffers")) {
-		return false;
+	// GPU time for the performance statistics, see takeStats()
+	{
+		VkPhysicalDeviceProperties properties;
+		vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+		uint32_t familyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &familyCount, nullptr);
+		std::vector<VkQueueFamilyProperties> families(familyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &familyCount, families.data());
+		uint32_t validBits = (m_queueFamily < familyCount) ? families[m_queueFamily].timestampValidBits : 0;
+		if(validBits > 0 && properties.limits.timestampPeriod > 0.f) {
+			m_timestampPeriod = double(properties.limits.timestampPeriod);
+			m_timestampMask = (validBits >= 64) ? ~uint64_t(0) : (uint64_t(1) << validBits) - 1;
+			for(Frame & frame : m_frames) {
+				VkQueryPoolCreateInfo queries = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+				queries.queryType = VK_QUERY_TYPE_TIMESTAMP;
+				queries.queryCount = 2;
+				if(!checkVk(vkCreateQueryPool(m_device, &queries, nullptr, &frame.timestamps), "vkCreateQueryPool")) {
+					m_timestampPeriod = 0.0;
+					break;
+				}
+			}
+		}
 	}
 
 	VkFenceCreateInfo fence = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
@@ -689,25 +707,67 @@ bool VulkanRenderer::createFrames() {
 		return false;
 	}
 
-	// Full-screen passes recorded with the uploads (relief maps)
-	{
-		const uint32_t sets = 256;
-		const VkDescriptorPoolSize sizes[] = {
-			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, sets },
-			{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sets },
-			{ VK_DESCRIPTOR_TYPE_SAMPLER, sets },
-		};
-		VkDescriptorPoolCreateInfo info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-		info.maxSets = sets;
-		info.poolSizeCount = uint32_t(std::size(sizes));
-		info.pPoolSizes = sizes;
-		if(!checkVk(vkCreateDescriptorPool(m_device, &info, nullptr, &m_upload.descriptorPool),
-		            "vkCreateDescriptorPool")) {
-			return false;
-		}
+	return createUploadBatch(m_upload);
+}
+
+bool VulkanRenderer::createUploadBatch(UploadBatch & batch) {
+
+	VkCommandPoolCreateInfo pool = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+	pool.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+	pool.queueFamilyIndex = m_queueFamily;
+	if(!checkVk(vkCreateCommandPool(m_device, &pool, nullptr, &batch.commandPool), "vkCreateCommandPool")) {
+		return false;
 	}
 
-	return true;
+	VkCommandBufferAllocateInfo commands = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+	commands.commandPool = batch.commandPool;
+	commands.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	commands.commandBufferCount = 1;
+	if(!checkVk(vkAllocateCommandBuffers(m_device, &commands, &batch.commands), "vkAllocateCommandBuffers")) {
+		return false;
+	}
+
+	// Full-screen passes recorded with the uploads (relief maps)
+	const uint32_t sets = 256;
+	const VkDescriptorPoolSize sizes[] = {
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, sets },
+		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sets },
+		{ VK_DESCRIPTOR_TYPE_SAMPLER, sets },
+	};
+	VkDescriptorPoolCreateInfo info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+	info.maxSets = sets;
+	info.poolSizeCount = uint32_t(std::size(sizes));
+	info.pPoolSizes = sizes;
+	return checkVk(vkCreateDescriptorPool(m_device, &info, nullptr, &batch.descriptorPool), "vkCreateDescriptorPool");
+}
+
+void VulkanRenderer::recycleUploadBatch(UploadBatch & batch) {
+
+	for(const auto & [buffer, memory] : batch.staging) {
+		vmaDestroyBuffer(m_allocator, buffer, memory);
+	}
+	batch.staging.clear();
+
+	for(std::function<void()> & release : batch.releases) {
+		release();
+	}
+	batch.releases.clear();
+
+	if(batch.descriptorPool) {
+		vkResetDescriptorPool(m_device, batch.descriptorPool, 0);
+	}
+
+}
+
+void VulkanRenderer::destroyUploadBatch(UploadBatch & batch) {
+
+	recycleUploadBatch(batch);
+	vkDestroyDescriptorPool(m_device, batch.descriptorPool, nullptr);
+	vkDestroyCommandPool(m_device, batch.commandPool, nullptr);
+	batch.descriptorPool = VK_NULL_HANDLE;
+	batch.commandPool = VK_NULL_HANDLE;
+	batch.commands = VK_NULL_HANDLE;
+
 }
 
 bool VulkanRenderer::createSwapchain() {
@@ -1087,7 +1147,12 @@ void VulkanRenderer::beginScene() {
 
 	if(!m_stereoViews.empty()) {
 		// The window is not multisampled in VR, the stereo scene is
-		samples = config.video.antialiasing ? m_stereoSamples : VK_SAMPLE_COUNT_1_BIT;
+		samples = VK_SAMPLE_COUNT_1_BIT;
+		if(config.video.antialiasing) {
+			// 2x on request (config.vr.msaaSamples): 4x costs about 4 ms per frame on Quest 3
+			bool twoSamples = (config.vr.msaaSamples <= 2 && (m_stereoSampleCounts & VK_SAMPLE_COUNT_2_BIT));
+			samples = twoSamples ? VK_SAMPLE_COUNT_2_BIT : m_stereoSamples;
+		}
 		// The stereo scene always has its own targets, the eyes side by side with an even width each
 		Vec2i eye(m_stereoSize.x / s32(m_stereoViews.size()), m_stereoSize.y);
 		m_stereoEyeSize = Vec2i(std::max<s32>((s32(float(eye.x) * m_sceneScale + 0.5f) + 1) / 2 * 2, 2),
@@ -1158,8 +1223,28 @@ void VulkanRenderer::beginFrame() {
 
 	Frame & frame = m_frames[m_frameIndex];
 
+	auto waitStart = std::chrono::steady_clock::now();
 	vkWaitForFences(m_device, 1, &frame.fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+	m_stats.fenceWaitMilliseconds
+		+= std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
 	vkResetFences(m_device, 1, &frame.fence);
+
+	if(frame.timed) {
+		uint64_t timestamps[2];
+		if(vkGetQueryPoolResults(m_device, frame.timestamps, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t),
+		                         VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+			uint64_t ticks = (timestamps[1] - timestamps[0]) & m_timestampMask;
+			m_stats.gpuMilliseconds += double(ticks) * m_timestampPeriod * 1e-6;
+		}
+		frame.timed = false;
+	}
+
+	// Uploads submitted with the command buffer, see endFrame()
+	for(UploadBatch & batch : frame.uploads) {
+		recycleUploadBatch(batch);
+		m_upload.spare.push_back(std::move(batch));
+	}
+	frame.uploads.clear();
 
 	for(std::function<void()> & release : frame.releases) {
 		release();
@@ -1181,12 +1266,20 @@ void VulkanRenderer::beginFrame() {
 	begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	vkBeginCommandBuffer(frame.commands, &begin);
 
+	if(frame.timestamps) {
+		vkCmdResetQueryPool(frame.commands, frame.timestamps, 0, 2);
+		vkCmdWriteTimestamp(frame.commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frame.timestamps, 0);
+	}
+
 	invalidateBoundState();
 
 	// Copies of vertex buffers made in earlier frames are gone with the ring buffer contents
 	m_frameSerial++;
 
 	m_frameActive = true;
+
+	m_stats.beginMilliseconds
+		+= std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
 
 }
 
@@ -1196,29 +1289,65 @@ void VulkanRenderer::endFrame(VkSemaphore wait, VkPipelineStageFlags waitStage, 
 
 	endRendering();
 
-	// Textures used by this frame may have been uploaded after its commands were recorded
-	if(m_upload.recording) {
-		flushUploads();
-	}
-
 	Frame & frame = m_frames[m_frameIndex];
+
+	/*
+	 * Textures used by this frame may have been uploaded after its commands were recorded: the uploads are submitted
+	 * before them, and their staging memory is freed once the frame's fence signals. Waiting for the uploads here
+	 * would also wait for everything submitted before (the queue executes in order), up to a whole frame on the GPU.
+	 */
+	VkCommandBuffer commandBuffers[2];
+	uint32_t commandBufferCount = 0;
+	if(m_upload.recording) {
+		UploadBatch next;
+		if(!m_upload.spare.empty()) {
+			next = std::move(m_upload.spare.back());
+			m_upload.spare.pop_back();
+		} else if(!createUploadBatch(next)) {
+			destroyUploadBatch(next);
+			flushUploads();
+		}
+		if(m_upload.recording) {
+			vkEndCommandBuffer(m_upload.commands);
+			m_upload.recording = false;
+			m_upload.stagingSize = 0;
+			commandBuffers[commandBufferCount++] = m_upload.commands;
+			UploadBatch & current = m_upload;
+			frame.uploads.push_back(std::move(current));
+			current = std::move(next);
+			m_stats.textureUploads++;
+		}
+	}
+	commandBuffers[commandBufferCount++] = frame.commands;
 
 	flushRing(frame.vertices);
 	flushRing(frame.indices);
 	flushRing(frame.constants);
 
+	if(frame.timestamps) {
+		vkCmdWriteTimestamp(frame.commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frame.timestamps, 1);
+		frame.timed = true;
+	}
+	m_stats.submissions++;
+
+	auto endStart = std::chrono::steady_clock::now();
 	vkEndCommandBuffer(frame.commands);
+	auto submitStart = std::chrono::steady_clock::now();
+	m_stats.endCommandsMilliseconds += std::chrono::duration<double, std::milli>(submitStart - endStart).count();
 
 	VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	submit.waitSemaphoreCount = wait ? 1 : 0;
 	submit.pWaitSemaphores = &wait;
 	submit.pWaitDstStageMask = &waitStage;
-	submit.commandBufferCount = 1;
-	submit.pCommandBuffers = &frame.commands;
+	submit.commandBufferCount = commandBufferCount;
+	submit.pCommandBuffers = commandBuffers;
 	submit.signalSemaphoreCount = signal ? 1 : 0;
 	submit.pSignalSemaphores = &signal;
 
 	VkResult result = vkQueueSubmit(m_queue, 1, &submit, frame.fence);
+	double submitTime = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - submitStart).count();
+	m_stats.submitMilliseconds += submitTime;
+	m_stats.maxSubmitMilliseconds = std::max(m_stats.maxSubmitMilliseconds, submitTime);
 	if(result == VK_ERROR_DEVICE_LOST) {
 		if(!m_deviceLost) {
 			LogError << "Vulkan device lost";
@@ -1663,17 +1792,8 @@ void VulkanRenderer::flushUploads() {
 		vkDeviceWaitIdle(m_device);
 	}
 
-	for(const auto & [buffer, memory] : m_upload.staging) {
-		vmaDestroyBuffer(m_allocator, buffer, memory);
-	}
-	m_upload.staging.clear();
+	recycleUploadBatch(m_upload);
 	m_upload.stagingSize = 0;
-
-	for(std::function<void()> & release : m_upload.releases) {
-		release();
-	}
-	m_upload.releases.clear();
-	vkResetDescriptorPool(m_device, m_upload.descriptorPool, 0);
 
 }
 
@@ -1793,6 +1913,8 @@ std::unique_ptr<VertexBuffer<SMY_VERTEX3>> VulkanRenderer::createVertexBuffer3(s
 bool VulkanRenderer::allocate(RingBuffer & ring, VkDeviceSize size, VkDeviceSize alignment,
                               RingAllocation & allocation) {
 
+	m_stats.uploadedMegabytes += double(size) / (1024.0 * 1024.0);
+
 	VkDeviceSize offset = (ring.pos + alignment - 1) / alignment * alignment;
 	if(ring.current >= ring.chunks.size() || offset + size > ring.chunks[ring.current].size) {
 
@@ -1910,11 +2032,13 @@ template <class DrawFunction>
 void VulkanRenderer::drawViews(const DrawFunction & draw) {
 
 	if(!stereoActive()) {
+		m_stats.draws++;
 		draw();
 		return;
 	}
 
 	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+	m_stats.draws += unsigned(std::min(m_stereoViews.size(), std::size(m_stereoVSOffsets)));
 
 	// The eyes are side by side in the scene target, each with its own constants (see prepareDraw)
 	for(size_t eye = 0; eye < m_stereoViews.size() && eye < std::size(m_stereoVSOffsets); eye++) {
@@ -2339,7 +2463,8 @@ void VulkanRenderer::copyStereoEyeToImage(size_t eye, VkImage image) {
 	}
 
 	s32 width = m_stereoSize.x / 2;
-	copyToRuntimeImage(m_stereoOutput, Rect(s32(eye) * width, 0, s32(eye + 1) * width, m_stereoSize.y), image);
+	drawToRuntimeImage(m_stereoOutput, m_stereoSize, Rect(s32(eye) * width, 0, s32(eye + 1) * width, m_stereoSize.y),
+	                   image);
 
 }
 
@@ -2348,7 +2473,7 @@ void VulkanRenderer::copyOutputToImage(VkImage image) {
 	setOutputTargetActive(false);
 
 	ImageTarget & source = m_outputResolved.image ? m_outputResolved : m_outputColor;
-	copyToRuntimeImage(source, Rect(m_outputSize.x, m_outputSize.y), image);
+	drawToRuntimeImage(source, m_outputSize, Rect(m_outputSize.x, m_outputSize.y), image);
 
 }
 
@@ -2424,6 +2549,12 @@ void VulkanRenderer::submitCommands() {
 	// The rest of the frame continues in the next command buffer
 	endFrame(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
 
+}
+
+vulkan::Stats VulkanRenderer::takeStats() {
+	vulkan::Stats stats = m_stats;
+	m_stats = vulkan::Stats();
+	return stats;
 }
 
 void VulkanRenderer::setVSync(int vsync) {
@@ -2560,6 +2691,10 @@ void setVSync(Renderer & renderer, int vsync) {
 
 void present(Renderer & renderer) {
 	static_cast<VulkanRenderer &>(renderer).present();
+}
+
+Stats takeStats(Renderer & renderer) {
+	return static_cast<VulkanRenderer &>(renderer).takeStats();
 }
 
 } // namespace vulkan

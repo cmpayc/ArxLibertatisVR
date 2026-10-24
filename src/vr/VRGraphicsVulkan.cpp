@@ -71,6 +71,8 @@ public:
 	const char * getExtension() const override { return XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME; }
 	bool isDirect3D11() const override { return false; }
 	bool isVulkan() const override { return true; }
+	//! The images are drawn into through a view with the renderer's (non-sRGB) format, see copyToRuntimeImage()
+	XrSwapchainUsageFlags getExtraSwapchainUsage() const override { return XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT; }
 
 	bool checkRequirements(XrInstance instance, XrSystemId system) override;
 	const void * getSessionBinding(XrInstance instance, XrSystemId system) override;

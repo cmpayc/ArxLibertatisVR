@@ -125,6 +125,16 @@ const char * signalName(int signal) {
 
 void crashHandler(int signal, siginfo_t * info, void * context) {
 
+	/*
+	 * Restoring the previous handler and returning lets the system crash report run, but on Quest the signal can come
+	 * back here (libsigchain): log only once, then end the process instead of logging the same crash forever
+	 */
+	static volatile sig_atomic_t s_crashed = 0;
+	if(s_crashed) {
+		_exit(128 + signal);
+	}
+	s_crashed = 1;
+
 	writeText("[CRASH] ");
 	writeText(signalName(signal));
 	writeText(" (code ");

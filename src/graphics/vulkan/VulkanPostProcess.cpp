@@ -470,6 +470,70 @@ void VulkanRenderer::postPass(ImageTarget & target, VkFormat format, const Vec2i
 
 }
 
+void VulkanRenderer::drawToRuntimeImage(ImageTarget & source, const Vec2i & sourceSize, const Rect & area,
+                                        VkImage image) {
+
+	if(!source.image || !image || area.width() <= 0 || area.height() <= 0 || sourceSize.x <= 0 || sourceSize.y <= 0) {
+		return;
+	}
+
+	beginFrame();
+
+	/*
+	 * The runtime image is sRGB (see VRGraphicsVulkan::selectColorFormat) and created with a mutable format: drawn
+	 * through a view with the renderer's format, the gamma-encoded bytes are stored unchanged like with a copy
+	 */
+	VkImageViewCreateInfo viewInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	viewInfo.image = image;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.format = m_colorFormat;
+	viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	ImageTarget target;
+	target.image = image;
+	target.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	if(vkCreateImageView(m_device, &viewInfo, nullptr, &target.view) != VK_SUCCESS) {
+		LogError << "Failed to create a Vulkan view of an OpenXR image";
+		copyToRuntimeImage(source, area, image);
+		return;
+	}
+	VkDevice device = m_device;
+	VkImageView view = target.view;
+	deferRelease([device, view]() {
+		vkDestroyImageView(device, view, nullptr);
+	});
+
+	Vec2i size(area.width(), area.height());
+	Vec4f sourceRect(float(area.left) / float(sourceSize.x), float(area.top) / float(sourceSize.y),
+	                 float(size.x) / float(sourceSize.x), float(size.y) / float(sourceSize.y));
+
+	endRendering();
+	transition(source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	VkRenderingAttachmentInfoKHR attachment = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+	attachment.imageView = target.view;
+	attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	VkRenderingInfoKHR rendering = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+	rendering.renderArea = { { 0, 0 }, { uint32_t(size.x), uint32_t(size.y) } };
+	rendering.layerCount = 1;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachments = &attachment;
+
+	VkCommandBuffer commands = m_frames[m_frameIndex].commands;
+	m_cmdBeginRendering(commands, &rendering);
+	VkPipeline pipeline = getPostPipeline(m_blitPixelShader, "psBlit", m_blitLayout, m_colorFormat, false);
+	if(drawPostPass(pipeline, m_blitLayout, source.view, sourceRect, nullptr, 0, size, FullRect)) {
+		vkCmdDraw(commands, 3, 1, 0, 0);
+		m_stats.draws++;
+	}
+	m_cmdEndRendering(commands);
+
+	// The next draw binds its own state
+	invalidateBoundState();
+
+}
+
 std::vector<Vec4f> VulkanRenderer::sceneRegions() const {
 
 	if(m_stereoViews.empty()) {

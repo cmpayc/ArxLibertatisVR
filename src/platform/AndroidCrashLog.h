@@ -32,7 +32,7 @@ namespace platform {
  * The full crash handler needs a second process, which Android apps can't start. Without adb the system crash
  * report (tombstone) is not reachable, so the stack goes to the log in the shared folder. The addresses are
  * offsets into the libraries, for llvm-addr2line with the unstripped libmain.so of the same build.
- * The previous handler (Android's debuggerd) still runs afterwards.
+ * The previous handler (Android's debuggerd) still runs afterwards, a second crash signal ends the process.
  */
 void installAndroidCrashLog(const fs::path & logFile);
 
