@@ -448,7 +448,7 @@ if(USE_OPENGL)
 endif()
 
 # OpenXR
-if(USE_OPENXR AND ARX_HAVE_EPOXY AND WIN32)
+if(USE_OPENXR AND ((ARX_HAVE_EPOXY AND WIN32) OR ANDROID))
 	find_package(OpenXR ${OPTIONAL_DEPENDENCY})
 	if(OPENXR_FOUND)
 		set(ARX_HAVE_OPENXR 1)
@@ -512,6 +512,12 @@ endif()
 find_package(Boost 1.58 REQUIRED)
 include_directories(SYSTEM ${Boost_INCLUDE_DIRS})
 add_definitions(-DBOOST_ALL_NO_LIB)
+if(ANDROID)
+	# Older Boost versions use std::unary_function, which libc++ removed in C++17
+	add_definitions(-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION)
+	# Boost.MPL casts -1 to enums, which newer Clang rejects by default
+	add_compile_options(-Wno-enum-constexpr-conversion)
+endif()
 add_definitions(-DBOOST_EXCEPTION_DISABLE)
 add_definitions(-DBOOST_LEXICAL_CAST_ASSUME_C_LOCALE)
 if(WIN32)
@@ -1069,7 +1075,6 @@ set(VR_OPENXR_SOURCES
 	src/vr/VRCombat.cpp
 	src/vr/VRControls.cpp
 	src/vr/VRGrab.cpp
-	src/vr/VRGraphicsGL.cpp
 	src/vr/VRHud.cpp
 	src/vr/VRInput.cpp
 	src/vr/VRKeyboard.cpp
@@ -1334,8 +1339,8 @@ if(ARX_HAVE_OPENGL)
 		include_directories(SYSTEM ${OPENGL_INCLUDE_DIR} ${GLEW_INCLUDE_DIR})
 		add_definitions(${GLEW_DEFINITIONS})
 	endif()
-else()
-	# SDL backends require OpenGL
+elseif(NOT ANDROID)
+	# SDL backends require OpenGL, except on Android, where only Vulkan is used
 	unset(ARX_HAVE_SDL)
 	unset(ARX_HAVE_SDL1)
 	unset(ARX_HAVE_SDL2)
@@ -1423,7 +1428,11 @@ if(ARX_HAVE_OPENXR)
 	include_directories(SYSTEM ${OpenXR_INCLUDE_DIR})
 	add_definitions(-DXR_NO_PROTOTYPES)
 	# The OpenXR platform header declares the types of the graphics APIs enabled before its first inclusion
-	set_source_files_properties(src/vr/VRGraphicsGL.cpp PROPERTIES ARX_SEPARATE_UNIT 1)
+	if(ARX_HAVE_OPENGL AND WIN32)
+		set(VR_OPENGL_SOURCES src/vr/VRGraphicsGL.cpp)
+		list(APPEND GRAPHICS_SOURCES ${VR_OPENGL_SOURCES})
+		set_source_files_properties(${VR_OPENGL_SOURCES} PROPERTIES ARX_SEPARATE_UNIT 1)
+	endif()
 	if(ARX_HAVE_D3D11)
 		set(VR_D3D11_SOURCES src/vr/VRGraphicsD3D11.cpp)
 		list(APPEND GRAPHICS_SOURCES ${VR_D3D11_SOURCES})
@@ -1458,6 +1467,9 @@ if(ARX_HAVE_ISATTY)
 endif()
 if(WIN32)
 	list(APPEND IO_LOGGER_SOURCES ${IO_LOGGER_WINDOWS_SOURCES})
+endif()
+if(ANDROID)
+	list(APPEND IO_LOGGER_SOURCES src/io/log/AndroidLogger.cpp src/platform/AndroidCrashLog.cpp)
 endif()
 list(APPEND IO_SOURCES ${IO_LOGGER_SOURCES} ${IO_LOGGER_EXTRA_SOURCES})
 
@@ -1626,9 +1638,15 @@ endif()
 
 # Add executables
 
-add_executable_shared(arx "${ARX_SOURCES}" "${ARX_LIBRARIES}" "${ALL_INCLUDES}")
-set_binary_type(arx WIN32)
-set_binary_installdir(arx "${GAMESBINDIR}")
+if(ANDROID)
+	# Loaded by SDL's Java activity (SDLActivity) as libmain.so, which calls SDL_main
+	list(APPEND ARX_LIBRARIES log android)
+	add_library_shared(arx "${ARX_SOURCES}" "${ARX_LIBRARIES}" "${ALL_INCLUDES}")
+else()
+	add_executable_shared(arx "${ARX_SOURCES}" "${ARX_LIBRARIES}" "${ALL_INCLUDES}")
+	set_binary_type(arx WIN32)
+	set_binary_installdir(arx "${GAMESBINDIR}")
+endif()
 
 if(Qt_VERSION VERSION_LESS 5.6)
 	set(qt_dpiaware)
@@ -1966,6 +1984,10 @@ if(ARX_HAVE_VULKAN)
 	add_dependencies(arx vulkan-shaders)
 endif()
 
+if(ANDROID)
+	set_target_properties(arx PROPERTIES OUTPUT_NAME main)
+endif()
+
 if(BUILD_TESTS)
 	
 	target_include_directories(arxtest PRIVATE tests)
@@ -2157,8 +2179,8 @@ endif()
 if(NOT (ARX_HAVE_PTHREADS OR WIN32))
 	message(SEND_ERROR "No supported thread libraries found.")
 endif()
-if(NOT (ARX_HAVE_OPENGL))
-	message(SEND_ERROR "No renderer available - need libepoxy or OpenGL and GLEW")
+if(NOT (ARX_HAVE_OPENGL OR ARX_HAVE_VULKAN))
+	message(SEND_ERROR "No renderer available - need libepoxy or OpenGL and GLEW, or Vulkan")
 endif()
 if(NOT (ARX_HAVE_OPENAL))
 	message(WARNING "No audio backend enabled - need OpenAL")

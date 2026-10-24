@@ -412,7 +412,13 @@ static bool showDialog(DialogType type, const std::string & message,
 	
 	typedef int (*dialogCommand_t)(DialogType type, const std::string & message,
 	                               const std::string & title);
-	
+
+	#ifdef __ANDROID__
+	// An Android dialog is never visible in the headset and would block the game forever, the message is in the log
+	ARX_UNUSED(type), ARX_UNUSED(message), ARX_UNUSED(title);
+	return true;
+	#endif
+
 	// This may not be the best way
 	const char * session = getenv("DESKTOP_SESSION");
 	bool usingKDE = (session != nullptr) && !strcasecmp(session, "kde");

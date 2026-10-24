@@ -50,8 +50,10 @@
 #include "core/Config.h"
 #include "core/Version.h"
 #include "gui/Credits.h"
+#if ARX_HAVE_OPENGL
 #include "graphics/opengl/GLDebug.h"
 #include "graphics/opengl/OpenGLRenderer.h"
+#endif
 #if ARX_HAVE_D3D11
 #include "graphics/d3d11/D3D11Window.h"
 #endif
@@ -123,7 +125,13 @@ SDL2Window::SDL2Window()
 		return;
 	}
 	#endif
+	#if ARX_HAVE_OPENGL
 	m_renderer = new OpenGLRenderer;
+	#elif ARX_HAVE_VULKAN
+	// The only renderer (Android)
+	m_vulkan = vulkan::createRenderer();
+	m_renderer = m_vulkan;
+	#endif
 }
 
 SDL2Window::~SDL2Window() {
@@ -291,7 +299,12 @@ static Uint32 getSDLFlagsForMode(const Vec2i & size, bool fullscreen) {
 }
 
 int SDL2Window::createWindowAndGLContext(const char * profile) {
-	
+
+	#if !ARX_HAVE_OPENGL
+	ARX_UNUSED(profile);
+	return 0;
+	#else
+
 	int x = SDL_WINDOWPOS_UNDEFINED, y = SDL_WINDOWPOS_UNDEFINED;
 	Uint32 windowFlags = getSDLFlagsForMode(m_mode.resolution, m_fullscreen);
 	windowFlags |= SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN;
@@ -396,7 +409,9 @@ int SDL2Window::createWindowAndGLContext(const char * profile) {
 		
 		return std::max(msaa, 1);
 	}
-	
+
+	#endif
+
 }
 
 int SDL2Window::createWindowAndD3D11Device() {
@@ -476,7 +491,9 @@ bool SDL2Window::initialize() {
 	
 	bool autoRenderer = (config.video.renderer == "auto");
 	
+	#if ARX_HAVE_OPENGL
 	gldebug::Mode debugMode = gldebug::mode();
+	#endif
 	
 	int samples = 0;
 
@@ -489,10 +506,14 @@ bool SDL2Window::initialize() {
 			LogWarning << "Vulkan initialization failed, falling back to Direct3D 11";
 			m_d3d11 = d3d11::createRenderer();
 			renderer = m_d3d11;
-			#else
+			#elif ARX_HAVE_OPENGL
 			LogWarning << "Vulkan initialization failed, falling back to OpenGL";
 			renderer = new OpenGLRenderer;
 			autoRenderer = true;
+			#else
+			// No other renderer (Android)
+			LogError << "Vulkan initialization failed";
+			return false;
 			#endif
 			m_renderer->transferListeners(*renderer);
 			delete m_renderer;
@@ -506,6 +527,7 @@ bool SDL2Window::initialize() {
 	}
 	#endif
 
+	#if ARX_HAVE_OPENGL
 	if(m_d3d11) {
 		samples = createWindowAndD3D11Device();
 		if(samples == 0) {
@@ -518,7 +540,9 @@ bool SDL2Window::initialize() {
 			autoRenderer = true;
 		}
 	}
-	
+	#endif
+
+	#if ARX_HAVE_OPENGL
 	for(int api = 0; api < 2 && samples == 0; api++) {
 		bool first = (api == 0);
 		
@@ -589,7 +613,10 @@ bool SDL2Window::initialize() {
 			LogError << "Unknown renderer: " << config.video.renderer;
 		}
 	}
-	
+	#else
+	ARX_UNUSED(autoRenderer);
+	#endif
+
 	if(samples == 0) {
 		return false;
 	}

@@ -114,9 +114,6 @@ const float SpecularScale = 1.5f;
 // Highlights and reflections of water surfaces
 const TextureMaterial WaterMaterial = { 1.f, 96.f, 0.f, 1.f };
 
-// The lava animation repeats after this time, the frequencies of its waves are multiples of 0.1
-const float LavaTimePeriod = 20.f * glm::pi<float>();
-
 struct LightConstants {
 	s32 count[4];
 	float lights[MaxPixelLights * 2][4];

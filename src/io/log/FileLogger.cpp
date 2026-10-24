@@ -23,6 +23,10 @@ namespace logger {
 
 void File::log(const Source & file, int line, Logger::LogLevel level, std::string_view str) {
 	format(ofs, file, line, level, str);
+	#ifdef __ANDROID__
+	// The headset kills or freezes the app without a clean shutdown, keep every line
+	ofs.flush();
+	#endif
 }
 
 void File::flush() {

@@ -107,7 +107,9 @@ public:
 //! Log a failed OpenXR call, see VRSystem.cpp
 bool checkXrResult(XrInstance instance, XrResult result, const char * call);
 
+#if ARX_HAVE_OPENGL && ARX_PLATFORM == ARX_PLATFORM_WIN32
 std::unique_ptr<VRGraphics> createVRGraphicsOpenGL();
+#endif
 #if ARX_HAVE_D3D11
 std::unique_ptr<VRGraphics> createVRGraphicsD3D11();
 #endif

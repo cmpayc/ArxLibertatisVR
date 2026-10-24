@@ -53,6 +53,14 @@ namespace {
 
 const size_t TextureStageCount = 3;
 
+// A standalone headset only shows the OpenXR layers: the Android surface is never presented to, as a FIFO present to
+// the hidden surface could block the frame loop
+#ifdef __ANDROID__
+constexpr bool PresentToWindow = false;
+#else
+constexpr bool PresentToWindow = true;
+#endif
+
 VulkanRenderer * g_vulkanRenderer = nullptr;
 
 // See vulkan::setExternalDevice()
@@ -170,11 +178,6 @@ VulkanRenderer::VulkanRenderer()
 	, m_bloomUpsampleShader(VK_NULL_HANDLE)
 	, m_bloomCompositeShader(VK_NULL_HANDLE)
 	, m_gradingShader(VK_NULL_HANDLE)
-	, m_bloomStrength(0.f)
-	, m_bloom(false)
-	, m_bloomFormat(VK_FORMAT_UNDEFINED)
-	, m_bloomSizes()
-	, m_colorGrading(0)
 	, m_overlayVertexShader(VK_NULL_HANDLE)
 	, m_stereoSize(0)
 	, m_stereoEyeSize(0)
@@ -182,6 +185,11 @@ VulkanRenderer::VulkanRenderer()
 	, m_outputSize(0)
 	, m_outputActive(false)
 	, m_premultipliedAlpha(false)
+	, m_bloomStrength(0.f)
+	, m_bloom(false)
+	, m_bloomFormat(VK_FORMAT_UNDEFINED)
+	, m_bloomSizes()
+	, m_colorGrading(0)
 	, m_reliefPixelShader(VK_NULL_HANDLE)
 	, m_reliefPipeline(VK_NULL_HANDLE)
 	, m_fullRectConstants(VK_NULL_HANDLE)
@@ -704,6 +712,13 @@ bool VulkanRenderer::createFrames() {
 
 bool VulkanRenderer::createSwapchain() {
 
+	if(!PresentToWindow) {
+		if(m_colorFormat == VK_FORMAT_UNDEFINED) {
+			m_colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+		}
+		return true;
+	}
+
 	VkSurfaceCapabilitiesKHR capabilities;
 	if(!checkVk(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_physicalDevice, m_surface, &capabilities),
 	            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")) {
@@ -1061,7 +1076,7 @@ void VulkanRenderer::beginScene() {
 	m_drawingScene = true;
 
 	{
-		// The lava animation repeats, see LavaTimePeriod
+		// The lava animation repeats after 20 pi seconds, the frequencies of its waves are multiples of 0.1
 		double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		m_effectTime = float(std::fmod(seconds, 20.0 * 3.14159265358979323846));
 	}
@@ -1223,6 +1238,9 @@ void VulkanRenderer::transition(ImageTarget & target, VkImageLayout layout, VkIm
 	if(target.layout == layout) {
 		return;
 	}
+
+	// After submitCommands() (copies into the OpenXR images) the frame continues in a new command buffer
+	beginFrame();
 
 	// TODO use precise stages and access masks once the renderer is complete
 	VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
@@ -2431,7 +2449,7 @@ void VulkanRenderer::present() {
 		m_snapshotPath.clear();
 	}
 
-	if(m_swapchainDirty || !m_swapchain) {
+	if(PresentToWindow && (m_swapchainDirty || !m_swapchain)) {
 		vkDeviceWaitIdle(m_device);
 		createSwapchain();
 	}

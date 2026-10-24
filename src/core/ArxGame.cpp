@@ -102,7 +102,6 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "graphics/effects/Fog.h"
 #include "graphics/effects/LightFlare.h"
 #include "graphics/font/Font.h"
-#include "graphics/opengl/GLDebug.h"
 #include "graphics/particle/ParticleEffects.h"
 #include "graphics/particle/ParticleManager.h"
 #include "graphics/particle/MagicFlare.h"
@@ -171,6 +170,10 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "util/String.h"
 
 #include "Configure.h"
+
+#if ARX_HAVE_OPENGL
+#include "graphics/opengl/GLDebug.h"
+#endif
 
 #if ARX_HAVE_OPENXR
 #include "vr/VRBody.h"
@@ -2257,8 +2260,10 @@ void ArxGame::render() {
 	}
 
 	LastMouseClick = EERIEMouseButton;
-	
+
+	#if ARX_HAVE_OPENGL
 	gldebug::endFrame();
+	#endif
 }
 
 void ArxGame::onRendererInit(Renderer & renderer) {

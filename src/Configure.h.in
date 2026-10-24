@@ -48,6 +48,7 @@
 #cmakedefine01 ARX_HAVE_CHDIR
 
 // Video backend
+#cmakedefine01 ARX_HAVE_OPENGL
 #cmakedefine01 ARX_HAVE_EPOXY
 #cmakedefine01 ARX_HAVE_GLEW
 #cmakedefine01 ARX_HAVE_GLX

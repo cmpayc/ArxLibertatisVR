@@ -162,10 +162,16 @@ bool rename(const path & old_p, const path & new_p, bool overwrite) {
 			return false;
 		}
 		#else
-		return false;
+		// Only allow changing the case of a name on a case-insensitive filesystem (Android shared storage):
+		// the destination is then the same file
+		struct stat oldStat, newStat;
+		if(stat(old_p.string().c_str(), &oldStat) || stat(new_p.string().c_str(), &newStat)
+		   || oldStat.st_dev != newStat.st_dev || oldStat.st_ino != newStat.st_ino) {
+			return false;
+		}
 		#endif
 	}
-	
+
 	return !::rename(old_p.string().c_str(), new_p.string().c_str());
 }
 

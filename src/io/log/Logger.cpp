@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "io/log/AndroidLogger.h"
 #include "io/log/ConsoleLogger.h"
 #include "io/log/LogBackend.h"
 #include "io/log/MsvcLogger.h"
@@ -281,6 +282,9 @@ void Logger::initialize() {
 	
 #if ARX_PLATFORM == ARX_PLATFORM_WIN32
 	add(logger::MsvcDebugger::get());
+#endif
+#ifdef __ANDROID__
+	add(new logger::AndroidLog);
 #endif
 	
 	const char * arxdebug = getenv("ARXDEBUG");

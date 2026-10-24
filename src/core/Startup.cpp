@@ -57,6 +57,7 @@
 #include "math/Random.h"
 
 #include "platform/Compiler.h"
+#include "platform/AndroidCrashLog.h"
 #include "platform/CrashHandler.h"
 #include "platform/profiler/Profiler.h"
 #include "platform/Thread.h"
@@ -71,7 +72,8 @@
  * This is needed to initialize NSApplication - otherwise we will later
  * crash when trying to use SDL windowing functions.
  */
-#if ARX_PLATFORM == ARX_PLATFORM_MACOS
+#if ARX_PLATFORM == ARX_PLATFORM_MACOS || defined(__ANDROID__)
+	// On Android, SDLActivity loads libmain.so and calls the exported SDL_main()
 	#include <SDL_main.h>
 #else
 	#undef main /* in case SDL.h was already included */
@@ -154,6 +156,9 @@ int utf8_main(int argc, char ** argv) {
 			fs::path logFile = fs::getUserDir() / "arx.log";
 			Logger::add(new logger::File(logFile));
 			CrashHandler::addAttachedFile(logFile);
+			#ifdef __ANDROID__
+			platform::installAndroidCrashLog(logFile);
+			#endif
 		}
 		
 		Logger::add(new MemoryLogger(&g_console.buffer()));

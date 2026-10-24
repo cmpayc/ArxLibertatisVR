@@ -45,10 +45,18 @@
 #include "graphics/Renderer.h"
 #include "graphics/texture/Texture.h"
 
+#ifdef __ANDROID__
+#include <dlfcn.h>
+#include <time.h>
+#include <jni.h>
+#include <SDL_system.h>
+#define XR_USE_PLATFORM_ANDROID
+#define XR_USE_TIMESPEC
+#else
 #include <windows.h>
 #include <unknwn.h>
-
 #define XR_USE_PLATFORM_WIN32
+#endif
 #include <openxr/openxr_platform.h>
 #include <openxr/openxr_loader_negotiation.h>
 
@@ -106,7 +114,38 @@ bool loadFunctions(XrInstance instance) {
 	return success;
 }
 
+#ifdef __ANDROID__
+
+PFN_xrConvertTimespecTimeToTimeKHR g_convertTime = nullptr;
+const char * const TimeConversionExtension = XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME;
+const char * const TimeConversionFunction = "xrConvertTimespecTimeToTimeKHR";
+
+//! \return the current OpenXR time, or 0 if not available
+XrTime getCurrentTime(XrInstance instance) {
+	timespec now;
+	XrTime time = 0;
+	if(!g_convertTime || clock_gettime(CLOCK_MONOTONIC, &now) != 0 || XR_FAILED(g_convertTime(instance, &now, &time))) {
+		return 0;
+	}
+	return time;
+}
+
+//! \return a monotonic time in milliseconds
+u64 getMilliseconds() {
+	timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return u64(now.tv_sec) * 1000 + u64(now.tv_nsec) / 1000000;
+}
+
+//! The activity of the app for the OpenXR loader and runtime (a global reference)
+jobject g_activity = nullptr;
+JavaVM * g_javaVM = nullptr;
+
+#else
+
 PFN_xrConvertWin32PerformanceCounterToTimeKHR g_convertTime = nullptr;
+const char * const TimeConversionExtension = XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME;
+const char * const TimeConversionFunction = "xrConvertWin32PerformanceCounterToTimeKHR";
 
 //! \return the current OpenXR time, or 0 if not available
 XrTime getCurrentTime(XrInstance instance) {
@@ -126,6 +165,8 @@ u64 getMilliseconds() {
 	return u64(counter.QuadPart / (frequency.QuadPart / 1000));
 }
 
+#endif
+
 //! Rate limit for repeated per-frame errors: log the first few, then every 1000th
 bool shouldLogRepeatedError(u64 & count) {
 	count++;
@@ -133,7 +174,11 @@ bool shouldLogRepeatedError(u64 & count) {
 }
 
 //! VR turned on (1) or off (-1) on the command line, 0 to use the config
+#ifdef __ANDROID__
+int g_vrOverride = 1; // A standalone headset has no flat mode
+#else
 int g_vrOverride = 0;
+#endif
 
 void enableVR() {
 	g_vrOverride = 1;
@@ -153,6 +198,8 @@ const char * resultString(XrInstance instance, XrResult result) {
 	}
 	return buffer;
 }
+
+#ifndef __ANDROID__
 
 std::string getEnv(const char * name) {
 	char buffer[4096];
@@ -312,6 +359,70 @@ PFN_xrGetInstanceProcAddr loadRuntime(const std::string & manifest) {
 	return runtimeRequest.getInstanceProcAddr;
 }
 
+#endif // !__ANDROID__
+
+#ifdef __ANDROID__
+
+//! The system runtime of the headset (Meta Horizon OS) or of Lepton (SteamVR) through the Khronos loader
+std::vector<std::string> getRuntimeCandidates() {
+	return { std::string() };
+}
+
+//! Load the OpenXR loader packaged with the app and initialize it with the Java VM and the activity
+bool loadOpenXR(const std::string & manifest) {
+
+	ARX_UNUSED(manifest);
+
+	void * loader = dlopen("libopenxr_loader.so", RTLD_NOW | RTLD_LOCAL);
+	if(!loader) {
+		LogError << "OpenXR: could not load libopenxr_loader.so: " << dlerror();
+		return false;
+	}
+	xrGetInstanceProcAddr = reinterpret_cast<PFN_xrGetInstanceProcAddr>(dlsym(loader, "xrGetInstanceProcAddr"));
+	if(!xrGetInstanceProcAddr) {
+		LogError << "OpenXR: libopenxr_loader.so has no xrGetInstanceProcAddr";
+		return false;
+	}
+
+	if(!g_activity) {
+		JNIEnv * env = static_cast<JNIEnv *>(SDL_AndroidGetJNIEnv());
+		jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
+		if(!env || !activity || env->GetJavaVM(&g_javaVM) != JNI_OK) {
+			LogError << "OpenXR: no Android activity";
+			xrGetInstanceProcAddr = nullptr;
+			return false;
+		}
+		g_activity = env->NewGlobalRef(activity);
+		env->DeleteLocalRef(activity);
+	}
+
+	PFN_xrInitializeLoaderKHR initializeLoader = nullptr;
+	if(XR_FAILED(xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR",
+	                                   reinterpret_cast<PFN_xrVoidFunction *>(&initializeLoader)))
+	   || !initializeLoader) {
+		LogError << "OpenXR: xrInitializeLoaderKHR not available";
+		xrGetInstanceProcAddr = nullptr;
+		return false;
+	}
+	XrLoaderInitInfoAndroidKHR initInfo = { XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR };
+	initInfo.applicationVM = g_javaVM;
+	initInfo.applicationContext = g_activity;
+	if(XR_FAILED(initializeLoader(reinterpret_cast<const XrLoaderInitInfoBaseHeaderKHR *>(&initInfo)))) {
+		LogError << "OpenXR: xrInitializeLoaderKHR failed";
+		xrGetInstanceProcAddr = nullptr;
+		return false;
+	}
+
+	if(!loadFunctions(XR_NULL_HANDLE)) {
+		xrGetInstanceProcAddr = nullptr;
+		return false;
+	}
+
+	return true;
+}
+
+#else
+
 //! Load a runtime from its manifest, or the system OpenXR loader (system default runtime) for an empty manifest
 bool loadOpenXR(const std::string & manifest) {
 
@@ -334,6 +445,8 @@ bool loadOpenXR(const std::string & manifest) {
 
 	return true;
 }
+
+#endif // __ANDROID__
 
 std::vector<XrExtensionProperties> getInstanceExtensions() {
 
@@ -470,7 +583,8 @@ bool VRSystem::initInstance() {
 	 */
 	std::vector<std::unique_ptr<VRGraphics>> apis;
 	#if ARX_HAVE_VULKAN
-	if(config.video.renderer == "Vulkan") {
+	// Without OpenGL (Android), Vulkan is the only renderer
+	if(config.video.renderer == "Vulkan" || !ARX_HAVE_OPENGL) {
 		apis.push_back(createVRGraphicsVulkan());
 	}
 	#endif
@@ -479,7 +593,9 @@ bool VRSystem::initInstance() {
 		apis.push_back(createVRGraphicsD3D11());
 	}
 	#endif
+	#if ARX_HAVE_OPENGL && ARX_PLATFORM == ARX_PLATFORM_WIN32
 	apis.push_back(createVRGraphicsOpenGL());
+	#endif
 	std::vector<std::string> candidates = getRuntimeCandidates();
 	std::vector<XrExtensionProperties> extensions;
 	for(std::unique_ptr<VRGraphics> & api : apis) {
@@ -502,19 +618,27 @@ bool VRSystem::initInstance() {
 		}
 	}
 	if(!m_graphics) {
-		LogError << "OpenXR: no runtime with OpenGL or Direct3D 11 support available - install SteamVR or the Meta"
+		LogError << "OpenXR: no runtime with Vulkan, OpenGL or Direct3D 11 support available - install SteamVR or the Meta"
 		         << " Quest PC app, or select a runtime with runtime= in the [vr] config section";
 		return false;
 	}
 
-	bool hasTimeConversion = hasExtension(extensions, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+	bool hasTimeConversion = hasExtension(extensions, TimeConversionExtension);
 
 	std::vector<const char *> enabledExtensions = { m_graphics->getExtension() };
 	if(hasTimeConversion) {
-		enabledExtensions.push_back(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
+		enabledExtensions.push_back(TimeConversionExtension);
 	}
 
 	XrInstanceCreateInfo createInfo = { XR_TYPE_INSTANCE_CREATE_INFO };
+	#ifdef __ANDROID__
+	// Required on Android: the runtime needs the Java VM and the activity of the app
+	enabledExtensions.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
+	XrInstanceCreateInfoAndroidKHR androidInfo = { XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR };
+	androidInfo.applicationVM = g_javaVM;
+	androidInfo.applicationActivity = g_activity;
+	createInfo.next = &androidInfo;
+	#endif
 	std::snprintf(createInfo.applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE, "%s", "Arx Libertatis VR");
 	createInfo.applicationInfo.applicationVersion = 1;
 	std::snprintf(createInfo.applicationInfo.engineName, XR_MAX_ENGINE_NAME_SIZE, "%s", "Arx Libertatis");
@@ -535,7 +659,7 @@ bool VRSystem::initInstance() {
 	
 	g_convertTime = nullptr;
 	if(hasTimeConversion) {
-		xrGetInstanceProcAddr(m_instance, "xrConvertWin32PerformanceCounterToTimeKHR",
+		xrGetInstanceProcAddr(m_instance, TimeConversionFunction,
 		                      reinterpret_cast<PFN_xrVoidFunction *>(&g_convertTime));
 	}
 
