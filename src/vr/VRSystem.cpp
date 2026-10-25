@@ -636,7 +636,8 @@ bool VRSystem::initInstance() {
 	}
 	#endif
 	#if ARX_HAVE_D3D11
-	if(config.video.renderer == "Direct3D 11") {
+	// Also the automatic choice (see SDL2Window): Vulkan only when selected, it is meant for the standalone headsets
+	if(config.video.renderer == "Direct3D 11" || config.video.renderer == "auto") {
 		apis.push_back(createVRGraphicsD3D11());
 	}
 	#endif
@@ -1687,7 +1688,9 @@ void VRSystem::updateGamePanels() {
 	}
 	if(!areas.screen.empty() && !isVRGrabbing()) {
 		updateUIPlacement(true);
-		addScreenPanel(areas.screen, isVRInterfaceOpen());
+		// Only an open container in the game: twice as big, its items were too small to pick (user request)
+		const float ContainerScale = 2.f;
+		addScreenPanel(areas.screen, isVRInterfaceOpen(), false, config.vr.showHud ? 1.f : ContainerScale);
 	}
 	updateWristPanels(areas);
 	updateLootPanel(areas);
@@ -1696,10 +1699,10 @@ void VRSystem::updateGamePanels() {
 
 }
 
-void VRSystem::addScreenPanel(const Rect & area, bool interactive, bool keepPosition) {
+void VRSystem::addScreenPanel(const Rect & area, bool interactive, bool keepPosition, float scale) {
 
 	// The same pixel size as the whole virtual screen, centered where the screen is
-	float pixelSize = m_uiExtent.width / float(m_uiSize.x);
+	float pixelSize = m_uiExtent.width / float(m_uiSize.x) * scale;
 	glm::quat orientation(m_uiPose.orientation.w, m_uiPose.orientation.x,
 	                      m_uiPose.orientation.y, m_uiPose.orientation.z);
 	Vec3f position(m_uiPose.position.x, m_uiPose.position.y, m_uiPose.position.z);
@@ -1968,7 +1971,8 @@ void VRSystem::updateLootPanel(const VRHudAreas & areas) {
 	Vec3f across = glm::cross(up, normal);
 	glm::quat orientation = glm::quat_cast(glm::mat3x3(across, up, normal));
 
-	const float LootPixelSize = 0.0012f; // meters per interface pixel: a sheet of about 30 cm
+	// Meters per interface pixel: a sheet of about 60 cm (30 cm was too small to pick the items, user request)
+	const float LootPixelSize = 0.0024f;
 	if(addUIPanel(areas.loot, LootPixelSize / areas.hudScale, position, orientation, true)) {
 		m_uiPanels.back().noBeam = true; // The cursor on it is enough (user request)
 	}

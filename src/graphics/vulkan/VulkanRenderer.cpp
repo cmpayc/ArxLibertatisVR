@@ -1042,8 +1042,16 @@ bool VulkanRenderer::createSceneTargets(const Vec2i & size, VkSampleCountFlagBit
 	if(samples == VK_SAMPLE_COUNT_1_BIT) {
 		usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 	}
+	// The effects read the stencil of the scene, if the depth format can be sampled (see setSceneEffectsExcluded)
+	VkFormatProperties depthProperties;
+	vkGetPhysicalDeviceFormatProperties(m_physicalDevice, m_depthFormat, &depthProperties);
+	bool sampledStencil = (depthProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+	VkImageUsageFlags depthUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+	if(sampledStencil) {
+		depthUsage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+	}
 	if(!createImageTarget(m_sceneColor, m_colorFormat, usage, VK_IMAGE_ASPECT_COLOR_BIT, size, samples)
-	   || !createImageTarget(m_sceneDepth, m_depthFormat, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+	   || !createImageTarget(m_sceneDepth, m_depthFormat, depthUsage,
 	                         VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, size, samples)
 	   || (samples != VK_SAMPLE_COUNT_1_BIT
 	       && !createImageTarget(m_sceneResolved, m_colorFormat,
@@ -1052,6 +1060,20 @@ bool VulkanRenderer::createSceneTargets(const Vec2i & size, VkSampleCountFlagBit
 		LogError << "Failed to create " << size.x << "x" << size.y << " Vulkan scene targets";
 		releaseSceneTargets();
 		return false;
+	}
+
+	if(sampledStencil) {
+		VkImageViewCreateInfo view = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		view.image = m_sceneDepth.image;
+		view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		view.format = m_depthFormat;
+		view.subresourceRange = { VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1 };
+		if(vkCreateImageView(m_device, &view, nullptr, &m_sceneStencilView) != VK_SUCCESS) {
+			m_sceneStencilView = VK_NULL_HANDLE;
+		}
+	}
+	if(!m_sceneStencilView) {
+		LogWarning << "Vulkan scene stencil cannot be sampled: the held book gets the effects";
 	}
 
 	// Bloom chain from half the scene size down
@@ -1083,6 +1105,14 @@ void VulkanRenderer::releaseSceneTargets() {
 		invalidateBoundState();
 	}
 
+	if(m_sceneStencilView) {
+		VkDevice device = m_device;
+		VkImageView view = m_sceneStencilView;
+		deferRelease([device, view]() {
+			vkDestroyImageView(device, view, nullptr);
+		});
+		m_sceneStencilView = VK_NULL_HANDLE;
+	}
 	releaseImageTarget(m_sceneColor);
 	releaseImageTarget(m_sceneDepth);
 	releaseImageTarget(m_sceneResolved);
@@ -1170,6 +1200,8 @@ void VulkanRenderer::beginScene() {
 	endRendering();
 
 	m_inScene = true;
+	// No pixels without effects yet (see setSceneEffectsExcluded)
+	m_clearSceneStencil = true;
 	invalidateBoundState();
 
 }
@@ -1438,13 +1470,21 @@ void VulkanRenderer::beginRendering() {
 	depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
+	// The stencil of the scene starts without marked pixels, the depth is cleared by the game
+	VkRenderingAttachmentInfoKHR stencil = depth;
+	if(m_inScene && m_clearSceneStencil) {
+		stencil.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		stencil.clearValue.depthStencil = { 1.f, 0 };
+		m_clearSceneStencil = false;
+	}
+
 	VkRenderingInfoKHR info = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
 	info.renderArea = { { 0, 0 }, { uint32_t(size.x), uint32_t(size.y) } };
 	info.layerCount = 1;
 	info.colorAttachmentCount = uint32_t(std::size(colors));
 	info.pColorAttachments = colors;
 	info.pDepthAttachment = &depth;
-	info.pStencilAttachment = &depth;
+	info.pStencilAttachment = &stencil;
 
 	m_cmdBeginRendering(m_frames[m_frameIndex].commands, &info);
 

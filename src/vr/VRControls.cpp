@@ -26,6 +26,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
+#include "animation/Animation.h"
 #include "core/Config.h"
 #include "core/Core.h"
 #include "game/Inventory.h"
@@ -752,6 +753,14 @@ void updateVRControls() {
 			g_combatSuspended = false;
 			g_weaponKeptForMagic = false;
 			ARX_EQUIPMENT_AttachPlayerWeaponToBack();
+			/*
+			 * Like leaving the combat mode in VR (see ARX_INTERFACE_setCombatMode): the weapon wait animation is still
+			 * playing on the arms layer, and the game draws a weapon only with that layer free, so every later draw
+			 * vibrated but left the weapon on the back (user)
+			 */
+			Entity * io = entities.player();
+			AcquireLastAnim(io);
+			io->animlayer[1].cur_anim = nullptr;
 			g_vr->getInput().vibrate(g_weaponHand, 0.6f, 0.08f);
 		} else {
 			toggleWeapon = true;

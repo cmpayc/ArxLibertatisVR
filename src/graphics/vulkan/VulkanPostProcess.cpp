@@ -32,6 +32,7 @@
 
 // SPIR-V compiled from D3D11Shaders.h by cmake/SPIRVShaders.cmake
 #include "psBloomPrefilter.h"
+#include "psBloomPrefilterMS.h"
 #include "psBloomDownsample.h"
 #include "psBloomUpsample.h"
 #include "psBloomComposite.h"
@@ -166,6 +167,8 @@ bool VulkanRenderer::createPostProcessResources() {
 
 	m_bloomPrefilterShader = createModule(m_device, spirv_psBloomPrefilter, sizeof(spirv_psBloomPrefilter),
 	                                      "psBloomPrefilter");
+	m_bloomPrefilterShaderMS = createModule(m_device, spirv_psBloomPrefilterMS, sizeof(spirv_psBloomPrefilterMS),
+	                                        "psBloomPrefilterMS");
 	m_bloomDownsampleShader = createModule(m_device, spirv_psBloomDownsample, sizeof(spirv_psBloomDownsample),
 	                                       "psBloomDownsample");
 	m_bloomUpsampleShader = createModule(m_device, spirv_psBloomUpsample, sizeof(spirv_psBloomUpsample),
@@ -243,7 +246,8 @@ void VulkanRenderer::releasePostProcessResources() {
 	releasePostLayout(m_bloomLayout);
 	releasePostLayout(m_gradingLayout);
 
-	for(VkShaderModule * module : { &m_bloomPrefilterShader, &m_bloomDownsampleShader, &m_bloomUpsampleShader,
+	for(VkShaderModule * module : { &m_bloomPrefilterShader, &m_bloomPrefilterShaderMS, &m_bloomDownsampleShader,
+	                                &m_bloomUpsampleShader,
 	                                &m_bloomCompositeShader, &m_gradingShader, &m_overlayVertexShader }) {
 		vkDestroyShaderModule(m_device, *module, nullptr);
 		*module = VK_NULL_HANDLE;
@@ -386,6 +390,9 @@ bool VulkanRenderer::drawPostPass(VkPipeline pipeline, const PostLayout & layout
 	VkDescriptorBufferInfo passBuffer = { passConstants.buffer, 0, VkDeviceSize(constantsSize) };
 	VkDescriptorImageInfo image = { VK_NULL_HANDLE, source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 	VkDescriptorImageInfo mask = { VK_NULL_HANDLE, m_noSceneMask.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+	if(m_postSceneMask) {
+		mask = { VK_NULL_HANDLE, m_postSceneMask, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL };
+	}
 	VkDescriptorImageInfo sampler = {
 		getSampler(TextureStage::WrapClamp, TextureStage::FilterLinear, TextureStage::FilterLinear, false, 0.f),
 		VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED
@@ -585,8 +592,24 @@ void VulkanRenderer::renderBloom(ImageTarget & scene) {
 		postPass(target, format, targetSize, source, shader, entry, layout, regions, sizeof(BloomConstants), additive);
 	};
 
-	pass(m_bloomTargets[0], m_bloomSizes[0], scene, m_sceneSize, m_bloomPrefilterShader, "psBloomPrefilter",
+	/*
+	 * Without the pixels marked in the stencil (see setSceneEffectsExcluded): the book held in VR is bright and close
+	 * to the eyes, with bloom the whole book glowed (user)
+	 */
+	VkShaderModule prefilter = m_bloomPrefilterShader;
+	const char * prefilterEntry = "psBloomPrefilter";
+	if(m_sceneStencilView && (m_sceneSamples == VK_SAMPLE_COUNT_1_BIT || m_bloomPrefilterShaderMS)) {
+		if(m_sceneSamples != VK_SAMPLE_COUNT_1_BIT) {
+			prefilter = m_bloomPrefilterShaderMS;
+		}
+		endRendering();
+		transition(m_sceneDepth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+		           VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+		m_postSceneMask = m_sceneStencilView;
+	}
+	pass(m_bloomTargets[0], m_bloomSizes[0], scene, m_sceneSize, prefilter, prefilterEntry,
 	     m_bloomPrefilterLayout, m_bloomFormat, false);
+	m_postSceneMask = VK_NULL_HANDLE;
 	for(size_t i = 1; i < BloomLevels; i++) {
 		pass(m_bloomTargets[i], m_bloomSizes[i], m_bloomTargets[i - 1], m_bloomSizes[i - 1], m_bloomDownsampleShader,
 		     "psBloomDownsample", m_bloomLayout, m_bloomFormat, false);

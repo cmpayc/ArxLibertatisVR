@@ -144,6 +144,7 @@ public:
 	void setBloom(float strength) override;
 	bool supportsColorGrading() const override { return true; }
 	void setColorGrading(std::string_view preset) override;
+	void setSceneEffectsExcluded(bool excluded) override { m_sceneEffectsExcluded = excluded; }
 
 	bool reliefMapsEnabled() const {
 		return (m_normalMapStrength > 0.f || m_parallaxStrength > 0.f) && m_reliefPixelShader;
@@ -534,6 +535,10 @@ private:
 	ImageTarget m_sceneColor;
 	ImageTarget m_sceneDepth;
 	ImageTarget m_sceneResolved; //!< Only with MSAA, resolved at the end of rendering
+	//! The stencil of m_sceneDepth, sampled by the effects: 1 where they are left out (see setSceneEffectsExcluded)
+	VkImageView m_sceneStencilView = VK_NULL_HANDLE;
+	bool m_sceneEffectsExcluded = false; //!< The draws mark their pixels in the scene stencil
+	bool m_clearSceneStencil = false; //!< The next rendering of the scene clears its stencil, see beginScene()
 	VkSampleCountFlagBits m_sceneSamples;
 	VkSampleCountFlagBits m_stereoSamples; //!< For the VR stereo scene, independent of the window
 	VkSampleCountFlags m_stereoSampleCounts = 0; //!< Supported by the stereo scene targets
@@ -583,11 +588,13 @@ private:
 	PostLayout m_gradingLayout;
 	std::map<PostPipelineKey, VkPipeline> m_postPipelines;
 	VkShaderModule m_bloomPrefilterShader;
+	VkShaderModule m_bloomPrefilterShaderMS = VK_NULL_HANDLE; //!< Reads the stencil of a multisampled scene
 	VkShaderModule m_bloomDownsampleShader;
 	VkShaderModule m_bloomUpsampleShader;
 	VkShaderModule m_bloomCompositeShader;
 	VkShaderModule m_gradingShader;
 	ImageTarget m_noSceneMask; //!< Bound as the scene stencil: no pixel is excluded from the effects
+	VkImageView m_postSceneMask = VK_NULL_HANDLE; //!< The scene stencil for the next passes instead, see renderBloom()
 	VkShaderModule m_overlayVertexShader;
 
 	// VR

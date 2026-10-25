@@ -116,7 +116,8 @@ SDL2Window::SDL2Window()
 	}
 	#endif
 	#if ARX_HAVE_D3D11
-	bool d3d11 = (config.video.renderer == "Direct3D 11");
+	// Also the automatic choice: the renderer with all the effects, and the one used for VR on Windows
+	bool d3d11 = (config.video.renderer == "Direct3D 11" || config.video.renderer == "auto");
 	#if ARX_HAVE_OPENXR
 	// The VR runtime may support only OpenGL, see VRSystem::initInstance()
 	if(d3d11 && g_vr && !g_vr->usesDirect3D11()) {

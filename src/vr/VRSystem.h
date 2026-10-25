@@ -266,8 +266,12 @@ private:
 	bool createUITarget(const Vec2i & size);
 	void destroyUITarget();
 	void updateUIPlacement(bool followHead);
-	//! Show a part of the virtual screen at the screen placement, see \ref updateUIPlacement
-	void addScreenPanel(const Rect & area, bool interactive, bool keepPosition = false);
+	/*!
+	 * Show a part of the virtual screen at the screen placement, see \ref updateUIPlacement
+	 *
+	 * \param scale Size relative to the virtual screen
+	 */
+	void addScreenPanel(const Rect & area, bool interactive, bool keepPosition = false, float scale = 1.f);
 	//! Show a part of the virtual screen as a quad of the given size (metres per pixel)
 	bool addUIPanel(const Rect & area, float pixelSize, const Vec3f & position, const glm::quat & orientation,
 	                bool interactive);

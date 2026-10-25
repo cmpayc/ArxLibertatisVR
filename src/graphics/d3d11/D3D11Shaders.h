@@ -630,11 +630,29 @@ Texture2D<uint2> sceneMask : register(t4);
 #endif
 
 uint sceneMasked(int2 pixel) {
+	#ifdef __spirv__
+	/*
+	 * Vulkan: a stencil view returns the stencil in the first component, and loads outside of the image are undefined
+	 * (Direct3D 11 returns 0)
+	 */
+	uint width, height;
 	#ifdef MSAA_DEPTH
-	return sceneMask.Load(pixel, 0).g;
+	uint samples;
+	sceneMask.GetDimensions(width, height, samples);
 	#else
-	return sceneMask.Load(int3(pixel, 0)).g;
+	sceneMask.GetDimensions(width, height);
 	#endif
+	pixel = clamp(pixel, int2(0, 0), int2(width, height) - 1);
+	#define SCENE_MASK_CHANNEL r
+	#else
+	#define SCENE_MASK_CHANNEL g
+	#endif
+	#ifdef MSAA_DEPTH
+	return sceneMask.Load(pixel, 0).SCENE_MASK_CHANNEL;
+	#else
+	return sceneMask.Load(int3(pixel, 0)).SCENE_MASK_CHANNEL;
+	#endif
+	#undef SCENE_MASK_CHANNEL
 }
 Texture2D<float4> objectMotion : register(t2);
 

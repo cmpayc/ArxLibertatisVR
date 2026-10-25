@@ -176,13 +176,14 @@ struct PipelineState {
 	bool wireframe = false;
 	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
 	bool premultipliedAlpha = false; //!< The VR interface layer, see setPremultipliedAlphaOutput()
+	bool stencilMark = false; //!< Set the scene stencil to 1: no effects there, see setSceneEffectsExcluded()
 
 	uint64_t key() const {
 		return uint64_t(vertexType) | (uint64_t(topology) << 2) | (uint64_t(blendSrc) << 5)
 		       | (uint64_t(blendDst) << 9) | (uint64_t(alphaToCoverage) << 13) | (uint64_t(sampleShading) << 14)
 		       | (uint64_t(cull) << 15) | (uint64_t(depthTest) << 16) | (uint64_t(depthWrite) << 17)
 		       | (uint64_t(depthBias) << 18) | (uint64_t(wireframe) << 19) | (uint64_t(samples) << 20)
-		       | (uint64_t(premultipliedAlpha) << 27);
+		       | (uint64_t(premultipliedAlpha) << 27) | (uint64_t(stencilMark) << 28);
 	}
 
 	static PipelineState fromKey(uint64_t key) {
@@ -200,6 +201,7 @@ struct PipelineState {
 		state.wireframe = ((key >> 19) & 1) != 0;
 		state.samples = VkSampleCountFlagBits((key >> 20) & 127);
 		state.premultipliedAlpha = ((key >> 27) & 1) != 0;
+		state.stencilMark = ((key >> 28) & 1) != 0;
 		return state;
 	}
 
@@ -504,6 +506,17 @@ VkPipeline VulkanRenderer::getPipeline(uint64_t key) {
 	depthStencil.depthTestEnable = VK_TRUE;
 	depthStencil.depthWriteEnable = state.depthWrite ? VK_TRUE : VK_FALSE;
 	depthStencil.depthCompareOp = state.depthTest ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_ALWAYS;
+	if(state.stencilMark) {
+		// Like the Direct3D 11 backend: the pixels that pass the depth test are marked
+		depthStencil.stencilTestEnable = VK_TRUE;
+		VkStencilOpState mark = {};
+		mark.failOp = mark.depthFailOp = VK_STENCIL_OP_KEEP;
+		mark.passOp = VK_STENCIL_OP_REPLACE;
+		mark.compareOp = VK_COMPARE_OP_ALWAYS;
+		mark.compareMask = mark.writeMask = 0xff;
+		mark.reference = 1;
+		depthStencil.front = depthStencil.back = mark;
+	}
 
 	VkPipelineColorBlendAttachmentState blend = {};
 	blend.blendEnable = (state.blendSrc != BlendOne || state.blendDst != BlendZero) ? VK_TRUE : VK_FALSE;
@@ -660,6 +673,7 @@ bool VulkanRenderer::prepareDraw(VertexType type, Primitive primitive) {
 	state.wireframe = m_wireframe;
 	state.samples = samples;
 	state.premultipliedAlpha = m_premultipliedAlpha && !m_inScene;
+	state.stencilMark = m_sceneEffectsExcluded && m_inScene && m_sceneStencilView;
 
 	VkPipeline pipeline = getPipeline(state.key());
 	if(!pipeline) {

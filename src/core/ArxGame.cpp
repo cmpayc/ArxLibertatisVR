@@ -164,7 +164,6 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "scene/Scene.h"
 #include "scene/Tiles.h"
 
-#include "script/Script.h"
 #include "script/ScriptEvent.h"
 
 #include "util/String.h"
@@ -1720,28 +1719,6 @@ void ArxGame::updateInput() {
 	
 	if(GInput->isKeyPressedNowPressed(Keyboard::Key_F10)) {
 		GetSnapShot();
-	}
-
-	// Give the armor using the human_chainmail, human_plate_helm_full and human_ylside player tweaks
-	if(GInput->isKeyPressedNowPressed(Keyboard::Key_F8) && ARXmenu.mode() == Mode_InGame && entities.player()) {
-		const char * const items[] = {
-			"armor/chest_chain/chest_chain",
-			"armor/helmet_chain/helmet_chain",
-			"armor/legging_chain/legging_chain",
-			"armor/helmet_poxsellis/helmet_poxsellis",
-			"armor/ylside_armor/ylside_armor",
-			"armor/ylside_leggings/ylside_leggings",
-		};
-		for(const char * item : items) {
-			Entity * io = AddItem(res::path("graph/obj3d/interactive/items") / item);
-			if(!io) {
-				LogWarning << "Could not add item " << item;
-				continue;
-			}
-			io->scriptload = 1;
-			SendInitScriptEvent(io);
-			giveToPlayer(io);
-		}
 	}
 
 	if(GInput->actionNowPressed(CONTROLS_CUST_DEBUG)) {

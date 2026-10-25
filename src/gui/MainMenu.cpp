@@ -1367,6 +1367,9 @@ private:
 	void setUpscalerState() {
 		
 		bool direct3D = (config.video.renderer == "Direct3D 11");
+		#if ARX_HAVE_D3D11
+		direct3D = direct3D || config.video.renderer == "auto"; // See SDL2Window
+		#endif
 		bool vulkan = (config.video.renderer == "Vulkan");
 		#if ARX_HAVE_VULKAN && !ARX_HAVE_OPENGL
 		vulkan = vulkan || config.video.renderer == "auto"; // The only renderer (Android)
