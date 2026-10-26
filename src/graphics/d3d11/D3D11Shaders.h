@@ -561,8 +561,9 @@ PSOutput psMain(PSInput input
 		reflectivity *= iceMask;
 	}
 	o.surface = float4(encodeNormal(normal), reflectivity, (surfaceParams.y == 0 || reflectivity > 0) ? 1 : 0);
-	// Lit opaque surfaces receive shadows, but not water, which has no normal of its own, or glowing lava
-	bool receiver = normalLength > 0.01 && !water && !lava;
+	// Lit opaque world surfaces receive shadows, but not water, which has no normal of its own, or glowing lava.
+	// Models do not: their shadow map depth is too coarse for their curved surfaces, which flickered.
+	bool receiver = normalLength > 0.01 && !water && !lava && surfaceParams.w == 0;
 	o.shading = float4(incidentLight, receiver ? 1 : 0, 0, (surfaceParams.y == 0) ? 1 : 0);
 	return o;
 }

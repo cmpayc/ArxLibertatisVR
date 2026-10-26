@@ -1543,6 +1543,37 @@ void adjustVRLinkedTransform(const Entity & entity, const EERIE_LINKED & link, T
 		return;
 	}
 
+	if(link.io && (link.io->type_flags & (OBJECT_TYPE_DAGGER | OBJECT_TYPE_1H | OBJECT_TYPE_2H)) && g_vr) {
+		/*
+		 * Held weapons sit a little further forward in the fist and towards the body's middle (user): 1 cm along the
+		 * controller's pointing direction and 1 cm inwards (left for the right hand, right for the left hand)
+		 */
+		VRHand hand = VRHandCount;
+		if(link.lidx == getHoldVertex(*entity.obj, VRHandRight)) {
+			hand = VRHandRight;
+		} else if(link.lidx == getHoldVertex(*entity.obj, VRHandLeft)) {
+			hand = VRHandLeft;
+		}
+		// The left hand held them facing the other way than the right hand (user): half a turn around the blade
+		if(hand == VRHandLeft) {
+			Vec3f axis = getHeldItemAxis(*link.obj, link.lidx2);
+			if(axis != Vec3f(0.f)) {
+				transform.rotation = glm::normalize(transform.rotation * glm::angleAxis(glm::pi<float>(), axis));
+			}
+		}
+		const VRPose & grip = (hand != VRHandCount) ? g_vr->getInput().getHand(hand).grip : VRPose();
+		Vec3f gripPosition;
+		glm::quat gripOrientation;
+		if(grip.valid && trackingPoseToWorld(grip.position, grip.orientation, gripPosition, gripOrientation)) {
+			const float Inwards = 0.01f; // m
+			const float Forwards = 0.01f; // m
+			// OpenXR grip space: +x to the right, -z forwards through the fist
+			Vec3f offset((hand == VRHandRight) ? -Inwards : Inwards, 0.f, -Forwards);
+			transform.pos += gripOrientation * (vr::toArxBasis(offset) * (100.f * config.vr.worldScale));
+		}
+		return;
+	}
+
 	if(!isMirroredInLeftHand(*entity.obj, link)) {
 		return;
 	}

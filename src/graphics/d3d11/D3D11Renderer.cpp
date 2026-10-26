@@ -162,6 +162,10 @@ const size_t MaxPixelLights = 128;
 // Normal map slope at full strength, the generated slope is the brightness change per texel
 const float NormalMapSlopeScale = 6.f;
 
+// Models are small and seen up close in VR: their relief is stronger than the world's, so that it shows even at the
+// low normal map setting
+const float ModelReliefScale = 2.f;
+
 // Parallax depth at full strength, relative to the texture size
 const float ParallaxDepthScale = 0.05f;
 
@@ -4297,9 +4301,10 @@ void D3D11Renderer::flushState(VertexType type) {
 			}
 			constants.stages[0][3] = normalView ? 1 : 0;
 			if(normalView) {
-				constants.relief[0] = m_normalMapStrength * NormalMapSlopeScale * (model ? texture->specular().relief : 1.f);
+				float strength = model ? m_normalMapStrength * ModelReliefScale : m_normalMapStrength;
+				constants.relief[0] = strength * NormalMapSlopeScale * (model ? texture->specular().relief : 1.f);
 				constants.relief[1] = model ? 0.f : m_parallaxStrength * ParallaxDepthScale;
-				constants.relief[2] = model ? m_normalMapStrength : 0.f;
+				constants.relief[2] = model ? std::min(strength, 1.f) : 0.f;
 			}
 			
 			// Highlights from the material of the main texture

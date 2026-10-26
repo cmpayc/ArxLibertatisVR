@@ -164,6 +164,7 @@ ZeniMax Media Inc., Suite 120, Rockville, Maryland 20850 USA.
 #include "scene/Scene.h"
 #include "scene/Tiles.h"
 
+#include "script/Script.h"
 #include "script/ScriptEvent.h"
 
 #include "util/String.h"
@@ -342,9 +343,16 @@ static bool migrateFilenames(const fs::path & configFile) {
 	}
 	
 	if(!migrated) {
+		#if ARX_PLATFORM == ARX_PLATFORM_WIN32
+		// File names are not case-sensitive on Windows, the game finds the files anyway
+		ARX_UNUSED(configFile);
+		LogWarning << "Could not rename all files to lowercase";
+		return true;
+		#else
 		LogCritical << "Could not rename all files to lowercase, please do so manually and set migration=1 under [misc] in " << configFile;
+		#endif
 	}
-	
+
 	return migrated;
 }
 
