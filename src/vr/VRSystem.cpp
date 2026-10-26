@@ -1000,6 +1000,16 @@ void VRSystem::pollEvents() {
 				m_input.logInteractionProfiles();
 				break;
 			}
+
+			// The user recentered with the headset (holding the system button): recenter the game too
+			case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
+				const auto & spaceEvent = reinterpret_cast<const XrEventDataReferenceSpaceChangePending &>(event);
+				if(spaceEvent.session == m_session) {
+					LogInfo << "OpenXR: reference space changed, recentering";
+					requestVRRecenter();
+				}
+				break;
+			}
 			
 			case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING: {
 				LogWarning << "OpenXR: instance loss pending";

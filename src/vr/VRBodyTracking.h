@@ -178,6 +178,25 @@ public:
 	[[nodiscard]] glm::vec2 root() const { return m_root; }
 	[[nodiscard]] float yaw() const { return m_yaw; }
 
+	/*!
+	 * Where the user faces now (degrees, like yaw()): the left-to-right span of the hands when they are held in front
+	 * and agree with the head, else the head. For a rebase after the body was not followed (cutscenes, pauses).
+	 */
+	[[nodiscard]] static float heading(const BodyObservation & pose) {
+		glm::vec3 forward = pose.orientation * glm::vec3(0.f, 0.f, -1.f);
+		float headYaw = glm::degrees(std::atan2(-forward.x, -forward.z));
+		if(pose.tracked[0] && pose.tracked[1]) {
+			glm::vec3 span = pose.hands[1] - pose.hands[0];
+			float width = glm::length(horizontal(span));
+			float handYaw = glm::degrees(std::atan2(-span.z, span.x));
+			if(width > 0.2f && width < 0.9f && std::abs(span.y) < 0.3f
+			   && std::abs(std::remainder(headYaw - handYaw, 360.f)) < 25.f) {
+				return handYaw;
+			}
+		}
+		return headYaw;
+	}
+
 	// A rotating head moves the eyes around the neck even with planted feet.
 	[[nodiscard]] static glm::vec3 neck(const BodyObservation & pose) {
 		return pose.head + pose.orientation * glm::vec3(0.f, -0.10f, 0.08f);

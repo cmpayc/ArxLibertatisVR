@@ -60,6 +60,7 @@ bool g_standingHeightValid = false;
 float g_standingHeight = 0.f; // OpenXR stage space, meters
 vr::BodyTracking g_bodyTracking;
 bool g_bodyTrackingNeedsReset = true;
+bool g_bodyHeadingLost = true; // the body was not followed: it turns to where the user faces at the next reset
 XrTime g_lastBodyTrackingTime = 0;
 bool g_userEyeHeightValid = false;
 float g_userEyeHeight = 0.f; // highest the head has been: the user's standing eye height (stage space, meters)
@@ -276,6 +277,7 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	Vec3f consumed = isPlayer ? Vec3f(g_consumedOffset.x, 0.f, g_consumedOffset.y) : Vec3f(0.f);
 	if(!isPlayer) {
 		g_bodyTrackingNeedsReset = true;
+		g_bodyHeadingLost = true;
 	}
 	glm::mat3x3 eyeRotation[VRSystem::EyeCount];
 	Vec3f eyePosition[VRSystem::EyeCount];
@@ -385,6 +387,7 @@ Vec3f takeVRRoomScaleMovement() {
 	if(!g_vr || !g_vr->isRenderingFrame() || !g_vr->isFocused()
 	   || !g_trackingToWorld.valid || g_cameraEntity || player.lifePool.current <= 0.f || g_recenterRequested) {
 		g_bodyTrackingNeedsReset = true;
+		g_bodyHeadingLost = true;
 		return Vec3f(0.f);
 	}
 	const XrTime time = g_vr->getTrackingTime();
@@ -413,8 +416,21 @@ Vec3f takeVRRoomScaleMovement() {
 		if(dt > 0.25f) {
 			g_consumedOffset = Vec2f(pose.head.x, pose.head.z);
 		}
-		g_bodyTracking.reset(pose, g_consumedOffset,
-		                     vr::wrapDegrees(player.angle.getYaw() - g_playSpaceYaw));
+		float bodyYaw = vr::wrapDegrees(player.angle.getYaw() - g_playSpaceYaw);
+		/*
+		 * The body was not followed (cutscene, menu, pause, load) or for a while: the user may have turned meanwhile, and
+		 * the body kept facing the old way, 30° off, until the hands happened to be in the pose that corrects it (user).
+		 * Turn it to where the user faces now. Short hitches keep the heading.
+		 */
+		if(g_bodyHeadingLost || dt > 1.f) {
+			float userYaw = vr::BodyTracking::heading(pose);
+			player.angle.setYaw(MAKEANGLE(player.angle.getYaw() + vr::wrapDegrees(userYaw - bodyYaw)));
+			player.desiredangle.setYaw(player.angle.getYaw());
+			g_lastBodyYaw = player.angle.getYaw();
+			bodyYaw = userYaw;
+		}
+		g_bodyHeadingLost = false;
+		g_bodyTracking.reset(pose, g_consumedOffset, bodyYaw);
 		g_bodyTrackingNeedsReset = false;
 		return Vec3f(0.f);
 	}

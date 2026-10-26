@@ -95,6 +95,7 @@ bool isWeaponInHand() {
 	return false;
 }
 float g_bookHoldTime = -1.f; // s the B button is held, negative after a long press opened the spells
+float g_offStickHoldTime = 0.f; // s the off stick is clicked, negative after a long press recentered
 int g_bookTapFrames = 0; // Frames left of the book action from a short press of B
 float g_menuScroll = 0.f; // Mouse wheel steps of the thumbsticks in the menus not sent yet (see updateMenuScroll)
 bool g_sheatheArmed = false; // The drawn weapon left the sheath: bringing it back sheathes it
@@ -685,7 +686,7 @@ void updateVRControls() {
 	 * Buttons are mapped to the keys bound to the game actions, so they also work in places that read keys.
 	 * Main hand (right): A = jump, B = book, stick click = crouch toggle, trigger = magic mode,
 	 *                    grip = take, grab and attack (left click, see the laser pointer in VRSystem)
-	 * Off hand (left):   X = inventory, Y = game menu, stick click = sneak toggle,
+	 * Off hand (left):   X = inventory, Y = game menu, stick click = sneak toggle (held: recenter),
 	 *                    trigger = potion wheel (use on panels), grip = right click
 	 */
 	std::vector<InputKeyId> keys;
@@ -738,6 +739,18 @@ void updateVRControls() {
 			if(input.getHand(hand).wasPressed(VRButtonGrip) && getSheathDistance(hand) < SheathRadius) {
 				g_weaponHand = hand;
 				toggleWeapon = true;
+				/*
+				 * The game draws only with the arms layer free (see ARX_INTERFACE_setCombatMode): an animation left there
+				 * by a path that put the weapon away with the animation (the book, a cutscene, a script) made the draw
+				 * vibrate but leave the weapon on the back (user). The arms follow the controllers, drop it.
+				 */
+				Entity * io = entities.player();
+				if(io && io->animlayer[1].cur_anim && io->animlayer[1].cur_anim != io->anims[ANIM_WAIT]) {
+					LogDebug("VR: clearing the arms animation to draw the weapon");
+					ARX_EQUIPMENT_AttachPlayerWeaponToBack();
+					AcquireLastAnim(io);
+					io->animlayer[1].cur_anim = nullptr;
+				}
 				break;
 			}
 		}
@@ -775,10 +788,27 @@ void updateVRControls() {
 		g_vr->getInput().vibrate(g_weaponHand, 0.6f, 0.08f);
 	}
 	press(CONTROLS_CUST_WEAPON, g_weaponToggleFrames > 0);
-	// Off stick click: sneaking on or off (like holding the stealth key, see isVRSneaking)
-	if(off.wasPressed(VRButtonStick) && ARXmenu.mode() == Mode_InGame) {
-		g_sneaking = !g_sneaking;
-		g_vr->getInput().vibrate(offHand(), g_sneaking ? 0.5f : 0.25f, g_sneaking ? 0.1f : 0.05f);
+	/*
+	 * Off stick click: a short press toggles sneaking (like holding the stealth key, see isVRSneaking), held it
+	 * recenters the view and turns the body to where the user faces (user)
+	 */
+	const float RecenterHoldTime = 1.f; // s
+	if(off.isPressed(VRButtonStick)) {
+		if(g_offStickHoldTime >= 0.f) {
+			g_offStickHoldTime += g_vr->getFrameDuration();
+			if(g_offStickHoldTime >= RecenterHoldTime) {
+				g_offStickHoldTime = -1.f;
+				requestVRRecenter();
+				g_vr->getInput().vibrate(VRHandLeft, 0.5f, 0.1f);
+				g_vr->getInput().vibrate(VRHandRight, 0.5f, 0.1f);
+			}
+		}
+	} else {
+		if(g_offStickHoldTime >= 0.f && off.wasReleased(VRButtonStick) && ARXmenu.mode() == Mode_InGame) {
+			g_sneaking = !g_sneaking;
+			g_vr->getInput().vibrate(offHand(), g_sneaking ? 0.5f : 0.25f, g_sneaking ? 0.1f : 0.05f);
+		}
+		g_offStickHoldTime = 0.f;
 	}
 	if(g_weaponToggleFrames > 0) {
 		g_weaponToggleFrames--;
