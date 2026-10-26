@@ -100,7 +100,7 @@ constexpr const std::string_view
 
 constexpr const int
 	refreshRate = 0,
-	levelOfDetail = 2,
+	levelOfDetail = Standalone ? 0 : 2, // Low on standalone headsets: fewer lights per object, splats and decals
 	vsync = -1,
 	fpsLimit = -1,
 	maxAnisotropicFiltering = 9001,
