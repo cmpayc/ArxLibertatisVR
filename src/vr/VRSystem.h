@@ -337,7 +337,7 @@ private:
 	bool m_uiRendered; // The virtual screen was rendered this frame (even if not shown)
 	bool m_uiPlaced;
 	bool m_uiFollowHead;
-	bool m_uiTurning;
+	float m_uiAwayTime; // seconds the head has been turned or moved away from the screen following it
 	float m_uiYaw; // radians, OpenXR stage space
 	Vec3f m_uiAnchor; // head position the screen is placed relative to, OpenXR stage space
 	XrPosef m_uiPose;

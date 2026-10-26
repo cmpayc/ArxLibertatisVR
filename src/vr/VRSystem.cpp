@@ -544,7 +544,7 @@ VRSystem::VRSystem()
 	, m_uiRendered(false)
 	, m_uiPlaced(false)
 	, m_uiFollowHead(false)
-	, m_uiTurning(false)
+	, m_uiAwayTime(0.f)
 	, m_uiYaw(0.f)
 	, m_uiAnchor(0.f)
 	, m_uiPose{ { 0.f, 0.f, 0.f, 1.f }, { 0.f, 0.f, 0.f } }
@@ -2414,26 +2414,30 @@ void VRSystem::updateUIPlacement(bool followHead) {
 		m_uiAnchor = head;
 		m_uiPlaced = true;
 		m_uiFollowHead = followHead;
-		m_uiTurning = false;
+		m_uiAwayTime = 0.f;
 
 	} else if(followHead) {
 
-		// Lazily follow the head: start turning once it looks away, stop once it is centered again
+		/*
+		 * Follow the head in steps: the screen stays in place, and once the head has looked or moved away from it for a
+		 * moment, it jumps in front of the head at once. Gliding after the head made users dizzy.
+		 */
+		const float AwayAngle = glm::radians(30.f);
+		const float AwayDistance = 0.25f; // m
+		const float AwayDelay = 1.f; // s
 		float dt = glm::clamp(float(m_frameState.predictedDisplayPeriod) * 1e-9f, 0.f, 0.1f);
-		float smoothing = 1.f - glm::exp(-dt * 4.f);
 
 		float difference = std::remainder(headYaw - m_uiYaw, glm::two_pi<float>());
-		if(glm::abs(difference) > glm::radians(30.f)) {
-			m_uiTurning = true;
+		if(glm::abs(difference) > AwayAngle || glm::length(head - m_uiAnchor) > AwayDistance) {
+			m_uiAwayTime += dt;
+		} else {
+			m_uiAwayTime = 0.f;
 		}
-		if(m_uiTurning) {
-			m_uiYaw += difference * smoothing;
-			if(glm::abs(difference) < glm::radians(2.f)) {
-				m_uiTurning = false;
-			}
+		if(m_uiAwayTime >= AwayDelay) {
+			m_uiYaw = headYaw;
+			m_uiAnchor = head;
+			m_uiAwayTime = 0.f;
 		}
-
-		m_uiAnchor += (head - m_uiAnchor) * smoothing;
 
 	}
 
