@@ -2646,16 +2646,16 @@ void VRSystem::updatePointer() {
 			ARX_SPELLS_CancelSpellTarget();
 		}
 		// While an item is selected to combine, the trigger clicks everywhere: on the target, or elsewhere to cancel
-		m_clickByTrigger = onUI || ((COMBINE || spellTargetValid) && onWorld && !isVRGrabbing());
+		m_clickByTrigger = onUI || ((COMBINE || COMBINEGOLD || spellTargetValid) && onWorld && !isVRGrabbing());
 		// A tap uses the item under it, unless an item is on the cursor: then it is a click that drops it there
-		m_clickUseOnTap = onUI && useOnTap && !COMBINE && !g_draggedEntity;
+		m_clickUseOnTap = onUI && useOnTap && !COMBINE && !COMBINEGOLD && !g_draggedEntity;
 		if(m_clickUseOnTap && m_useTapDelay >= 0.f) {
 			m_secondTap = true; // A double tap: select instead of using
 			m_useTapDelay = -1.f;
 		}
 		// On an item in the world the trigger taps (a double tap selects it to combine) instead of starting magic
 		m_triggerOnItem = false;
-		if(!onUI && inGame && !COMBINE && !spellTarget && !isVRGrabbing() && !m_bookOpen) {
+		if(!onUI && inGame && !COMBINE && !COMBINEGOLD && !spellTarget && !isVRGrabbing() && !m_bookOpen) {
 			Entity * item = getVRPointedEntity(hand.aim, false);
 			if(item && (item->ioflags & IO_ITEM) && item->show == SHOW_FLAG_IN_SCENE) {
 				m_triggerOnItem = true;
@@ -2776,7 +2776,7 @@ void VRSystem::updatePointer() {
 	 * click into a drag. Freeze the cursor where the click started: releasing quickly is a click there,
 	 * holding longer lets the cursor follow the hand again to drag.
 	 */
-	const float ClickDuration = 0.35f;
+	const float ClickDuration = 0.15f; // Longer to drag felt slow (user request)
 	if(clickStarted) {
 		m_triggerHoldTime = 0.f;
 		m_clickPosition = mouse;
@@ -2808,7 +2808,15 @@ void VRSystem::updatePointer() {
 	 */
 	const float DoubleTapTime = 0.3f;
 	if(tapPending && clickEnded) {
-		if(m_secondTap) {
+		Rect purse = getVRPurseArea();
+		if(!purse.empty() && purse.contains(m_clickPosition.x, m_clickPosition.y)) {
+			// A tap on the purse selects gold to give, like the game's double click on it (user request)
+			if(!COMBINE && !COMBINEGOLD) {
+				COMBINEGOLD = true;
+				ARX_SOUND_PlayInterface(g_snd.GOLD);
+				m_input.vibrate(pointing, 0.5f, 0.08f);
+			}
+		} else if(m_secondTap) {
 			if(FlyingOverIO && (FlyingOverIO->ioflags & IO_ITEM) && ARX_INTERFACE_StartCombine(*FlyingOverIO)) {
 				m_input.vibrate(pointing, 0.5f, 0.08f);
 			}

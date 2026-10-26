@@ -132,6 +132,8 @@ public:
 	void updateInput();
 	void draw();
 	void requestHalo();
+
+	TextureContainer * texture() const { return m_tex; }
 };
 
 class CurrentTorchIconGui : public HudItem {
@@ -445,6 +447,9 @@ public:
 	Rectf stealthArea() { return stealthGauge.isVisible() ? stealthGauge.rect() : Rectf(); }
 	//! The level up icon while there are points to allocate (only drawn outside of combat), else empty
 	Rectf levelUpArea() { return levelUpIconGui.isVisible() ? levelUpIconGui.rect() : Rectf(); }
+	//! Screen area of the gold purse icon, as laid out in the last frame (only drawn while there is gold)
+	Rectf purseArea() { return purseIconGui.rect(); }
+	TextureContainer * purseTexture() { return purseIconGui.texture(); }
 	//! The stairs icon while the player can change level (by jumping or clicking it), else empty
 	Rectf changeLevelArea() { return changeLevelIconGui.isVisible() ? changeLevelIconGui.rect() : Rectf(); }
 	//! The runes of the spell being drawn while they are shown, else empty

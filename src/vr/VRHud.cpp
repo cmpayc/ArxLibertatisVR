@@ -72,6 +72,21 @@ Rect merge(const Rect & a, const Rect & b) {
 
 } // anonymous namespace
 
+Rect getVRPurseArea() {
+
+	bool inventoryOpen = (player.Interface & (INTER_INVENTORY | INTER_INVENTORYALL)) != 0;
+	bool drawn = !(player.Interface & INTER_COMBATMODE) && (player.Interface & INTER_MINIBACK);
+	if(ARXmenu.mode() != Mode_InGame || !inventoryOpen || !drawn || player.gold <= 0) {
+		return Rect();
+	}
+
+	return toPixels(g_hudRoot.purseArea());
+}
+
+TextureContainer * getVRGoldIcon() {
+	return g_hudRoot.purseTexture();
+}
+
 VRHudAreas getVRHudAreas() {
 	
 	VRHudAreas areas;
@@ -146,6 +161,8 @@ VRHudAreas getVRHudAreas() {
 	}
 	if(player.Interface & (INTER_INVENTORY | INTER_INVENTORYALL)) {
 		areas.inventory = toPixels(g_playerInventoryHud.openArea());
+		// With the purse above it (see HudRoot::draw), to select gold to give (user request)
+		areas.inventory = merge(areas.inventory, getVRPurseArea());
 	}
 	
 	if(SHOW_INGAME_MINIMAP && !BLOCK_PLAYER_CONTROLS && !(player.Interface & INTER_PLAYERBOOK)) {

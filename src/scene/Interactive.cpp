@@ -2115,6 +2115,10 @@ bool ARX_INTERACTIVE_DestroyIOdelayed(Entity * entity) {
 	return true;
 }
 
+bool ARX_INTERACTIVE_IsDestroyIOdelayed(const Entity * entity) {
+	return std::find(toDestroy.begin(), toDestroy.end(), entity) != toDestroy.end();
+}
+
 void ARX_INTERACTIVE_DestroyIOdelayedRemove(Entity * entity) {
 	Entity * null = nullptr;
 	// Remove the entity from the list but don't invalidate iterators

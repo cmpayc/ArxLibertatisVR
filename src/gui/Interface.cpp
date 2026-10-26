@@ -1806,8 +1806,13 @@ void ArxGame::manageEditorControls() {
 			DRAGGING = false;
 			s_dragDistance = 0.f;
 			s_pressStart = g_platformTime.frameStart();
-		} else if(!DRAGGING && isVRModeActive() && g_platformTime.frameStart() - s_pressStart > 300ms) {
-			// VR: holding the trigger on an object grabs it, a quick click takes it
+		} else if(!DRAGGING && isVRModeActive()
+		          && (g_playerInventoryHud.containsPos(g_dragStartPos)
+		              || g_platformTime.frameStart() - s_pressStart > 300ms)) {
+			/*
+			 * VR: holding the trigger on an object grabs it, a quick click takes it. In the player inventory the button
+			 * is only pressed once the trigger was held (a tap uses the item, see VRSystem): it drags at once.
+			 */
 			DRAGGING = true;
 		} else if(!DRAGGING) {
 			s_dragDistance += 5.f * glm::length(GInput->getRelativeMouseMovement());

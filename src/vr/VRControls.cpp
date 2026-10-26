@@ -62,6 +62,7 @@
 #include "vr/VRCamera.h"
 #include "vr/VRCombat.h"
 #include "vr/VRGrab.h"
+#include "vr/VRHud.h"
 #include "vr/VRMath.h"
 #include "vr/VRSystem.h"
 
@@ -927,13 +928,13 @@ bool getVRWorldPointer(const VRPose & aim, Vec2s & mouse) {
 	
 	// The world ray is invisible, except for debugging and while an item is selected to combine (with its icon)
 	const Vec3f start = origin;
-	bool showRay = config.vr.debugRay || COMBINE || LOOKING_FOR_SPELL_TARGET;
+	bool showRay = config.vr.debugRay || COMBINE || COMBINEGOLD || LOOKING_FOR_SPELL_TARGET;
 	if(showRay) {
 		g_beam.visible = true;
 		g_beam.hit = false;
 		g_beam.start = start;
 		g_beam.end = origin + direction * 200.f;
-		g_beam.icon = COMBINE ? COMBINE->m_icon : nullptr;
+		g_beam.icon = COMBINE ? COMBINE->m_icon : COMBINEGOLD ? getVRGoldIcon() : nullptr;
 		g_beam.spellTarget = LOOKING_FOR_SPELL_TARGET != 0;
 	}
 	

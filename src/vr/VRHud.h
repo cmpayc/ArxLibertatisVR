@@ -23,6 +23,7 @@
 #include "math/Rectangle.h"
 
 class Entity;
+class TextureContainer;
 
 /*!
  * Areas of the virtual screen (window pixels, top-left origin) that are shown separately in VR while in-game:
@@ -59,5 +60,11 @@ struct VRHudAreas {
 
 //! \return the areas laid out by the interface drawn in this frame
 [[nodiscard]] VRHudAreas getVRHudAreas();
+
+//! \return the gold purse above the open inventory while there is gold (tapped to select gold to give), else empty
+[[nodiscard]] Rect getVRPurseArea();
+
+//! \return the icon of the purse, shown at the end of the pointer while gold is selected to give
+[[nodiscard]] TextureContainer * getVRGoldIcon();
 
 #endif // ARX_VR_VRHUD_H

@@ -41,12 +41,14 @@
 #include "physics/Physics.h"
 #include "scene/GameSound.h"
 #include "scene/Interactive.h"
+#include "script/Script.h"
 #include "vr/VRCamera.h"
 #include "vr/VRControls.h"
 #include "vr/VRSystem.h"
 
 
 extern long LOOKING_FOR_SPELL_TARGET; // see Spells.cpp
+extern Entity * LASTSPAWNED; // see ScriptedIOControl.cpp
 
 namespace {
 
@@ -83,6 +85,10 @@ struct GrabHand {
 	float pressTime = 0.f;
 	float gripTime = 0.f; //!< Since the grip was pressed (to catch objects)
 
+	// Eating a held item at the mouth
+	float mouthTime = 0.f; //!< Since the held item reached the mouth
+	bool mouthUsed = false; //!< One was used there: the item must leave the mouth before the next of a stack
+
 	void resetGrab() {
 		state = GrabNone;
 		direct = false;
@@ -90,6 +96,8 @@ struct GrabHand {
 		rotationOffset = glm::quat(1.f, 0.f, 0.f, 0.f);
 		positionOffset = Vec3f(0.f);
 		flightTime = 0.f;
+		mouthTime = 0.f;
+		mouthUsed = false;
 	}
 
 };
@@ -101,6 +109,9 @@ const float ReachDistance = 60.f;   // cm: objects closer than this to the hand 
 const float FlickSpeed = 100.f;     // cm/s towards the player or upwards to pull a selected object
 const float FlightDuration = 0.6f;  // s
 const float HoldDuration = 0.3f;    // s: holding the grip longer grabs, shorter takes into the inventory
+const float MouthDistance = 12.f;   // cm: food or a drink held this close to the mouth is eaten
+const float MouthLeave = 20.f;      // cm: and must be taken this far away before the next one of a stack
+const float MouthDuration = 0.2f;   // s: held at the mouth this long (not only passing by the face)
 
 VRHand grabMainHand() {
 	return config.vr.leftHanded ? VRHandLeft : VRHandRight;
@@ -236,6 +247,69 @@ bool storeEntity(VRHand handId, Entity & entity, bool dragged) {
 	return true;
 }
 
+//! \return true if an item is eaten or drunk when used: food, drinks and potions (see their scripts)
+bool isConsumable(const Entity & entity) {
+	if(!(entity.ioflags & IO_ITEM) || !(entity.gameFlags & GFLAG_INTERACTIVITY)) {
+		return false;
+	}
+	if(entity.groups.find("food") != entity.groups.end()) {
+		return true;
+	}
+	const std::string & name = entity.className();
+	// Beer: mug_full, and mug_full2 sold in the tavern
+	return name.rfind("mug_full", 0) == 0 || name == "bottle_wine" || name == "bottle_water"
+	       || name.rfind("potion_", 0) == 0;
+}
+
+//! \return the distance from the center of a held entity to the player's mouth, or a large value if unknown
+float getMouthDistance(const Entity & entity) {
+	Vec3f eyes;
+	glm::mat3x3 head;
+	if(!getVRHeadPose(eyes, head)) {
+		return std::numeric_limits<float>::max();
+	}
+	// Below and in front of the eyes (Arx basis: y down, z forward)
+	Vec3f mouth = eyes + head * Vec3f(0.f, 9.f, 6.f);
+	return glm::distance(entity.pos + getEntityCenterOffset(entity), mouth);
+}
+
+/*!
+ * Eat or drink a held item, like using it in the inventory: one of a stack. What replaces it (an empty bottle)
+ * stays in the hand.
+ */
+void consumeEntity(VRHand handId, Entity & entity, bool dragged) {
+
+	Entity * lastSpawned = LASTSPAWNED;
+	SendIOScriptEvent(entities.player(), &entity, SM_INVENTORYUSE);
+	Entity * replacement = (LASTSPAWNED != lastSpawned) ? LASTSPAWNED : nullptr;
+	if(replacement && (!(replacement->ioflags & IO_ITEM) || replacement->show != SHOW_FLAG_IN_SCENE)) {
+		replacement = nullptr;
+	}
+	g_vr->getInput().vibrate(handId, 0.4f, 0.05f);
+
+	GrabHand & hand = g_hands[handId];
+	hand.mouthUsed = true;
+	hand.mouthTime = 0.f;
+	bool gone = entity.show != SHOW_FLAG_IN_SCENE || ARX_INTERACTIVE_IsDestroyIOdelayed(&entity);
+	if(!gone) {
+		// One of a stack: the rest stays in the hand, what replaces the one used goes into the inventory
+		if(replacement && canStore(*replacement) && entities.player()->inventory->insert(replacement)) {
+			ARX_SOUND_PlayInterface(g_snd.INVSTD);
+		}
+	} else if(replacement) {
+		hand.entity = replacement->index();
+		if(dragged) {
+			setDraggedEntity(replacement);
+		}
+	} else {
+		if(dragged) {
+			setDraggedEntity(nullptr);
+		}
+		hand.resetGrab();
+	}
+
+}
+
 /*!
  * Move a grabbed entity: wait for the pull gesture, fly to the hand, or follow the hand
  *
@@ -298,6 +372,21 @@ void updateGrab(VRHand handId, Entity & entity, bool release, bool store, bool d
 			ARX_INTERACTIVE_Teleport(&entity, hand.position + hand.orientation * hand.positionOffset, true);
 			if(release) {
 				releaseEntity(hand, entity, hand.velocity, dragged);
+				return;
+			}
+			// Food or a drink brought to the mouth is eaten or drunk (user request)
+			if(isConsumable(entity)) {
+				float distance = getMouthDistance(entity);
+				if(hand.mouthUsed) {
+					hand.mouthUsed = (distance < MouthLeave);
+				} else if(distance < MouthDistance) {
+					hand.mouthTime += g_vr->getFrameDuration();
+					if(hand.mouthTime >= MouthDuration) {
+						consumeEntity(handId, entity, dragged);
+					}
+				} else {
+					hand.mouthTime = 0.f;
+				}
 			}
 			return;
 		}
@@ -446,7 +535,8 @@ bool canGrabDirectly(VRHand handId) {
 
 	// The main hand cursor is needed to drop dragged items, combine items and select spell targets. In the magic mode
 	// its grip stores the spell drawn instead (see VRSystem::updatePointer).
-	return !holdsWeapon && !g_draggedEntity && !COMBINE && !LOOKING_FOR_SPELL_TARGET && !g_vr->isMagicMode();
+	return !holdsWeapon && !g_draggedEntity && !COMBINE && !COMBINEGOLD && !LOOKING_FOR_SPELL_TARGET
+	       && !g_vr->isMagicMode();
 }
 
 //! \return true if a hand may also point at objects to grab them: the main hand points at panels instead

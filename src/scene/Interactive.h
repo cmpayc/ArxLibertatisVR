@@ -108,6 +108,8 @@ void PrepareIOTreatZone(long flag = 0);
  * \return true if the entity will be destroyed.
  */
 bool ARX_INTERACTIVE_DestroyIOdelayed(Entity * entity);
+//! \return true if the entity will be destroyed at the end of the frame
+bool ARX_INTERACTIVE_IsDestroyIOdelayed(const Entity * entity);
 void ARX_INTERACTIVE_DestroyIOdelayedRemove(Entity * entity);
 void ARX_INTERACTIVE_DestroyIOdelayedExecute();
 

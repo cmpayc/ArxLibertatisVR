@@ -456,7 +456,16 @@ void PurseIconGui::updateInput() {
 void PurseIconGui::draw() {
 	
 	HudIconBase::draw();
-	
+
+	#if ARX_HAVE_OPENXR
+	if(isVRActive()) {
+		// VR: the amount is always shown, left of the purse (the cursor is not seen on it)
+		Vec2f numberPos(m_rect.left - 4.f * m_scale, m_rect.center().y - 5.f * m_scale);
+		ARX_INTERFACE_DrawNumber(numberPos, player.gold, Color::white, m_scale);
+		return;
+	}
+	#endif
+
 	if(m_isSelected) {
 		Vec2f numberPos = m_rect.topRight() + Vec2f(0.f, -15 * m_scale);
 		ARX_INTERFACE_DrawNumber(numberPos, player.gold, Color::white, m_scale);
@@ -1544,7 +1553,14 @@ void HudRoot::draw() {
 			Rectf spacer = createChild(purseIconGui.rect(), Anchor_TopRight, Vec2f(0, 3), Anchor_BottomRight);
 			levelUpIconGui.update(spacer);
 		}
-		
+
+		#if ARX_HAVE_OPENXR
+		if(isVRActive()) {
+			// VR: above the top right corner of the open inventory, shown with it (see getVRHudAreas)
+			purseIconGui.update(g_playerInventoryHud.openArea());
+		}
+		#endif
+
 		backpackIconGui.draw();
 		bookIconGui.draw();
 		
