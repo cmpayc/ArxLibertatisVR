@@ -743,6 +743,14 @@ glm::mat3x3 makeBodyFrame(const Vec3f & primary, const Vec3f & secondary) {
  */
 bool g_handInWall[VRHandCount] = { false, false };
 bool g_weaponInWall[VRHandCount] = { false, false };
+//! The hand touches the weapon held in the other hand
+bool g_handOnWeapon[VRHandCount] = { false, false };
+//! The blade of the weapon held in each hand as drawn in the last frame, from the attach point to the tip (world)
+Vec3f g_weaponBase[VRHandCount];
+Vec3f g_weaponTip[VRHandCount];
+bool g_weaponDrawn[VRHandCount] = { false, false };
+//! The finger tips relative to the wrist in the last frame, in the controller frame (Arx basis), for the hand's shape
+Vec3f g_fingersFromWrist[VRHandCount] = { Vec3f(0.f, 0.f, 15.f), Vec3f(0.f, 0.f, 15.f) };
 
 //! Twist of the hand around the forearm in the last frame (degrees), to follow it past half a turn
 float g_handTwist[VRHandCount] = { 0.f, 0.f };
@@ -944,20 +952,118 @@ void curlFingers(Skeleton & skeleton, const ArmBones & arm, const VRHandState & 
 	updateBoneDescendants(skeleton, arm.hand);
 }
 
-/*!
- * \param reach Length of the held item (weapon) from the fist, 0 if the hand is empty: it is stopped by walls too
- */
-void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPose & grip, float reach) {
+// The item is held this far in front of the wrist (cm)
+const float WristToFist = 8.f;
+
+//! The wrist joint of the model wanted for a controller grip pose, in the world
+bool getWristTarget(const VRPose & grip, Vec3f & wrist, glm::quat & orientation) {
 
 	Vec3f gripPosition;
-	glm::quat gripOrientation;
-	if(!grip.valid || !trackingPoseToWorld(grip.position, grip.orientation, gripPosition, gripOrientation)) {
-		g_handTwistValid[hand] = false;
-		return;
+	if(!grip.valid || !trackingPoseToWorld(grip.position, grip.orientation, gripPosition, orientation)) {
+		return false;
 	}
 
 	const float scale = 100.f * config.vr.worldScale;
-	Vec3f target = gripPosition + gripOrientation * (vr::toArxBasis(config.vr.handOffset) * scale);
+	wrist = gripPosition + orientation * (vr::toArxBasis(config.vr.handOffset) * scale);
+	return true;
+}
+
+//! The closest points of the segments [p0, p1] and [q0, q1]
+void closestPointsOfSegments(const Vec3f & p0, const Vec3f & p1, const Vec3f & q0, const Vec3f & q1,
+                             Vec3f & onP, Vec3f & onQ) {
+
+	Vec3f d1 = p1 - p0;
+	Vec3f d2 = q1 - q0;
+	Vec3f r = p0 - q0;
+	float a = glm::dot(d1, d1);
+	float e = glm::dot(d2, d2);
+	float f = glm::dot(d2, r);
+	float s = 0.f;
+	float t = 0.f;
+	if(a < 1e-6f && e < 1e-6f) {
+		// Both are points
+	} else if(a < 1e-6f) {
+		t = glm::clamp(f / e, 0.f, 1.f);
+	} else {
+		float c = glm::dot(d1, r);
+		if(e < 1e-6f) {
+			s = glm::clamp(-c / a, 0.f, 1.f);
+		} else {
+			float b = glm::dot(d1, d2);
+			float denominator = a * e - b * b;
+			s = (denominator > 1e-6f) ? glm::clamp((b * f - c * e) / denominator, 0.f, 1.f) : 0.f;
+			t = (b * s + f) / e;
+			if(t < 0.f) {
+				t = 0.f;
+				s = glm::clamp(-c / a, 0.f, 1.f);
+			} else if(t > 1.f) {
+				t = 1.f;
+				s = glm::clamp((b - c) / a, 0.f, 1.f);
+			}
+		}
+	}
+	onP = p0 + d1 * s;
+	onQ = q0 + d2 * t;
+}
+
+/*!
+ * The hands touch the weapon held in the other hand: the touching hand is pushed out of the blade (user), with a
+ * short vibration of both hands on contact
+ *
+ * The blade is the one drawn in the last frame (see adjustVRLinkedTransform), the hand reaches from the wrist wanted
+ * for the controller to the finger tips, with the shape it had in the last frame.
+ *
+ * \param weapons true for the hands holding a melee weapon
+ * \param push    Set to how far each wrist is moved out of the weapon in the other hand
+ */
+void collideHandsWithWeapons(const VRPose (& grips)[VRHandCount], const bool (& weapons)[VRHandCount],
+                             Vec3f (& push)[VRHandCount]) {
+
+	// Half the thickness of the hand and of the blade
+	const float ContactDistance = 4.f; // cm
+
+	for(size_t hand = 0; hand < VRHandCount; hand++) {
+		push[hand] = Vec3f(0.f);
+		size_t other = 1 - hand;
+		bool touching = false;
+		Vec3f wrist;
+		glm::quat orientation;
+		if(weapons[other] && g_weaponDrawn[other] && !weapons[hand] && getWristTarget(grips[hand], wrist, orientation)) {
+			Vec3f fingers = wrist + orientation * g_fingersFromWrist[hand];
+			Vec3f onHand;
+			Vec3f onBlade;
+			closestPointsOfSegments(wrist, fingers, g_weaponBase[other], g_weaponTip[other], onHand, onBlade);
+			Vec3f away = onHand - onBlade;
+			float distance = glm::length(away);
+			if(distance < ContactDistance) {
+				// Straight out of the blade, or to the back of the hand when it is right on the blade
+				Vec3f out = (distance > 0.001f) ? away / distance : orientation * Vec3f(0.f, 1.f, 0.f);
+				push[hand] = out * (ContactDistance - distance);
+				touching = true;
+			}
+		}
+		if(touching && !g_handOnWeapon[hand]) {
+			g_vr->getInput().vibrate(VRHand(hand), 0.3f, 0.04f);
+			g_vr->getInput().vibrate(VRHand(other), 0.3f, 0.04f);
+		}
+		g_handOnWeapon[hand] = touching;
+	}
+}
+
+/*!
+ * \param reach Length of the held item (weapon) from the fist, 0 if the hand is empty: it is stopped by walls too
+ * \param push  Moves the wrist out of the weapon held in the other hand, see collideHandsWithWeapons
+ */
+void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPose & grip, float reach,
+              const Vec3f & push) {
+
+	Vec3f target;
+	glm::quat gripOrientation;
+	if(!getWristTarget(grip, target, gripOrientation)) {
+		g_handTwistValid[hand] = false;
+		return;
+	}
+	target += push;
 
 	/*
 	 * A held weapon stops at walls: the hand is pulled back along the blade (which points through the fist, see
@@ -965,7 +1071,6 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	 */
 	bool weaponInWall = false;
 	if(reach > 0.f) {
-		const float WristToFist = 8.f; // cm, the item is held in front of the wrist
 		Vec3f blade = glm::normalize(gripOrientation * Vec3f(0.f, 0.f, 1.f));
 		Vec3f tip = target + blade * (WristToFist + reach);
 		if(RaycastResult hit = raycastScene(target, tip, POLY_TRANS, RaycastIgnorePlayer)) {
@@ -1205,6 +1310,18 @@ bool isHoldingTorch(const EERIE_3DOBJ & object, VRHand hand) {
 	return false;
 }
 
+//! \return true if the player model holds a melee weapon (dagger, one- or two-handed) in a hand
+bool isHoldingWeapon(const EERIE_3DOBJ & object, VRHand hand) {
+	VertexId vertex = getHoldVertex(object, hand);
+	for(const EERIE_LINKED & link : object.linked) {
+		if(vertex && link.lidx == vertex && link.obj && link.io
+		   && (link.io->type_flags & (OBJECT_TYPE_DAGGER | OBJECT_TYPE_1H | OBJECT_TYPE_2H))) {
+			return true;
+		}
+	}
+	return false;
+}
+
 //! The longest extent of an object from its attach point (the blade of a weapon), in object space
 Vec3f getHeldItemExtent(const EERIE_3DOBJ & object, VertexId attach) {
 
@@ -1342,11 +1459,24 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 		solveSpine(skeleton, bones.spine, bones.legs);
 	}
 
+	// Not the bow (the drawing hand is at its string) or the torch
+	VRPose grips[VRHandCount];
+	bool weapons[VRHandCount];
+	for(size_t hand = 0; hand < VRHandCount; hand++) {
+		grips[hand] = input.getHand(VRHand(hand)).grip;
+		weapons[hand] = isHoldingWeapon(*entity.obj, VRHand(hand));
+		if(!weapons[hand]) {
+			g_weaponDrawn[hand] = false;
+		}
+	}
+	Vec3f pushes[VRHandCount];
+	collideHandsWithWeapons(grips, weapons, pushes);
+
 	for(size_t hand = 0; hand < VRHandCount; hand++) {
 		const ArmBones & arm = bones.arms[hand];
 		if(arm.valid()) {
 			const VRHandState & state = input.getHand(VRHand(hand));
-			solveArm(skeleton, arm, VRHand(hand), state.grip, getHeldItemReach(*entity.obj, VRHand(hand)));
+			solveArm(skeleton, arm, VRHand(hand), state.grip, getHeldItemReach(*entity.obj, VRHand(hand)), pushes[hand]);
 			if(state.grip.valid) {
 				if(isHoldingItem(*entity.obj, VRHand(hand))) {
 					// The animation of the game wraps the fingers around the handle: keep it, only aim the item
@@ -1378,10 +1508,18 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 				if(g_vr && g_vr->isMagicMode() && g_vr->getPointerHand() == VRHand(hand)) {
 					curlFingers(skeleton, arm, state, nullptr, nullptr, false, true);
 				}
+				// The shape of the hand for the contacts with the weapon in the other hand
+				VertexGroupId tip = arm.fingersTip ? arm.fingersTip : arm.indexRoot;
+				Vec3f wrist;
+				glm::quat orientation;
+				if(getWristTarget(state.grip, wrist, orientation)) {
+					g_fingersFromWrist[hand] = glm::inverse(orientation)
+					                           * (skeleton.bones[tip].anim.trans - skeleton.bones[arm.wrist].anim.trans);
+				}
 			}
 		}
 	}
-	
+
 	if(bones.legs[0].valid() && bones.legs[1].valid()) {
 		for(size_t leg = 0; leg < VRHandCount; leg++) {
 			g_hipPositions[leg] = skeleton.bones[bones.legs[leg].hip].anim.trans;
@@ -1570,6 +1708,12 @@ void adjustVRLinkedTransform(const Entity & entity, const EERIE_LINKED & link, T
 			// OpenXR grip space: +x to the right, -z forwards through the fist
 			Vec3f offset((hand == VRHandRight) ? -Inwards : Inwards, 0.f, -Forwards);
 			transform.pos += gripOrientation * (vr::toArxBasis(offset) * (100.f * config.vr.worldScale));
+		}
+		// The blade as drawn, for the contacts with the other hand (see collideHandsWithWeapons)
+		if(hand != VRHandCount) {
+			g_weaponBase[hand] = transform.pos;
+			g_weaponTip[hand] = transform.pos + transform.rotation * (getHeldItemExtent(*link.obj, link.lidx2) * transform.scale);
+			g_weaponDrawn[hand] = true;
 		}
 		return;
 	}
