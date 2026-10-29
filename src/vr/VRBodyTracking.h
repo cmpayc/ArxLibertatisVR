@@ -177,6 +177,11 @@ public:
 
 	[[nodiscard]] glm::vec2 root() const { return m_root; }
 	[[nodiscard]] float yaw() const { return m_yaw; }
+	/*!
+	 * Shortest horizontal distance between the hands for their left-to-right span to give the heading (meters): the
+	 * hands are often held close to the body and to each other, 18 to 20 cm apart did not turn a body 65° off (log)
+	 */
+	static constexpr float MinHandSpan = 0.08f;
 
 	/*!
 	 * Where the user faces now (degrees, like yaw()): the left-to-right span of the hands when they are held in front
@@ -189,7 +194,7 @@ public:
 			glm::vec3 span = pose.hands[1] - pose.hands[0];
 			float width = glm::length(horizontal(span));
 			float handYaw = glm::degrees(std::atan2(-span.z, span.x));
-			if(width > 0.2f && width < 0.9f && std::abs(span.y) < 0.3f
+			if(width > MinHandSpan && width < 0.9f && std::abs(span.y) < 0.3f
 			   && std::abs(std::remainder(headYaw - handYaw, 360.f)) < 25.f) {
 				return handYaw;
 			}
@@ -215,7 +220,7 @@ private:
 		float handError = std::remainder(handYaw - m_yaw, 360.f);
 		// Resolve both errors along the same arc at the +/-180 degree boundary.
 		float headError = handError + std::remainder(headYaw - handYaw, 360.f);
-		bool credible = both && width > 0.2f && width < 0.9f
+		bool credible = both && width > MinHandSpan && width < 0.9f
 		                && std::abs(span.y) < 0.3f
 		                && glm::length(horizontal(forward)) > 0.5f
 		                && std::abs(std::remainder(headYaw - handYaw, 360.f)) < 25.f;

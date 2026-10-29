@@ -67,6 +67,9 @@ bool getVRHeadPose(Vec3f & position, glm::mat3x3 & rotation);
 //! \return the scale of the player model, so that its eyes are at the user's real eye height
 float getVRBodyScale();
 
+//! Rotation of the play space to the world (yaw only): it turns with the game's turns, not with physical turns
+glm::mat3x3 getVRPlaySpaceRotation();
+
 /*!
  * Convert a ray in the tracking space (OpenXR stage space, e.g. a controller aim pose) to the game world,
  * using the mapping of the last frame prepared by \ref prepareVRCamera.

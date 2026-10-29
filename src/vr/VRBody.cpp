@@ -660,12 +660,12 @@ void lowerHips(Skeleton & skeleton, const LegBones (&legs)[VRHandCount], float d
  * Bend the spine so that the neck of the model is below and behind the eyes of the user:
  * leaning and peeking tilt the torso instead of moving the feet. The lower spine and the chest share the bend.
  */
-void solveSpine(Skeleton & skeleton, const SpineBones & spine, const LegBones (&legs)[VRHandCount]) {
-	
+bool solveSpine(Skeleton & skeleton, const SpineBones & spine, const LegBones (&legs)[VRHandCount], Vec3f & pivot) {
+
 	Vec3f eyes;
 	glm::mat3x3 head;
 	if(!getVRHeadPose(eyes, head)) {
-		return;
+		return false;
 	}
 
 	/*
@@ -675,7 +675,7 @@ void solveSpine(Skeleton & skeleton, const SpineBones & spine, const LegBones (&
 	 */
 	const float trackingScale = 100.f * config.vr.worldScale;
 	const Vec3f PivotFromEyes = Vec3f(0.f, 10.f, -8.f) * trackingScale / 100.f; // head space, cm
-	Vec3f pivot = eyes + head * PivotFromEyes;
+	pivot = eyes + head * PivotFromEyes;
 
 	/*
 	 * The neck joint is 17 cm below the eyes of the (scaled) model, plus the height_offset the view is raised by.
@@ -726,6 +726,99 @@ void solveSpine(Skeleton & skeleton, const SpineBones & spine, const LegBones (&
 		updateBoneDescendants(skeleton, spine.belt);
 	}
 
+	return true;
+}
+
+//! Easing of sudden jumps of the body pose, see easeBodyPose
+struct BodyEasing {
+	bool valid = false;
+	//! Each bone relative to the head pivot, in the play space: the raw pose of the last frame
+	std::vector<Vec3f> positions;
+	std::vector<glm::quat> orientations;
+	//! The pose shown in the last frame
+	std::vector<Vec3f> shownPositions;
+	std::vector<glm::quat> shownOrientations;
+	//! The pose shown when the last jump happened, and how much of it is still shown
+	std::vector<Vec3f> fromPositions;
+	std::vector<glm::quat> fromOrientations;
+	float weight = 0.f;
+};
+BodyEasing g_bodyEasing;
+
+/*!
+ * Sudden jumps of the body (user: instantaneous tilts and movements are annoying, like the elbows, see solveArm): the
+ * animation changing, the hips dropping, the feet catching up with a step, the heading being corrected. When the spine
+ * moves faster than a body does relative to the head, the pose shown before is blended out over about 0.2 s; normal
+ * movement follows at once. Relative to the head and in the play space, so that the game's turns and movement, which
+ * move the view with the body, are not eased. Before the arms: they are solved from the eased shoulders.
+ */
+void easeBodyPose(Skeleton & skeleton, const SpineBones & spine, const Vec3f & pivot) {
+
+	const float MinJump = 2.f;         // cm in one frame
+	const float MaxSpeed = 150.f;      // cm per second, followed at once
+	const float MinTilt = 4.f;         // degrees in one frame
+	const float MaxTurnSpeed = 240.f;  // degrees per second, followed at once
+	const float EaseTime = 0.07f;      // seconds: 95% of the jump is gone after 0.2 s
+
+	BodyEasing & easing = g_bodyEasing;
+	const size_t count = skeleton.bones.size();
+	const glm::mat3x3 toWorld = getVRPlaySpaceRotation();
+	const glm::quat toWorldQuat = glm::normalize(glm::quat_cast(toWorld));
+	const glm::mat3x3 toLocal = glm::transpose(toWorld);
+	const glm::quat toLocalQuat = glm::inverse(toWorldQuat);
+	std::vector<Vec3f> positions(count);
+	std::vector<glm::quat> orientations(count);
+	for(VertexGroupId bone : skeleton.bones.handles()) {
+		positions[size_t(bone)] = toLocal * (skeleton.bones[bone].anim.trans - pivot);
+		orientations[size_t(bone)] = glm::normalize(toLocalQuat * skeleton.bones[bone].anim.quat);
+	}
+
+	if(!easing.valid || easing.positions.size() != count) {
+		easing = BodyEasing();
+		easing.valid = true;
+		easing.positions = easing.shownPositions = positions;
+		easing.orientations = easing.shownOrientations = orientations;
+		return;
+	}
+
+	float dt = glm::clamp(g_vr->getFrameDuration(), 0.f, 0.1f);
+	bool jump = false;
+	for(VertexGroupId bone : { spine.belt, spine.chest, spine.neck }) {
+		size_t i = size_t(bone);
+		float moved = glm::distance(positions[i], easing.positions[i]);
+		glm::quat change = orientations[i] * glm::inverse(easing.orientations[i]);
+		float turned = glm::degrees(2.f * std::acos(glm::clamp(std::abs(change.w), 0.f, 1.f)));
+		if(moved > std::max(MinJump, MaxSpeed * dt) || turned > std::max(MinTilt, MaxTurnSpeed * dt)) {
+			jump = true;
+		}
+	}
+	easing.positions = positions;
+	easing.orientations = orientations;
+
+	if(jump) {
+		easing.fromPositions = easing.shownPositions;
+		easing.fromOrientations = easing.shownOrientations;
+		easing.weight = 1.f;
+	} else {
+		easing.weight *= std::exp(-dt / EaseTime);
+	}
+	if(easing.weight < 0.01f) {
+		easing.weight = 0.f;
+		easing.shownPositions = positions;
+		easing.shownOrientations = orientations;
+		return;
+	}
+
+	for(VertexGroupId bone : skeleton.bones.handles()) {
+		size_t i = size_t(bone);
+		Vec3f position = glm::mix(positions[i], easing.fromPositions[i], easing.weight);
+		glm::quat orientation = glm::normalize(glm::slerp(orientations[i], easing.fromOrientations[i], easing.weight));
+		easing.shownPositions[i] = position;
+		easing.shownOrientations[i] = orientation;
+		skeleton.bones[bone].anim.trans = pivot + toWorld * position;
+		skeleton.bones[bone].anim.quat = glm::normalize(toWorldQuat * orientation);
+	}
+
 }
 
 //! Orthonormal frame from a primary direction and a secondary direction
@@ -755,6 +848,17 @@ Vec3f g_fingersFromWrist[VRHandCount] = { Vec3f(0.f, 0.f, 15.f), Vec3f(0.f, 0.f,
 //! Twist of the hand around the forearm in the last frame (degrees), to follow it past half a turn
 float g_handTwist[VRHandCount] = { 0.f, 0.f };
 bool g_handTwistValid[VRHandCount] = { false, false };
+
+//! Easing of sudden elbow jumps around the shoulder to wrist line (see solveArm)
+struct ElbowEasing {
+	bool valid = false;
+	Vec3f swing = Vec3f(0.f); //!< Direction of the elbow from that line in the last frame, in the body frame (right, y, forward)
+	float offset = 0.f; //!< Degrees the elbow is still turned back towards where it was before a jump
+};
+ElbowEasing g_elbowEasing[VRHandCount];
+
+//! The furthest the user has reached to each side, relative to the arm of the model at its normal size (see solveArm)
+float g_sideReach[VRHandCount] = { 0.f, 0.f };
 
 //! Signed angle (degrees) of the part of a rotation around an axis (swing-twist decomposition)
 float twistAngle(const glm::quat & rotation, const Vec3f & axis) {
@@ -1051,6 +1155,29 @@ void collideHandsWithWeapons(const VRPose (& grips)[VRHandCount], const bool (& 
 }
 
 /*!
+ * Whether an elbow is in the torso of the player model: an elliptic cylinder around the spine from the lower spine to
+ * the neck, wider than deep, made larger by the thickness of the elbow
+ */
+bool isInsideTorso(const Skeleton & skeleton, const Vec3f & elbow, const Vec3f & forward, const Vec3f & right) {
+	const SpineBones & spine = g_bones.spine;
+	if(!spine.valid()) {
+		return false;
+	}
+	const float HalfWidth = 17.f; // cm, the half width of the chest and the elbow
+	const float HalfDepth = 13.f; // cm, the half depth of the chest and the elbow
+	const Vec3f bottom = skeleton.bones[spine.belt].anim.trans;
+	const Vec3f top = skeleton.bones[spine.neck].anim.trans;
+	Vec3f axis = top - bottom;
+	float length = glm::dot(axis, axis);
+	float along = (length > 0.001f) ? glm::clamp(glm::dot(elbow - bottom, axis) / length, 0.f, 1.f) : 0.f;
+	Vec3f offset = elbow - (bottom + axis * along);
+	float scale = getVRBodyScale();
+	float x = glm::dot(offset, right) / (HalfWidth * scale);
+	float z = glm::dot(offset, forward) / (HalfDepth * scale);
+	return x * x + z * z < 1.f;
+}
+
+/*!
  * \param reach Length of the held item (weapon) from the fist, 0 if the hand is empty: it is stopped by walls too
  * \param push  Moves the wrist out of the weapon held in the other hand, see collideHandsWithWeapons
  */
@@ -1061,6 +1188,7 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	glm::quat gripOrientation;
 	if(!getWristTarget(grip, target, gripOrientation)) {
 		g_handTwistValid[hand] = false;
+		g_elbowEasing[hand] = ElbowEasing();
 		return;
 	}
 	target += push;
@@ -1144,15 +1272,72 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 		lowerLength = glm::distance(skeleton.bones[arm.elbow].anim.trans, skeleton.bones[arm.wrist].anim.trans);
 	}
 
+	Vec3f forward = angleToVectorXZ(player.angle.getYaw());
+	Vec3f right = angleToVectorXZ(player.angle.getYaw() - 90.f);
+	Vec3f outwards = (hand == VRHandRight) ? right : -right;
+
+	/*
+	 * Almost in reach: the user's arm is shorter than the model's, or its shoulder is further out than the user's, so
+	 * that the arms stayed bent down when held out to the sides (T-pose) and only straightened reaching forwards
+	 * (user). Near full reach, the upper arm and the forearm get shorter evenly, so that the arm is straight from 92%
+	 * of its length on; up to 80% it bends as before.
+	 *
+	 * Held out to the side, the user's arm reaches even less (user: still bent in the T-pose standing, fine seated
+	 * where the model is smaller): there the arm is straight near the furthest the user has reached to that side
+	 * (from 75% of the arm until the user has reached further, at most 92%). That reach is kept relative to the
+	 * model at its normal size, so that it stays right when the model is scaled for standing or seated play.
+	 */
+	const float StraightenFull = 0.92f;
+	const float StraightenRange = 0.12f;
+	const float MinSideReach = 0.75f;
+	float armSpan = upperLength + lowerLength;
+	float extension = distance / armSpan;
+	float sideways = glm::smoothstep(0.75f, 0.9f, glm::dot(direction, outwards));
+	float scale = getVRBodyScale();
+	float & sideReach = g_sideReach[hand];
+	if(sideways > 0.99f && extension * scale > sideReach && extension < StraightenFull) {
+		sideReach = extension * scale;
+	}
+	/*
+	 * The arm held out is not always at the furthest (log: 0.85 to 0.92 of the arm, 0.92 at most), and an elbow at
+	 * 95% of the arm length is still at 145° (user: still bent): straight from 0.07 less than the furthest reach, and
+	 * bending the same way over a wider range below
+	 */
+	const float SideMargin = 0.07f;
+	const float SideRange = 0.18f;
+	float sideFull = glm::clamp(sideReach / scale, MinSideReach, StraightenFull) - SideMargin;
+	float straightenFull = glm::mix(StraightenFull, sideFull, sideways);
+	float straightenStart = straightenFull - glm::mix(StraightenRange, SideRange, sideways);
+	if(distance < armLength && extension > straightenStart) {
+		float amount = glm::smoothstep(straightenStart, straightenFull, extension);
+		float factor = glm::mix(1.f, std::max((distance + 0.1f) / armSpan, 0.6f), amount);
+		if(factor < 0.999f) {
+			lengthenBone(skeleton, arm.shoulder, arm.elbow, factor);
+			lengthenBone(skeleton, arm.elbow, arm.wrist, factor);
+			for(const TwistBone & slice : arm.twists) {
+				g_boneLengths[size_t(slice.bone)] = getBoneLength(skeleton.bones[slice.bone].father);
+			}
+			updateBoneDescendants(skeleton, arm.shoulder);
+			upperLength = glm::distance(shoulder, skeleton.bones[arm.elbow].anim.trans);
+			lowerLength = glm::distance(skeleton.bones[arm.elbow].anim.trans, skeleton.bones[arm.wrist].anim.trans);
+			armSpan = upperLength + lowerLength;
+		}
+	}
+
 	// Still out of reach: the arm points at the target
 	distance = glm::clamp(distance, std::abs(upperLength - lowerLength) + 0.1f, upperLength + lowerLength - 0.1f);
 	target = shoulder + direction * distance;
 
+	/*
+	 * Tucked arm: with the hand well below the shoulder and not across the body (the forearms forward with the elbows
+	 * at the sides), the elbow stays against the body (user request) instead of bending outwards
+	 */
+	float below =glm::dot(target - shoulder, Vec3f(0.f, 1.f, 0.f)) / armSpan;
+	float across = -glm::dot(target - shoulder, outwards) / armSpan;
+	float tuck = glm::smoothstep(0.15f, 0.4f, below) * (1.f - glm::smoothstep(0.25f, 0.5f, across));
+
 	// The elbow bends down, outwards and a little backwards (Arx world: y points down)
-	Vec3f forward = angleToVectorXZ(player.angle.getYaw());
-	Vec3f right = angleToVectorXZ(player.angle.getYaw() - 90.f);
-	Vec3f outwards = (hand == VRHandRight) ? right : -right;
-	Vec3f pole = Vec3f(0.f, 1.f, 0.f) + outwards * 0.6f - forward * 0.3f;
+	Vec3f pole = Vec3f(0.f, 1.f, 0.f) + outwards * glm::mix(0.6f, 0.05f, tuck) - forward * 0.3f;
 	Vec3f bend = pole - direction * glm::dot(pole, direction);
 	if(glm::length(bend) < 0.001f) {
 		bend = outwards;
@@ -1181,8 +1366,8 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 	 * The twist of the hand around the forearm is shared out like in a real arm, so that no seam of the rigid skinning
 	 * twists too far and stretches the textures (user request):
 	 *  - 50% is a rotation of the shoulder: the whole arm turns around the line from the shoulder to the wrist (the
-	 *    elbow swings, the wrist stays), up to 180° (user: more than 35%), but only when the elbow moves outwards
-	 *    (user: not inwards, into the body),
+	 *    elbow swings, the wrist stays), up to 180° (user: more than 35%), but not into the torso (user, see
+	 *    isInsideTorso),
 	 *  - the rest goes along the forearm: the wrist bone turns with the hand (half of it made the hand turn faster)
 	 *    and the slices of splitForearm in steps between none at the elbow and all at the wrist. Two seams there tore
 	 *    or stretched the forearm at any share and limit (user: turning the palm up).
@@ -1210,27 +1395,27 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 		g_handTwist[hand] = twist;
 		g_handTwistValid[hand] = true;
 
-		float shoulderPart = glm::clamp(twist * ShoulderShare, -ShoulderTwist, ShoulderTwist);
+		// A tucked elbow stays at the body: the forearm takes the twist
+		float shoulderPart = glm::clamp(twist * ShoulderShare * (1.f - tuck), -ShoulderTwist, ShoulderTwist);
 		float along = glm::dot(direction, forearm);
+		// Turning the arm around the shoulder to wrist line by an angle turns the forearm by about angle × along
+		auto turnArm = [&](float angle) {
+			// Both bones: updating the upper arm alone puts the forearm back where the animation had it
+			glm::quat rotation = glm::angleAxis(glm::radians(angle), direction);
+			Bone & upperArm = skeleton.bones[arm.shoulder];
+			Bone & forearmBone = skeleton.bones[arm.elbow];
+			glm::quat forearmOrientation = glm::normalize(rotation * forearmBone.anim.quat);
+			upperArm.anim.quat = glm::normalize(rotation * upperArm.anim.quat);
+			updateBoneDescendants(skeleton, arm.shoulder);
+			forearmBone.anim.quat = forearmOrientation;
+			updateBoneDescendants(skeleton, arm.elbow);
+		};
+		auto measure = [&](float expected) {
+			forearm = forearmAxis();
+			return unwrapAngle(twistAngle(handOrientation * glm::inverse(wrist.anim.quat), forearm), expected);
+		};
 		if(std::abs(shoulderPart) > 0.1f && std::abs(along) > 0.2f) {
-			// Turning the arm around the shoulder to wrist line by an angle turns the forearm by about angle × along
-			auto turnArm = [&](float angle) {
-				// Both bones: updating the upper arm alone puts the forearm back where the animation had it
-				glm::quat rotation = glm::angleAxis(glm::radians(angle), direction);
-				Bone & upperArm = skeleton.bones[arm.shoulder];
-				Bone & forearmBone = skeleton.bones[arm.elbow];
-				glm::quat forearmOrientation = glm::normalize(rotation * forearmBone.anim.quat);
-				upperArm.anim.quat = glm::normalize(rotation * upperArm.anim.quat);
-				updateBoneDescendants(skeleton, arm.shoulder);
-				forearmBone.anim.quat = forearmOrientation;
-				updateBoneDescendants(skeleton, arm.elbow);
-			};
-			auto measure = [&](float expected) {
-				forearm = forearmAxis();
-				return unwrapAngle(twistAngle(handOrientation * glm::inverse(wrist.anim.quat), forearm), expected);
-			};
 			const Vec3f elbowBefore = skeleton.bones[arm.elbow].anim.trans;
-			const Vec3f forearmBefore = forearm;
 			float swivel = glm::clamp(shoulderPart / along, -MaxSwivel, MaxSwivel);
 			turnArm(swivel);
 			float turned = measure(twist - swivel * along);
@@ -1239,13 +1424,148 @@ void solveArm(Skeleton & skeleton, const ArmBones & arm, VRHand hand, const VRPo
 				turned = measure(twist + swivel * along);
 				swivel = -swivel;
 			}
-			// The elbow does not swing inwards, towards the body (user): the forearm takes that twist
+			/*
+			 * The elbow does not swing into the body (user), but it does swing inwards in front of or beside it: when
+			 * it stopped at any inward swing, turning the palm up further (the right arm clockwise) twisted only the
+			 * forearm, in awkward directions, while turning the palm down swung the elbow out (user). Only for an
+			 * extended arm: a bent arm turns the palm in the forearm, and its elbow went inwards while bending and
+			 * pointed forwards flexing the biceps (user). And only as far as the elbow stays out of the torso; the
+			 * forearm takes the rest of the twist.
+			 */
 			if(glm::dot(skeleton.bones[arm.elbow].anim.trans - elbowBefore, outwards) < 0.f) {
-				turnArm(-swivel);
-				forearm = forearmBefore;
-			} else {
-				twist = turned;
+				// Straight at 1, elbow at about 150° for equal bones at 0.96 and 110° at 0.82
+				float straight = glm::smoothstep(0.82f, 0.96f, distance / (upperLength + lowerLength));
+				turnArm(swivel * straight - swivel);
+				swivel *= straight;
 			}
+			if(glm::dot(skeleton.bones[arm.elbow].anim.trans - elbowBefore, outwards) < 0.f
+			   && isInsideTorso(skeleton, skeleton.bones[arm.elbow].anim.trans, forward, right)) {
+				float allowed = 0.f;
+				float rejected = swivel;
+				float applied = swivel;
+				for(int step = 0; step < 6; step++) {
+					float middle = (allowed + rejected) * 0.5f;
+					turnArm(middle - applied);
+					applied = middle;
+					if(isInsideTorso(skeleton, skeleton.bones[arm.elbow].anim.trans, forward, right)) {
+						rejected = middle;
+					} else {
+						allowed = middle;
+					}
+				}
+				turnArm(allowed - applied);
+				swivel = allowed;
+			}
+			twist = measure(twist - swivel * along);
+		}
+
+		/*
+		 * The wrist bends sideways (in the plane of the palm) only so far, about 20° towards the thumb and 30° away
+		 * from it: turning the hand further sideways moves the elbow so that the forearm follows the hand, as in a real
+		 * arm, instead of bending the wrist at a right angle (user: the left palm down, turned to the right). The arm
+		 * turns around the shoulder to wrist line, by the smallest angle that brings the wrist within its limits, but
+		 * not into the torso. Flexing the wrist (the palm towards the forearm) is not limited.
+		 */
+		const float ThumbSideLimit = 20.f;
+		const float OtherSideLimit = 30.f;
+		const float MaxAlign = 120.f;
+		const Vec3f restForearm = getRestPivot(skeleton, arm.wrist) - getRestPivot(skeleton, arm.elbow);
+		const Vec3f alongHand = (glm::length(restForearm) > 0.001f) ? glm::normalize(restForearm) : Vec3f(0.f);
+		Vec3f restThumb = localThumb - alongHand * glm::dot(localThumb, alongHand);
+		if(alongHand != Vec3f(0.f) && glm::length(restThumb) > 0.001f) {
+			restThumb = glm::normalize(restThumb);
+			const glm::quat toHand = glm::inverse(handOrientation);
+			// How far the wrist bends sideways (degrees, positive away from the thumb) beyond its limits
+			auto wristExcess = [&]() {
+				Vec3f local = toHand * forearmAxis();
+				float bend = glm::degrees(std::atan2(glm::dot(local, restThumb), glm::dot(local, alongHand)));
+				return std::max(bend - OtherSideLimit, 0.f) + std::max(-ThumbSideLimit - bend, 0.f);
+			};
+			Vec3f elbowNow = skeleton.bones[arm.elbow].anim.trans;
+			Vec3f center = shoulder + direction * glm::dot(elbowNow - shoulder, direction);
+			Vec3f from = elbowNow - center;
+			// Where the elbow would be with a straight wrist
+			Vec3f to = wrist.anim.trans - handOrientation * alongHand * lowerLength - center;
+			to -= direction * glm::dot(to, direction);
+			if(wristExcess() > 0.f && glm::length(from) > 0.1f * upperLength && glm::length(to) > 0.001f) {
+				float full = glm::degrees(std::atan2(glm::dot(glm::cross(from, to), direction), glm::dot(from, to)));
+				full = glm::clamp(full, -MaxAlign, MaxAlign);
+				const bool wasInside = isInsideTorso(skeleton, elbowNow, forward, right);
+				turnArm(full);
+				float applied = full;
+				auto turnTo = [&](float angle) {
+					turnArm(angle - applied);
+					applied = angle;
+				};
+				if(wristExcess() <= 0.f) {
+					// The smallest turn that is enough
+					float tooLittle = 0.f;
+					float enough = full;
+					for(int step = 0; step < 6; step++) {
+						float middle = (tooLittle + enough) * 0.5f;
+						turnTo(middle);
+						if(wristExcess() > 0.f) {
+							tooLittle = middle;
+						} else {
+							enough = middle;
+						}
+					}
+					turnTo(enough);
+				}
+				if(!wasInside && isInsideTorso(skeleton, skeleton.bones[arm.elbow].anim.trans, forward, right)) {
+					float allowed = 0.f;
+					float rejected = applied;
+					for(int step = 0; step < 6; step++) {
+						float middle = (allowed + rejected) * 0.5f;
+						turnTo(middle);
+						if(isInsideTorso(skeleton, skeleton.bones[arm.elbow].anim.trans, forward, right)) {
+							rejected = middle;
+						} else {
+							allowed = middle;
+						}
+					}
+					turnTo(allowed);
+				}
+				twist = measure(twist - applied * glm::dot(direction, forearmAxis()));
+			}
+		}
+
+		/*
+		 * Sudden elbow jumps (user: creepy, in the shadow too): the solution above can jump around the shoulder to wrist
+		 * line from one frame to the next (the swivel changing side or stopping at the body, the bend direction when the
+		 * arm points along it). A jump faster than an elbow moves is taken back and eased out over about 0.4 s (user:
+		 * 0.2 s was still quick); normal movement follows at once. Not for an almost straight arm: there the elbow
+		 * barely moves when turning.
+		 */
+		const float MinJump = 6.f;         // degrees in one frame
+		const float MaxSwingSpeed = 360.f; // degrees per second around the line, followed at once
+		const float EaseTime = 0.13f;      // seconds: 95% of the jump is gone after 0.4 s
+		ElbowEasing & easing = g_elbowEasing[hand];
+		float dt = glm::clamp(g_vr->getFrameDuration(), 0.f, 0.1f);
+		Vec3f swing = skeleton.bones[arm.elbow].anim.trans - shoulder;
+		swing -= direction * glm::dot(swing, direction);
+		if(glm::length(swing) > 0.1f * upperLength) {
+			swing = glm::normalize(swing);
+			if(easing.valid) {
+				Vec3f last = right * easing.swing.x + Vec3f(0.f, easing.swing.y, 0.f) + forward * easing.swing.z;
+				last -= direction * glm::dot(last, direction);
+				if(glm::length(last) > 0.001f) {
+					last = glm::normalize(last);
+					float jump = glm::degrees(std::atan2(glm::dot(glm::cross(last, swing), direction), glm::dot(last, swing)));
+					if(std::abs(jump) > std::max(MinJump, MaxSwingSpeed * dt)) {
+						easing.offset = std::remainder(easing.offset - jump, 360.f);
+					}
+				}
+			}
+			easing.swing = Vec3f(glm::dot(swing, right), swing.y, glm::dot(swing, forward));
+			easing.valid = true;
+		} else {
+			easing.valid = false;
+		}
+		easing.offset *= std::exp(-dt / EaseTime);
+		if(std::abs(easing.offset) > 0.1f) {
+			turnArm(easing.offset);
+			twist = measure(twist - easing.offset * glm::dot(direction, forearm));
 		}
 
 		Bone & elbowBone = skeleton.bones[arm.elbow];
@@ -1420,6 +1740,45 @@ void alignHeldItem(Skeleton & skeleton, const EERIE_3DOBJ & object, const ArmBon
 	updateBoneDescendants(skeleton, arm.hand);
 }
 
+//! The last smoothed grip pose of each hand of the model and the head then (stage space)
+struct SmoothedGrip {
+	bool valid = false;
+	Vec3f position = Vec3f(0.f);
+	glm::quat orientation = glm::quat(1.f, 0.f, 0.f, 0.f);
+	Vec3f head = Vec3f(0.f);
+};
+SmoothedGrip g_smoothedGrips[VRHandCount];
+
+/*!
+ * Hand smoothing (config.vr.dampenHands, like FRIK's hand damping): the hands of the model follow the controllers
+ * keeping 70% of their last pose per frame at 90 Hz, which hides the tremor of the hands. Moving the head (walking in
+ * the room) is not smoothed. Only the posed body uses it: pointing, grabbing and strikes follow the controllers.
+ */
+VRPose smoothGrip(VRHand hand, const VRPose & grip) {
+
+	SmoothedGrip & last = g_smoothedGrips[hand];
+	if(!config.vr.dampenHands || !grip.valid) {
+		last.valid = false;
+		return grip;
+	}
+
+	const XrVector3f & left = g_vr->getView(0).pose.position;
+	const XrVector3f & right = g_vr->getView(1).pose.position;
+	const Vec3f head = Vec3f(left.x + right.x, left.y + right.y, left.z + right.z) * 0.5f;
+	VRPose result = grip;
+	if(last.valid) {
+		const float Retention = 0.7f;
+		// The same smoothing at any frame rate, a hitch moves the hand at most three frames' worth
+		float frames = glm::clamp(g_vr->getFrameDuration(), 0.f, 3.f / 90.f) * 90.f;
+		float move = 1.f - std::pow(Retention, frames);
+		Vec3f lag = grip.position - last.position - (head - last.head);
+		result.position = grip.position - lag * (1.f - move);
+		result.orientation = glm::normalize(glm::slerp(last.orientation, grip.orientation, move));
+	}
+	last = { true, result.position, result.orientation, head };
+	return result;
+}
+
 } // anonymous namespace
 
 void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
@@ -1451,19 +1810,29 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 
 	// Cutscenes and other cameras: the game animates the body (the last head pose would freeze it bent)
 	if(!isVRPlayerView()) {
+		for(SmoothedGrip & smoothed : g_smoothedGrips) {
+			smoothed.valid = false;
+		}
+		for(ElbowEasing & easing : g_elbowEasing) {
+			easing = ElbowEasing();
+		}
+		g_bodyEasing.valid = false;
 		return;
 	}
 
 	// The spine first: it moves the shoulders
-	if(bones.spine.valid()) {
-		solveSpine(skeleton, bones.spine, bones.legs);
+	Vec3f pivot;
+	if(bones.spine.valid() && solveSpine(skeleton, bones.spine, bones.legs, pivot)) {
+		easeBodyPose(skeleton, bones.spine, pivot);
+	} else {
+		g_bodyEasing.valid = false;
 	}
 
 	// Not the bow (the drawing hand is at its string) or the torch
 	VRPose grips[VRHandCount];
 	bool weapons[VRHandCount];
 	for(size_t hand = 0; hand < VRHandCount; hand++) {
-		grips[hand] = input.getHand(VRHand(hand)).grip;
+		grips[hand] = smoothGrip(VRHand(hand), input.getHand(VRHand(hand)).grip);
 		weapons[hand] = isHoldingWeapon(*entity.obj, VRHand(hand));
 		if(!weapons[hand]) {
 			g_weaponDrawn[hand] = false;
@@ -1476,11 +1845,11 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 		const ArmBones & arm = bones.arms[hand];
 		if(arm.valid()) {
 			const VRHandState & state = input.getHand(VRHand(hand));
-			solveArm(skeleton, arm, VRHand(hand), state.grip, getHeldItemReach(*entity.obj, VRHand(hand)), pushes[hand]);
-			if(state.grip.valid) {
+			solveArm(skeleton, arm, VRHand(hand), grips[hand], getHeldItemReach(*entity.obj, VRHand(hand)), pushes[hand]);
+			if(grips[hand].valid) {
 				if(isHoldingItem(*entity.obj, VRHand(hand))) {
 					// The animation of the game wraps the fingers around the handle: keep it, only aim the item
-					alignHeldItem(skeleton, *entity.obj, arm, VRHand(hand), state.grip);
+					alignHeldItem(skeleton, *entity.obj, arm, VRHand(hand), grips[hand]);
 					if(isHoldingTorch(*entity.obj, VRHand(hand))) {
 						// The game does not animate a hand holding the torch: a fist around it
 						VRHandState fist = state;
@@ -1512,7 +1881,7 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 				VertexGroupId tip = arm.fingersTip ? arm.fingersTip : arm.indexRoot;
 				Vec3f wrist;
 				glm::quat orientation;
-				if(getWristTarget(state.grip, wrist, orientation)) {
+				if(getWristTarget(grips[hand], wrist, orientation)) {
 					g_fingersFromWrist[hand] = glm::inverse(orientation)
 					                           * (skeleton.bones[tip].anim.trans - skeleton.bones[arm.wrist].anim.trans);
 				}

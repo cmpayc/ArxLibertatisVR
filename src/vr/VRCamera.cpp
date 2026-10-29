@@ -512,6 +512,10 @@ float getVRBodyScale() {
 	return g_bodyScale;
 }
 
+glm::mat3x3 getVRPlaySpaceRotation() {
+	return g_trackingToWorld.body;
+}
+
 bool getVREyeCenter(Vec3f & position) {
 	glm::mat3x3 rotation;
 	return getVRHeadPose(position, rotation);

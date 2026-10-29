@@ -153,6 +153,7 @@ constexpr const bool
 	vrShowHud = false,
 	vrDebugRay = false,
 	vrShowPerf = false,
+	vrDampenHands = true,
 	vrShieldBlock = true,
 	vrImprovedRuneDrawing = false;
 
@@ -369,6 +370,7 @@ constexpr const std::string_view
 	vrHandOffsetY = "hand_offset_y",
 	vrHandOffsetZ = "hand_offset_z",
 	vrBodyOffset = "body_offset",
+	vrDampenHands = "dampen_hands",
 	vrBodyRadius = "body_radius",
 	vrThrowStrength = "throw_strength",
 	vrShowHud = "show_hud",
@@ -680,6 +682,7 @@ bool Config::save() {
 	writer.writeKey(Key::vrHandOffsetY, vr.handOffset.y);
 	writer.writeKey(Key::vrHandOffsetZ, vr.handOffset.z);
 	writer.writeKey(Key::vrBodyOffset, vr.bodyOffset);
+	writer.writeKey(Key::vrDampenHands, vr.dampenHands);
 	writer.writeKey(Key::vrBodyRadius, vr.bodyRadius);
 	writer.writeKey(Key::vrThrowStrength, vr.throwStrength);
 	writer.writeKey(Key::vrShowHud, vr.showHud);
@@ -881,6 +884,7 @@ bool Config::init(const fs::path & file) {
 	vr.handOffset.y = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetY, Default::vrHandOffsetY), -0.2f, 0.2f);
 	vr.handOffset.z = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetZ, Default::vrHandOffsetZ), -0.2f, 0.2f);
 	vr.bodyOffset = glm::clamp(reader.getKey(Section::VR, Key::vrBodyOffset, Default::vrBodyOffset), 0.f, 0.4f);
+	vr.dampenHands = reader.getKey(Section::VR, Key::vrDampenHands, Default::vrDampenHands);
 	vr.bodyRadius = glm::clamp(reader.getKey(Section::VR, Key::vrBodyRadius, Default::vrBodyRadius), 0.15f, 0.52f);
 	vr.throwStrength = glm::clamp(reader.getKey(Section::VR, Key::vrThrowStrength, Default::vrThrowStrength), 0.f, 5.f);
 	vr.showHud = reader.getKey(Section::VR, Key::vrShowHud, Default::vrShowHud);

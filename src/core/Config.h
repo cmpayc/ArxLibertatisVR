@@ -263,6 +263,9 @@ public:
 		//! How far the neck of the player model is behind the eyes (meters)
 		float bodyOffset;
 
+		//! Smooth the hands of the player model (hides the tremor of the hands)
+		bool dampenHands;
+
 		//! Radius of the player collision cylinder in VR (meters, the game uses 0.52)
 		float bodyRadius;
 		
