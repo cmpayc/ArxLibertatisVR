@@ -118,6 +118,7 @@ struct BloomConstants {
 	float params[4];
 	float source[4];
 	float clamp[4]; // The source texture coordinates of the view: xy = minimum, zw = maximum
+	float fade[4];  // x = distance where the bloom starts to fade (0 = no fade), y = fade length, z = near, w = far
 };
 
 struct GradingConstants {
@@ -156,6 +157,9 @@ const ColorGradingPreset ColorGradingPresets[] = {
 // Bloom settings: brightness where the bloom starts, width of the soft transition
 const float BloomThreshold = 0.45f;
 const float BloomKnee = 0.2f;
+// Distance (world units, about centimeters) where the bloom starts to fade, and over which it fades to a half
+const float BloomFadeStart = 300.f;
+const float BloomFadeLength = 700.f;
 
 const size_t MaxPixelLights = 128;
 
@@ -1636,27 +1640,41 @@ void D3D11Renderer::renderBloom(bool apply) {
 	
 	// Each eye of the stereo scene is blurred on its own: the same part of every level
 	std::vector<Vec4f> regions;
+	std::vector<Vec2f> depthRanges; // near and far plane of each view, for the distance fade
 	for(const SceneRegion & region : sceneRegions()) {
 		regions.emplace_back(float(region.pixels.left) / float(m_sceneSize.x),
 		                     float(region.pixels.top) / float(m_sceneSize.y),
 		                     float(region.pixels.width()) / float(m_sceneSize.x),
 		                     float(region.pixels.height()) / float(m_sceneSize.y));
+		// See renderAmbientOcclusion()
+		float q = region.projection[2][2];
+		float nearPlane = (q != 0.f) ? -region.projection[3][2] / q : 1.f;
+		float farPlane = (q > 1.f) ? nearPlane * q / (q - 1.f) : nearPlane * 10000.f;
+		depthRanges.emplace_back(nearPlane, farPlane);
 	}
-	
+
 	auto pass = [&](ID3D11RenderTargetView * target, const Vec2i & targetSize, ID3D11ShaderResourceView * source,
 	                const Vec2i & sourceSize, ID3D11PixelShader * shader, bool additive,
-	                ID3D11ShaderResourceView * mask = nullptr) {
+	                ID3D11ShaderResourceView * mask = nullptr, ID3D11ShaderResourceView * depth = nullptr) {
 
 		m_context->PSSetShaderResources(0, 1, &none);
 		m_context->OMSetRenderTargets(1, &target, nullptr);
 		m_context->PSSetShaderResources(0, 1, &source);
+		m_context->PSSetShaderResources(1, 1, &depth);
 		m_context->PSSetShaderResources(4, 1, &mask);
 		BlendingFactor dst = additive ? BlendOne : BlendZero;
 		m_context->OMSetBlendState(getBlendState(BlendOne, dst, false, true), nullptr, 0xffffffff);
-		
-		for(const Vec4f & region : regions) {
-			
+
+		for(size_t i = 0; i < regions.size(); i++) {
+
+			const Vec4f & region = regions[i];
 			BloomConstants constants = { };
+			if(depth) {
+				constants.fade[0] = BloomFadeStart;
+				constants.fade[1] = BloomFadeLength;
+				constants.fade[2] = depthRanges[i].x;
+				constants.fade[3] = depthRanges[i].y;
+			}
 			constants.params[0] = BloomThreshold;
 			constants.params[1] = BloomKnee;
 			// The upsampled levels add up, normalize the result
@@ -1685,7 +1703,11 @@ void D3D11Renderer::renderBloom(bool apply) {
 	ID3D11ShaderResourceView * mask = nullptr;
 	ID3D11PixelShader * prefilter = sceneMaskShader(m_bloomPrefilterPixelShader.Get(),
 	                                                m_bloomPrefilterPixelShaderMS.Get(), mask);
-	pass(m_bloomViews[0].Get(), m_bloomSizes[0], m_sceneResolvedView.Get(), m_sceneSize, prefilter, false, mask);
+	// The depth for the distance fade, if the shader reads it the way it was created (multisampled or not)
+	bool multisampled = (prefilter == m_bloomPrefilterPixelShaderMS.Get());
+	ID3D11ShaderResourceView * depth = (multisampled == (m_sceneSamples > 1)) ? m_sceneDepthResource.Get() : nullptr;
+	pass(m_bloomViews[0].Get(), m_bloomSizes[0], m_sceneResolvedView.Get(), m_sceneSize, prefilter, false, mask, depth);
+	m_context->PSSetShaderResources(1, 1, &none);
 	m_context->PSSetShaderResources(4, 1, &none);
 	for(size_t i = 1; i < BloomLevels; i++) {
 		pass(m_bloomViews[i].Get(), m_bloomSizes[i], m_bloomResources[i - 1].Get(), m_bloomSizes[i - 1],

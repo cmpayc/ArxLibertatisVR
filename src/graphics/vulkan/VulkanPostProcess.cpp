@@ -59,6 +59,7 @@ struct BloomConstants {
 	float params[4];
 	float source[4];
 	float clamp[4]; // The source texture coordinates of the view: xy = minimum, zw = maximum
+	float fade[4];  // The distance fade of Direct3D 11, unused (no scene depth bound for the prefilter)
 };
 
 struct GradingConstants {

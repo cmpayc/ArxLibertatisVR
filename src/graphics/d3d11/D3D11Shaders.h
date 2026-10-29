@@ -1007,7 +1007,32 @@ cbuffer BloomConstants : register(b4) {
 	float4 bloomParams; // x = threshold, y = soft knee, z = intensity
 	float4 bloomSource; // xy = 1 / source size, zw = source size
 	float4 bloomClamp;  // The source texture coordinates of the view (one eye in VR): xy = minimum, zw = maximum
+	float4 bloomFade;   // x = distance where the bloom starts to fade (0 = no fade), y = fade length, z = near, w = far
 };
+
+/*
+ * Bright pixels further away give off less bloom (user: a light looked as bright from far away). Direct3D 11 only:
+ * the Vulkan prefilter has no scene depth bound.
+ */
+float bloomDistanceFade(float2 uv) {
+	float result = 1;
+	#ifndef __spirv__
+	if(bloomFade.x > 0) {
+		int2 pixel = int2(clamp(uv, bloomClamp.xy, bloomClamp.zw) * bloomSource.zw);
+		#ifdef MSAA_DEPTH
+		float depth = sceneDepth.Load(pixel, 0);
+		#else
+		float depth = sceneDepth.Load(int3(pixel, 0));
+		#endif
+		// The OpenGL window range [0.5, 1], see psMotion
+		float z = saturate(depth * 2 - 1);
+		float distance = bloomFade.z * bloomFade.w / (bloomFade.w - z * (bloomFade.w - bloomFade.z));
+		float fade = max(distance - bloomFade.x, 0) / bloomFade.y;
+		result = 1 / (1 + fade * fade);
+	}
+	#endif
+	return result;
+}
 
 float3 bloomSample(float2 uv) {
 	return texture0.Sample(sampler0, clamp(uv, bloomClamp.xy, bloomClamp.zw)).rgb;
@@ -1018,7 +1043,7 @@ float3 bloomSampleScene(float2 uv) {
 	int2 pixel = int2(floor(clamp(uv, bloomClamp.xy, bloomClamp.zw) * bloomSource.zw - 0.5));
 	uint masked = sceneMasked(pixel) | sceneMasked(pixel + int2(1, 0)) | sceneMasked(pixel + int2(0, 1))
 	              | sceneMasked(pixel + int2(1, 1));
-	return masked ? float3(0, 0, 0) : bloomSample(uv);
+	return masked ? float3(0, 0, 0) : bloomSample(uv) * bloomDistanceFade(uv);
 }
 
 float3 bloomThreshold(float3 color) {
@@ -1064,9 +1089,14 @@ float4 psBloomUpsample(BlitOutput input) : SV_Target {
 	return float4(sum / 16, 1);
 }
 
-// Added to the scene by the blend state
+/*
+ * Added to the scene by the blend state. The glows of lights close to each other overlapped and added up to twice as
+ * bright (user: a mess): the bloom saturates softly towards a limit instead, a weak glow stays about the same.
+ */
 float4 psBloomComposite(BlitOutput input) : SV_Target {
-	return float4(psBloomUpsample(input).rgb * bloomParams.z, 1);
+	const float limit = 0.5;
+	float3 bloom = psBloomUpsample(input).rgb * bloomParams.z;
+	return float4(limit * (1 - exp(-bloom / limit)), 1);
 }
 
 /*
