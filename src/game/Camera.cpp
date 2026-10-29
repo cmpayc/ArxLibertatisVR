@@ -21,6 +21,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "core/Core.h"
 #include "graphics/Math.h"
 #include "graphics/Renderer.h"
 
@@ -162,4 +163,12 @@ Vec3f screenToWorldSpace(Vec2f pos, float depth) {
 	 * return Vec3f(glm::inverse(g_preparedCamera.m_worldToView) * view);
 	 */
 	return Vec3f(g_preparedCamera.m_viewToWorld * view);
+}
+
+float g_interfaceToSceneScale = 1.f;
+
+Vec2f interfaceToScenePosition(Vec2f pos) {
+	// Both have the same center and aspect ratio (see VRSystem::addHeadLockedScreenPanel)
+	Vec2f center = Vec2f(g_size.center());
+	return center + (pos - center) * g_interfaceToSceneScale;
 }

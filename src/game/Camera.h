@@ -139,4 +139,13 @@ void SetActiveCamera(Camera * cam);
 
 Vec3f screenToWorldSpace(Vec2f pos, float depth = 1.f);
 
+/*!
+ * How much smaller the interface is shown than the view of the scene, 1 if it covers it (VR with the keyboard and the
+ * mouse: the scene fills the headset, the interface is a smaller screen in front of the eyes)
+ */
+extern float g_interfaceToSceneScale;
+
+//! The screen position in the view of the scene where a position on the interface (the cursor) is seen
+Vec2f interfaceToScenePosition(Vec2f pos);
+
 #endif // ARX_GAME_CAMERA_H

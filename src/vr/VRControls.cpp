@@ -547,7 +547,7 @@ void updateVignette(const VRHandState & main) {
 
 bool leaveVRCombatModeForMagic() {
 
-	if(!isVRActive() || !(player.Interface & INTER_COMBATMODE)) {
+	if(!isVRMotionControlled() || !(player.Interface & INTER_COMBATMODE)) {
 		return false;
 	}
 
@@ -572,7 +572,8 @@ bool isVRWeaponKeptForMagic() {
 
 bool suspendVRCombatMode() {
 
-	if(!isVRActive() || !(player.Interface & INTER_COMBATMODE) || ARX_EQUIPMENT_GetPlayerWeaponType() == WEAPON_BARE) {
+	if(!isVRMotionControlled() || !(player.Interface & INTER_COMBATMODE)
+	   || ARX_EQUIPMENT_GetPlayerWeaponType() == WEAPON_BARE) {
 		return false;
 	}
 
@@ -584,7 +585,7 @@ bool suspendVRCombatMode() {
 
 void updateVRWeaponState() {
 
-	if(!isVRActive() || ARXmenu.mode() != Mode_InGame || BLOCK_PLAYER_CONTROLS || !entities.player()) {
+	if(!isVRMotionControlled() || ARXmenu.mode() != Mode_InGame || BLOCK_PLAYER_CONTROLS || !entities.player()) {
 		return;
 	}
 	bool hasWeapon = ARX_EQUIPMENT_GetPlayerWeaponType() != WEAPON_BARE;
@@ -627,7 +628,7 @@ void updateVRWeaponState() {
 }
 
 void requestVRWeaponDraw() {
-	if(isVRActive()) {
+	if(isVRMotionControlled()) {
 		g_drawWeaponRequested = true;
 	}
 }
@@ -662,6 +663,18 @@ void resetVRLevelState() {
 
 bool isVRActive() {
 	return g_vr && g_vr->hasSession();
+}
+
+bool isVRMotionControlled() {
+	return isVRActive() && !config.vr.keyboardMouse;
+}
+
+bool isVRKeyboardMouse() {
+	return isVRActive() && config.vr.keyboardMouse;
+}
+
+bool isVRFullMouse() {
+	return isVRKeyboardMouse() && config.vr.fullMouse;
 }
 
 void setVRHeadYaw(float yaw) {
@@ -1247,10 +1260,22 @@ bool isVRPrecastRequested() {
 
 bool getVRSpellAim(Anglef & angle) {
 	
-	// Along the pointing ray of the casting (main) hand
 	if(!isVRActive() || !isVRPlayerView()) {
 		return false;
 	}
+
+	// Keyboard and mouse: where the head looks, at the crosshair in the center of the view
+	if(config.vr.keyboardMouse) {
+		Vec3f eyes;
+		glm::mat3x3 head;
+		if(!getVRHeadPose(eyes, head)) {
+			return false;
+		}
+		angle = unitVectorToAngle(glm::normalize(head * Vec3f(0.f, 0.f, 1.f)));
+		return true;
+	}
+
+	// Along the pointing ray of the casting (main) hand
 	const VRPose & aim = g_vr->getInput().getHand(dominantHand()).aim;
 	Vec3f origin;
 	Vec3f direction;
@@ -1596,7 +1621,7 @@ void drawInventory() {
 
 void drawVRHandMenus() {
 	
-	if(!isVRActive() || !isVRPlayerView()) {
+	if(!isVRMotionControlled() || !isVRPlayerView()) {
 		return;
 	}
 	

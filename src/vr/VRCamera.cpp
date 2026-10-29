@@ -113,6 +113,17 @@ float getCrouchProgress() {
 	return crouching ? 1.f : 0.f;
 }
 
+/*!
+ * The view of full mouse control (see isVRFullMouse): along the player's angle, turned and tilted with the mouse like
+ * without VR. Arx basis (x right, y down, z forward) to world.
+ */
+glm::mat3x3 getMouseViewRotation() {
+	Vec3f forward = glm::normalize(angleToVector(player.angle));
+	Vec3f right = glm::cross(Vec3f(0.f, 1.f, 0.f), forward);
+	right = (glm::length(right) > 0.001f) ? glm::normalize(right) : angleToVectorXZ(player.angle.getYaw() - 90.f);
+	return glm::mat3x3(right, glm::cross(forward, right), forward);
+}
+
 } // anonymous namespace
 
 void syncVRTrackingToPlayer() {
@@ -258,7 +269,8 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 		float crouchDrop = 0.f;
 		float crouched = getCrouchProgress();
 		if(crouched > 0.f && !g_physicallyCrouching) {
-			float physicalDrop = std::max(g_standingHeight - headStage.y, 0.f) * scale;
+			// Full mouse control: the head does not lower the view
+			float physicalDrop = isVRFullMouse() ? 0.f : std::max(g_standingHeight - headStage.y, 0.f) * scale;
 			float bodyDrop = (player.crouchHeight() - player.baseHeight()) * g_bodyScale;
 			// Scaled as a whole: subtracting the user's drop along the way held the view still for the first 40%
 			crouchDrop = std::max(bodyDrop - physicalDrop, 0.f) * crouched;
@@ -281,11 +293,26 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	}
 	glm::mat3x3 eyeRotation[VRSystem::EyeCount];
 	Vec3f eyePosition[VRSystem::EyeCount];
-	for(size_t eye = 0; eye < VRSystem::EyeCount; eye++) {
-		Vec3f position = g_referenceYawInverse * (toVec(views[eye]->pose.position) - g_referencePosition) - consumed;
-		glm::quat orientation = g_referenceYawInverse * toQuat(views[eye]->pose.orientation);
-		eyeRotation[eye] = body * glm::mat3_cast(vr::toArxBasis(orientation));
-		eyePosition[eye] = origin + body * (vr::toArxBasis(position) * scale);
+	if(isPlayer && isVRFullMouse()) {
+		/*
+		 * Full mouse control: the head does not move the view, the eyes are at the model's eyes looking along the
+		 * player's angle (turned and tilted with the mouse), each eye where it is relative to the head
+		 */
+		const glm::quat head = toQuat(views[0]->pose.orientation);
+		const glm::mat3x3 view = getMouseViewRotation();
+		for(size_t eye = 0; eye < VRSystem::EyeCount; eye++) {
+			Vec3f offset = glm::inverse(head) * (toVec(views[eye]->pose.position) - headStage);
+			glm::quat orientation = glm::inverse(head) * toQuat(views[eye]->pose.orientation);
+			eyeRotation[eye] = view * glm::mat3_cast(vr::toArxBasis(orientation));
+			eyePosition[eye] = origin + view * (vr::toArxBasis(offset) * scale);
+		}
+	} else {
+		for(size_t eye = 0; eye < VRSystem::EyeCount; eye++) {
+			Vec3f position = g_referenceYawInverse * (toVec(views[eye]->pose.position) - g_referencePosition) - consumed;
+			glm::quat orientation = g_referenceYawInverse * toQuat(views[eye]->pose.orientation);
+			eyeRotation[eye] = body * glm::mat3_cast(vr::toArxBasis(orientation));
+			eyePosition[eye] = origin + body * (vr::toArxBasis(position) * scale);
+		}
 	}
 	
 	// Leaning must not put the head through walls: stop the view in front of them
@@ -336,6 +363,13 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 	float halfIpd = glm::distance(eyePosition[0], eyePosition[1]) * 0.5f;
 	float pullback = halfIpd / std::min(-left, right) + nearDist;
 
+	// Keyboard and mouse: the interface is a smaller screen in front of the eyes (see addHeadLockedScreenPanel)
+	g_interfaceToSceneScale = 1.f;
+	if(config.vr.keyboardMouse) {
+		float screenWidth = 2.f * std::tan(glm::radians(VRSystem::KeyboardMouseScreenAngle * 0.5f));
+		g_interfaceToSceneScale = std::min(screenWidth / (right - left), 1.f);
+	}
+
 	glm::mat4x4 centerWorldToView = vr::worldToViewMatrix(eyeRotation[0], center - forward * pullback);
 	glm::mat4x4 centerViewToClip = vr::projectionFromTangents(left, right, up, down, nearDist, farDist);
 	PrepareCamera(&cam, centerWorldToView, centerViewToClip, viewport);
@@ -384,6 +418,13 @@ bool prepareVRCamera(Camera & cam, const Rect & viewport) {
 }
 
 Vec3f takeVRRoomScaleMovement() {
+	if(isVRFullMouse()) {
+		// Full mouse control: the headset does not move the player (nor turn or crouch it)
+		g_bodyTrackingNeedsReset = true;
+		g_bodyHeadingLost = true;
+		g_physicallyCrouching = false;
+		return Vec3f(0.f);
+	}
 	if(!g_vr || !g_vr->isRenderingFrame() || !g_vr->isFocused()
 	   || !g_trackingToWorld.valid || g_cameraEntity || player.lifePool.current <= 0.f || g_recenterRequested) {
 		g_bodyTrackingNeedsReset = true;
@@ -443,8 +484,13 @@ Vec3f takeVRRoomScaleMovement() {
 		return Vec3f(0.f);
 	}
 	// Physical turns rotate the avatar only; sync must not rotate tracking space again.
-	player.angle.setYaw(MAKEANGLE(player.angle.getYaw() + g_bodyTracking.yaw() - previousYaw));
-	player.desiredangle.setYaw(player.angle.getYaw());
+	/*
+	 * The desired angle turns by as much: the game sets the angle to it in the next frame, and a turn requested with
+	 * the mouse (in the desired angle, see manageKeyMouse) must stay in it (user: the mouse did not turn)
+	 */
+	float physicalTurn = g_bodyTracking.yaw() - previousYaw;
+	player.angle.setYaw(MAKEANGLE(player.angle.getYaw() + physicalTurn));
+	player.desiredangle.setYaw(MAKEANGLE(player.desiredangle.getYaw() + physicalTurn));
 	g_lastBodyYaw = player.angle.getYaw();
 	float headDrop = pose.head.y - g_standingHeight;
 	if(headDrop < -0.35f) {
@@ -524,6 +570,12 @@ bool getVREyeCenter(Vec3f & position) {
 bool getVRHeadPose(Vec3f & position, glm::mat3x3 & rotation) {
 	if(!g_vr || !g_vr->isRenderingFrame() || !g_trackingToWorld.valid) {
 		return false;
+	}
+	if(isVRFullMouse()) {
+		// At the model's eyes, looking where the mouse turned and tilted the view (see prepareVRCamera)
+		position = player.pos + g_trackingToWorld.originFromPlayer;
+		rotation = getMouseViewRotation();
+		return true;
 	}
 	Vec3f eyes = (toVec(g_vr->getView(0).pose.position) + toVec(g_vr->getView(1).pose.position)) * 0.5f;
 	glm::quat orientation;

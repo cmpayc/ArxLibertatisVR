@@ -230,7 +230,7 @@ Rect MiniMap::playerMiniMapArea() {
 	 * VR: the mini map is shown at the wrist, cut out of the interface: away from the texts at the top of the screen,
 	 * whose panel showed part of it (user), at the middle of the right side where nothing else is drawn
 	 */
-	if(isVRActive()) {
+	if(isVRMotionControlled()) {
 		top = g_size.center().y - s32(minimapSizeScaled.y / 2.f);
 	}
 	#endif

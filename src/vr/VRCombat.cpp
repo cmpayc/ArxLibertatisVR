@@ -877,7 +877,7 @@ Entity * getVRCarriedItem(const Entity & entity, TransformInfo & transform) {
 	
 	ARX_UNUSED(entity);
 	
-	Entity * torch = (isVRActive() && !player.torch) ? getBeltTorch() : nullptr;
+	Entity * torch = (isVRMotionControlled() && !player.torch) ? getBeltTorch() : nullptr;
 	Vec3f centre;
 	if(!torch || !getVRBeltTransform(g_beltSide, *torch->obj, torch->scale, transform, centre)) {
 		return nullptr;
@@ -886,7 +886,7 @@ Entity * getVRCarriedItem(const Entity & entity, TransformInfo & transform) {
 }
 
 bool isVRHandAtBeltTorch(VRHand hand) {
-	if(!isVRActive() || hand >= VRHandCount) {
+	if(!isVRMotionControlled() || hand >= VRHandCount) {
 		return false;
 	}
 	if(g_beltTaking[hand]) {
@@ -902,7 +902,7 @@ bool getVRTorchLight(Vec3f & position) {
 	
 	// At the flame of the torch held in a hand, see updateTorch
 	Entity * torch = player.torch;
-	if(!isVRActive() || !isVRPlayerView() || !torch || !torch->obj || torch->show != SHOW_FLAG_ON_PLAYER) {
+	if(!isVRMotionControlled() || !isVRPlayerView() || !torch || !torch->obj || torch->show != SHOW_FLAG_ON_PLAYER) {
 		return false;
 	}
 	VertexId fire = torch->obj->fastaccess.fire;
@@ -915,7 +915,7 @@ bool getVRTorchLight(Vec3f & position) {
 }
 
 bool isVRMeleeActive() {
-	return isVRActive() && g_vr;
+	return isVRMotionControlled() && g_vr;
 }
 
 bool blockVRShieldHit(const Entity & attacker, float & damage) {
@@ -931,7 +931,7 @@ bool blockVRShieldHit(const Entity & attacker, float & damage) {
 	const float BelowEyes = 70.f; // cm: the stomach
 	const float MinFacing = 0.5f; // Cosine between the face of the shield and the direction to the attacker
 
-	if(!config.vr.shieldBlock || !isVRActive() || !isVRPlayerView() || damage <= 0.f) {
+	if(!config.vr.shieldBlock || !isVRMotionControlled() || !isVRPlayerView() || damage <= 0.f) {
 		return false;
 	}
 	Entity * shield = entities.get(player.equiped[EQUIP_SLOT_SHIELD]);
@@ -997,14 +997,14 @@ bool blockVRShieldHit(const Entity & attacker, float & damage) {
 }
 
 bool isVRArcheryActive() {
-	return isVRActive() && (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() == WEAPON_BOW;
+	return isVRMotionControlled() && (player.Interface & INTER_COMBATMODE) && ARX_EQUIPMENT_GetPlayerWeaponType() == WEAPON_BOW;
 }
 
 void updateVRCombat() {
 
 	Entity * io = entities.player();
 	bool canFight = ARXmenu.mode() == Mode_InGame && !BLOCK_PLAYER_CONTROLS && player.lifePool.current > 0.f;
-	if(!isVRActive() || !g_vr || !io || !io->obj || !canFight) {
+	if(!isVRMotionControlled() || !g_vr || !io || !io->obj || !canFight) {
 		resetSwings();
 		return;
 	}
@@ -1046,7 +1046,7 @@ void updateVRCombat() {
 }
 
 void hangVRTorchOnBelt() {
-	if(Entity * torch = player.torch; torch && isVRActive()) {
+	if(Entity * torch = player.torch; torch && isVRMotionControlled()) {
 		hangTorchOnBelt(*torch, getTorchHand());
 	}
 }

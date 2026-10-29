@@ -154,6 +154,8 @@ constexpr const bool
 	vrDebugRay = false,
 	vrShowPerf = false,
 	vrDampenHands = true,
+	vrKeyboardMouse = false,
+	vrFullMouse = false,
 	vrShieldBlock = true,
 	vrImprovedRuneDrawing = false;
 
@@ -371,6 +373,8 @@ constexpr const std::string_view
 	vrHandOffsetZ = "hand_offset_z",
 	vrBodyOffset = "body_offset",
 	vrDampenHands = "dampen_hands",
+	vrKeyboardMouse = "keyboard_mouse",
+	vrFullMouse = "full_mouse",
 	vrBodyRadius = "body_radius",
 	vrThrowStrength = "throw_strength",
 	vrShowHud = "show_hud",
@@ -683,6 +687,8 @@ bool Config::save() {
 	writer.writeKey(Key::vrHandOffsetZ, vr.handOffset.z);
 	writer.writeKey(Key::vrBodyOffset, vr.bodyOffset);
 	writer.writeKey(Key::vrDampenHands, vr.dampenHands);
+	writer.writeKey(Key::vrKeyboardMouse, vr.keyboardMouse);
+	writer.writeKey(Key::vrFullMouse, vr.fullMouse);
 	writer.writeKey(Key::vrBodyRadius, vr.bodyRadius);
 	writer.writeKey(Key::vrThrowStrength, vr.throwStrength);
 	writer.writeKey(Key::vrShowHud, vr.showHud);
@@ -885,6 +891,9 @@ bool Config::init(const fs::path & file) {
 	vr.handOffset.z = glm::clamp(reader.getKey(Section::VR, Key::vrHandOffsetZ, Default::vrHandOffsetZ), -0.2f, 0.2f);
 	vr.bodyOffset = glm::clamp(reader.getKey(Section::VR, Key::vrBodyOffset, Default::vrBodyOffset), 0.f, 0.4f);
 	vr.dampenHands = reader.getKey(Section::VR, Key::vrDampenHands, Default::vrDampenHands);
+	// Not on standalone headsets (Android): no keyboard and mouse to play with
+	vr.keyboardMouse = !Standalone && reader.getKey(Section::VR, Key::vrKeyboardMouse, Default::vrKeyboardMouse);
+	vr.fullMouse = !Standalone && reader.getKey(Section::VR, Key::vrFullMouse, Default::vrFullMouse);
 	vr.bodyRadius = glm::clamp(reader.getKey(Section::VR, Key::vrBodyRadius, Default::vrBodyRadius), 0.15f, 0.52f);
 	vr.throwStrength = glm::clamp(reader.getKey(Section::VR, Key::vrThrowStrength, Default::vrThrowStrength), 0.f, 5.f);
 	vr.showHud = reader.getKey(Section::VR, Key::vrShowHud, Default::vrShowHud);

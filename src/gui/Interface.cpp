@@ -182,19 +182,22 @@ bool bGCroucheToggle = false;
 bool bInverseInventory = false;
 bool lOldTruePlayerMouseLook = TRUE_PLAYER_MOUSELOOK_ON;
 
-//! \return true while a VR session is active (the head looks around, a laser pointer replaces the mouse)
+/*!
+ * \return true while a VR session is active with the controllers (the head looks around, a laser pointer replaces the
+ * mouse). With the keyboard and the mouse in VR the interface works like without VR.
+ */
 static bool isVRModeActive() {
 	#if ARX_HAVE_OPENXR
-	return isVRActive();
+	return isVRMotionControlled();
 	#else
 	return false;
 	#endif
 }
 
-//! \return true while the user physically crouches in VR
+//! \return true while the user physically crouches in VR (also with the keyboard and the mouse)
 static bool isVRCrouching() {
 	#if ARX_HAVE_OPENXR
-	return isVRModeActive() && isVRPhysicallyCrouching();
+	return isVRActive() && isVRPhysicallyCrouching();
 	#else
 	return false;
 	#endif
@@ -218,6 +221,20 @@ static bool isVRSneakingActive() {
 static bool isMouseLookToggle() {
 	return config.input.mouseLookToggle && (!isVRModeActive() || eyeball.isActive());
 }
+
+/*!
+ * Picking at the crosshair (the center of the view) in mouselook, else at the cursor where mouselook started: in VR
+ * with the keyboard and the mouse always at the crosshair, where the head looks
+ */
+static bool isCrosshairPicking() {
+	#if ARX_HAVE_OPENXR
+	if(isVRKeyboardMouse()) {
+		return true;
+	}
+	#endif
+	return isMouseLookToggle() && config.input.autoReadyWeapon != AlwaysAutoReadyWeapon;
+}
+
 bool bForceEscapeFreeLook = false;
 bool bRenderInCursorMode = true;
 
@@ -1383,7 +1400,7 @@ void ArxGame::manageKeyMouse() {
 				Vec2s poss = MemoMouse;
 
 				// mode systemshock
-				if(isMouseLookToggle() && config.input.autoReadyWeapon != AlwaysAutoReadyWeapon) {
+				if(isCrosshairPicking()) {
 					
 					DANAEMouse = g_size.center();
 					
@@ -1484,6 +1501,16 @@ void ArxGame::manageKeyMouse() {
 		   !GInput->actionPressed(CONTROLS_CUST_FREELOOK)) {
 			TRUE_PLAYER_MOUSELOOK_ON = false;
 		}
+		
+		#if ARX_HAVE_OPENXR
+		/*
+		 * VR with the keyboard and the mouse: the mouse always turns the player (user), the cursor is only shown for the
+		 * open interfaces (inventory, book, containers, notes) and to draw runes
+		 */
+		if(isVRKeyboardMouse()) {
+			TRUE_PLAYER_MOUSELOOK_ON = !isVRInterfaceOpen() && player.doingmagic != 2 && !g_draggedEntity;
+		}
+		#endif
 		
 		PLAYER_MOUSELOOK_ON = TRUE_PLAYER_MOUSELOOK_ON;
 		
@@ -1681,6 +1708,13 @@ void ArxGame::manageKeyMouse() {
 			player.angle.setRoll(0);
 		}
 		
+		#if ARX_HAVE_OPENXR
+		if(isVRKeyboardMouse() && !isVRFullMouse() && !eyeball.isActive()) {
+			// VR with the keyboard and the mouse: the head looks up and down, the mouse only turns (else it also tilts)
+			rotation.y = 0.f;
+		}
+		#endif
+
 		if(PLAYER_MOUSELOOK_ON || bKeySpecialMove) {
 
 			if(eyeball.isActive()) {
@@ -1791,10 +1825,7 @@ void ArxGame::manageEditorControls() {
 	
 	eMouseState = MOUSE_IN_WORLD;
 
-	if(   TRUE_PLAYER_MOUSELOOK_ON
-	   && config.input.autoReadyWeapon != AlwaysAutoReadyWeapon
-	   && isMouseLookToggle()
-	) {
+	if(TRUE_PLAYER_MOUSELOOK_ON && isCrosshairPicking()) {
 		DANAEMouse = g_size.center();
 	}
 	

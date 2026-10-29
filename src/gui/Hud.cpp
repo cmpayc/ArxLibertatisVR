@@ -458,7 +458,7 @@ void PurseIconGui::draw() {
 	HudIconBase::draw();
 
 	#if ARX_HAVE_OPENXR
-	if(isVRActive()) {
+	if(isVRMotionControlled()) {
 		// VR: the amount is always shown, left of the purse (the cursor is not seen on it)
 		Vec2f numberPos(m_rect.left - 4.f * m_scale, m_rect.center().y - 5.f * m_scale);
 		ARX_INTERFACE_DrawNumber(numberPos, player.gold, Color::white, m_scale);
@@ -1408,7 +1408,7 @@ void HudRoot::draw() {
 	Rectf gaugeArea = hudSlider;
 	bool gaugesTogether = false;
 	#if ARX_HAVE_OPENXR
-	if(isVRActive()) {
+	if(isVRMotionControlled()) {
 		/*
 		 * VR: the mana gauge next to the health gauge, away from the edges, for their round backing at the wrist (see
 		 * VRSystem::drawWristIconBackings), the icons next to them further away
@@ -1555,7 +1555,7 @@ void HudRoot::draw() {
 		}
 
 		#if ARX_HAVE_OPENXR
-		if(isVRActive()) {
+		if(isVRMotionControlled()) {
 			// VR: above the top right corner of the open inventory, shown with it (see getVRHudAreas)
 			purseIconGui.update(g_playerInventoryHud.openArea());
 		}

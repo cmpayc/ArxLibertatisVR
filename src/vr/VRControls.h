@@ -34,6 +34,21 @@
 [[nodiscard]] bool isVRActive();
 
 /*!
+ * \return true while a VR session is active and the game is played with the controllers, false with the keyboard and
+ * the mouse (config.vr.keyboardMouse): then the headset only looks around and everything else works like without VR
+ */
+[[nodiscard]] bool isVRMotionControlled();
+
+//! \return true while a VR session is active and the game is played with the keyboard and the mouse
+[[nodiscard]] bool isVRKeyboardMouse();
+
+/*!
+ * \return true while the game is played with the keyboard and the mouse and the headset does not move the view: the
+ * mouse turns and tilts it like without VR, the headset only shows it (config.vr.fullMouse)
+ */
+[[nodiscard]] bool isVRFullMouse();
+
+/*!
  * Map controller buttons to game actions and collect turning input
  *
  * Called once per VR frame after the controllers have been read.
@@ -96,7 +111,10 @@ class Entity * getVRPointedEntity(const struct VRPose & aim, bool debugRay);
 //! The spell drawn is stored instead of cast (the grip held in the magic mode): \ref g_precastSpellHook
 bool isVRPrecastRequested();
 
-//! Spells of the player fly along the main hand's pointing ray, not the view: g_playerSpellAimHook
+/*!
+ * Spells of the player fly along the main hand's pointing ray, not the view: g_playerSpellAimHook. With the keyboard
+ * and the mouse where the head looks (the crosshair), so do the arrows (see the bow in Core.cpp).
+ */
 bool getVRSpellAim(Anglef & angle);
 
 //! \return true while the game waits for the target of a spell and the pointer is on a valid one

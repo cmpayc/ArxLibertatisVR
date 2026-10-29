@@ -1307,7 +1307,7 @@ void ARX_PLAYER_Manage_Visual() {
 	// The fighting stance of the body (VR: the body keeps its normal pose, the arms follow the controllers)
 	bool fightStance = (player.Interface & INTER_COMBATMODE) != 0;
 	#if ARX_HAVE_OPENXR
-	if(isVRActive()) {
+	if(isVRMotionControlled()) {
 		fightStance = false;
 	}
 	#endif

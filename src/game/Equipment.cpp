@@ -1062,7 +1062,7 @@ float getEquipmentBaseModifier(EquipmentModifierType modifier, bool getRelative)
 	 */
 	float shieldArmor = 1.f;
 	#if ARX_HAVE_OPENXR
-	if(config.vr.shieldBlock && isVRActive()) {
+	if(config.vr.shieldBlock && isVRMotionControlled()) {
 		shieldArmor = 0.5f;
 	}
 	#endif

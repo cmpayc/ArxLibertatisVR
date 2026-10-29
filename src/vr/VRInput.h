@@ -95,8 +95,12 @@ public:
 	bool attach(XrSession session);
 	void detach();
 
-	//! Read the controller state for the given predicted display time
-	void update(XrTime time, XrSpace space);
+	/*!
+	 * Read the controller state for the given predicted display time
+	 *
+	 * \param ignore No controller is used (keyboard and mouse, see isVRMotionControlled): the hands are inactive.
+	 */
+	void update(XrTime time, XrSpace space, bool ignore = false);
 
 	[[nodiscard]] const VRHandState & getHand(VRHand hand) const { return m_hands[hand]; }
 
@@ -134,6 +138,7 @@ private:
 	std::array<XrSpace, VRHandCount> m_aimSpaces;
 
 	std::array<VRHandState, VRHandCount> m_hands;
+	bool m_ignored = false; //!< The controllers are not used, see update()
 
 };
 

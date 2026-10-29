@@ -1828,6 +1828,36 @@ public:
 			addCenter(std::move(cb));
 		}
 
+		// Standalone headsets (Android) are played with the controllers only
+		#ifndef __ANDROID__
+		{
+			/*
+			 * Keyboard and mouse instead of the controllers: the game's own texts (tutorial) apply then, see
+			 * getVRLocalisation
+			 */
+			std::string_view label = getLocalised("system_menus_options_vr_keyboard_mouse", "Keyboard and mouse");
+			auto cb = std::make_unique<CheckboxWidget>(checkboxSize(), hFontMenu, label);
+			cb->setChecked(config.vr.keyboardMouse);
+			cb->stateChanged = [](bool checked) {
+				config.vr.keyboardMouse = checked;
+				initLocalisation();
+			};
+			addCenter(std::move(cb));
+		}
+
+		{
+			// With the keyboard and the mouse: the headset does not move the view, the mouse turns and tilts it
+			std::string_view label = getLocalised("system_menus_options_vr_full_mouse",
+			                                      "Full mouse control (not recommended)");
+			auto cb = std::make_unique<CheckboxWidget>(checkboxSize(), hFontMenu, label);
+			cb->setChecked(config.vr.fullMouse);
+			cb->stateChanged = [](bool checked) noexcept {
+				config.vr.fullMouse = checked;
+			};
+			addCenter(std::move(cb));
+		}
+		#endif
+
 		{
 			std::string_view label = getLocalised("system_menus_options_vr_shield_block", "Physical shield block");
 			auto cb = std::make_unique<CheckboxWidget>(checkboxSize(), hFontMenu, label);

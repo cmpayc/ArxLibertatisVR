@@ -2071,7 +2071,8 @@ void ArxGame::renderLevel() {
 		 * cleared: the texts and the mini map drawn later are shown on their own (see VRSystem::captureHeldPanel)
 		 */
 		auto captureHeld = [](bool book) {
-			if(isVRActive() && ((book && (player.Interface & INTER_PLAYERBOOK)) || (!book && g_note.isOpen()))) {
+			if(isVRMotionControlled()
+			   && ((book && (player.Interface & INTER_PLAYERBOOK)) || (!book && g_note.isOpen()))) {
 				ARX_INTERFACE_RenderCursor(false);
 				g_vr->captureHeldPanel(book);
 			}

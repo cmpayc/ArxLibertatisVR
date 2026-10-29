@@ -59,6 +59,15 @@ public:
 
 	static const size_t EyeCount = 2;
 
+	/*!
+	 * Width of the interface in front of the eyes with the keyboard and the mouse (degrees): the view of the scene is
+	 * wider, its corners were outside of the lenses with the interface over all of it (user: no HUD, the book too big),
+	 * and barely seen at 70° (user)
+	 */
+	static constexpr float KeyboardMouseScreenAngle = 55.f;
+	//! Its distance (m, at most config.vr.uiDistance): the menus' distance seemed too far (user)
+	static constexpr float KeyboardMouseScreenDistance = 1.f;
+
 	VRSystem();
 	~VRSystem();
 
@@ -272,6 +281,8 @@ private:
 	 * \param scale Size relative to the virtual screen
 	 */
 	void addScreenPanel(const Rect & area, bool interactive, bool keepPosition = false, float scale = 1.f);
+	//! The whole virtual screen in front of the eyes, over the game's view of the world (keyboard and mouse)
+	void addHeadLockedScreenPanel();
 	//! Show a part of the virtual screen as a quad of the given size (metres per pixel)
 	bool addUIPanel(const Rect & area, float pixelSize, const Vec3f & position, const glm::quat & orientation,
 	                bool interactive);

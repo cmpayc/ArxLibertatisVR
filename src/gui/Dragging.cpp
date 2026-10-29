@@ -84,7 +84,8 @@ void setDraggedEntity(Entity * entity) {
 				Vec2f pos = Vec2f(p) / p.w;
 				if(g_size.contains(Rect::Vec2(pos))) {
 					g_draggedIconOffset = Vec2f(0.f);
-					g_draggedObjectOffset = pos - Vec2f(DANAEMouse);
+					// In the view of the scene (see interfaceToScenePosition)
+					g_draggedObjectOffset = pos - interfaceToScenePosition(Vec2f(DANAEMouse));
 				}
 			}
 		}
@@ -258,7 +259,7 @@ void updateDraggedEntity() {
 	g_dragStartAngle = g_camera->angle.getYaw();
 	
 	Vec3f origin = g_camera->m_pos;
-	Vec3f dest = screenToWorldSpace(mouse + g_draggedObjectOffset, 1000.f);
+	Vec3f dest = screenToWorldSpace(interfaceToScenePosition(mouse) + g_draggedObjectOffset, 1000.f);
 	
 	if(g_camera == &g_playerCamera) {
 		// Use stable camera position so the dragged entity does not move around with the player head animation

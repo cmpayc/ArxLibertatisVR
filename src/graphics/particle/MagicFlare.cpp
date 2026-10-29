@@ -197,7 +197,7 @@ void AddFlare(const Vec2f & pos, float sm, short typ, Entity * io, bool bookDraw
 			flare.p += angleToVectorXZ(io->angle.getYaw() + vx) * 100.f;
 			flare.p.y += std::sin(glm::radians(MAKEANGLE(io->angle.getPitch() + vy))) * 100.f - 150.f;
 		} else {
-			flare.p = screenToWorldSpace(pos, 75.f);
+			flare.p = screenToWorldSpace(interfaceToScenePosition(pos), 75.f);
 		}
 	} else {
 		flare.p = Vec3f(flare.pos.x, flare.pos.y, 0.001f);

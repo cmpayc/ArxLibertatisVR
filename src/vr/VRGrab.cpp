@@ -486,7 +486,7 @@ void updateVRHandMotion() {
 bool updateVRDraggedEntity(Entity & entity) {
 
 	GrabHand & hand = g_hands[grabMainHand()];
-	if(!isVRActive() || !g_vr || !entity.obj || !hand.valid) {
+	if(!isVRMotionControlled() || !g_vr || !entity.obj || !hand.valid) {
 		return false;
 	}
 
@@ -636,7 +636,7 @@ void updateDirectGrab(VRHand handId) {
 
 void updateVRHandGrabs() {
 	
-	if(!isVRActive() || !g_vr) {
+	if(!isVRMotionControlled() || !g_vr) {
 		return;
 	}
 	

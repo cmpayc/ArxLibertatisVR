@@ -35,6 +35,7 @@
 #include "core/Config.h"
 #include "core/Core.h"
 #include "game/Entity.h"
+#include "game/Equipment.h"
 #include "game/Player.h"
 #include "graphics/GraphicsTypes.h"
 #include "graphics/Math.h"
@@ -727,6 +728,41 @@ bool solveSpine(Skeleton & skeleton, const SpineBones & spine, const LegBones (&
 	}
 
 	return true;
+}
+
+/*!
+ * Keyboard and mouse: the arms play the game's strike animations, at the height of the body. The game tilts the
+ * torso with the view's pitch for that (ex_rotate, see ARX_PLAYER_Frame_Update), which solveSpine undoes to keep the
+ * torso under the head: the strikes always went to the center (user). With a melee weapon drawn, the arms are tilted
+ * at the shoulders up or down towards where the head looks instead, so that the weapon strikes there.
+ */
+void aimStrikesAtGaze(Skeleton & skeleton, const BodyBones & bones) {
+
+	const float MaxTilt = 60.f; // degrees
+
+	Vec3f eyes;
+	glm::mat3x3 head;
+	WeaponType type = ARX_EQUIPMENT_GetPlayerWeaponType();
+	if(!isVRKeyboardMouse() || !(player.Interface & INTER_COMBATMODE) || type == WEAPON_BOW
+	   || !getVRHeadPose(eyes, head)) {
+		return;
+	}
+
+	Vec3f gaze = glm::normalize(head * Vec3f(0.f, 0.f, 1.f));
+	float down = glm::clamp(gaze.y, -std::sin(glm::radians(MaxTilt)), std::sin(glm::radians(MaxTilt))); // y down
+	Vec3f forward = angleToVectorXZ(player.angle.getYaw());
+	Vec3f tilted = forward * std::sqrt(1.f - down * down) + Vec3f(0.f, down, 0.f);
+	glm::quat tilt = rotationBetween(forward, tilted);
+
+	for(const ArmBones & arm : bones.arms) {
+		if(!arm.valid()) {
+			continue;
+		}
+		Bone & shoulder = skeleton.bones[arm.shoulder];
+		shoulder.anim.quat = glm::normalize(tilt * shoulder.anim.quat);
+		updateBoneDescendants(skeleton, arm.shoulder);
+	}
+
 }
 
 //! Easing of sudden jumps of the body pose, see easeBodyPose
@@ -1827,6 +1863,7 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 	} else {
 		g_bodyEasing.valid = false;
 	}
+	aimStrikesAtGaze(skeleton, bones);
 
 	// Not the bow (the drawing hand is at its string) or the torch
 	VRPose grips[VRHandCount];
@@ -1900,7 +1937,7 @@ void applyVRBodyIK(Entity & entity, Skeleton & skeleton) {
 
 const std::vector<bool> * getVRUpperLayerBones(const EERIE_3DOBJ & object) {
 	
-	if(!isVRActive() || !object.m_skeleton || !isVRPlayerView()) {
+	if(!isVRMotionControlled() || !object.m_skeleton || !isVRPlayerView()) {
 		return nullptr;
 	}
 	
@@ -1924,12 +1961,12 @@ const std::vector<bool> * getVRUpperLayerBones(const EERIE_3DOBJ & object) {
 }
 
 bool isVRWeaponInWall(VRHand hand) {
-	return isVRActive() && g_weaponInWall[hand];
+	return isVRMotionControlled() && g_weaponInWall[hand];
 }
 
 bool getVRHipPosition(VRHand side, Vec3f & position) {
 	
-	if(!isVRActive() || !g_hipsValid) {
+	if(!isVRMotionControlled() || !g_hipsValid) {
 		return false;
 	}
 	
@@ -1941,7 +1978,7 @@ bool getVRSheathHilt(VRHand hand, Vec3f & hilt) {
 	
 	// Where the game shows the sheathed weapon (on the back, seen in third person): its grip is at this vertex
 	const Entity * io = entities.player();
-	if(!isVRActive() || !io || !io->obj) {
+	if(!isVRMotionControlled() || !io || !io->obj) {
 		return false;
 	}
 	VertexId vertex = io->obj->fastaccess.weapon_attach;
@@ -1976,7 +2013,7 @@ bool getVRArrowRest(Vec3f & rest) {
 	
 	// Just above the grip of the bow as it is drawn (its grip vertex)
 	Entity * bow = entities.get(player.equiped[EQUIP_SLOT_WEAPON]);
-	if(!isVRActive() || !bow || !bow->obj) {
+	if(!isVRMotionControlled() || !bow || !bow->obj) {
 		return false;
 	}
 	VertexId grip = bow->obj->fastaccess.primary_attach;
@@ -2012,7 +2049,7 @@ bool getVRArrowRest(Vec3f & rest) {
 
 void adjustVRLinkedTransform(const Entity & entity, const EERIE_LINKED & link, TransformInfo & transform) {
 	
-	if(!isVRActive() || !isVRPlayerView() || !entity.obj) {
+	if(!isVRMotionControlled() || !isVRPlayerView() || !entity.obj) {
 		return;
 	}
 	
@@ -2115,7 +2152,7 @@ bool getVRSheathTransform(const Entity & entity, const EERIE_LINKED & link, Tran
 
 bool getVRBeltTransform(VRHand side, const EERIE_3DOBJ & item, float scale, TransformInfo & transform, Vec3f & centre) {
 	
-	if(!isVRActive() || !isVRPlayerView() || !g_hipsValid || item.vertexlist.empty()) {
+	if(!isVRMotionControlled() || !isVRPlayerView() || !g_hipsValid || item.vertexlist.empty()) {
 		return false;
 	}
 	
@@ -2154,7 +2191,7 @@ bool getVRBeltTransform(VRHand side, const EERIE_3DOBJ & item, float scale, Tran
 bool getVRForearm(VRHand hand, Vec3f & elbow, Vec3f & wrist) {
 	
 	const WristPose & pose = g_wristPoses[hand];
-	if(!isVRActive() || !pose.valid || glm::distance(pose.elbow, pose.position) < 1.f) {
+	if(!isVRMotionControlled() || !pose.valid || glm::distance(pose.elbow, pose.position) < 1.f) {
 		return false;
 	}
 	
@@ -2166,7 +2203,7 @@ bool getVRForearm(VRHand hand, Vec3f & elbow, Vec3f & wrist) {
 bool getVRWristPose(VRHand hand, Vec3f & position, glm::quat & gripOrientation) {
 	
 	const WristPose & pose = g_wristPoses[hand];
-	if(!isVRActive() || !pose.valid) {
+	if(!isVRMotionControlled() || !pose.valid) {
 		return false;
 	}
 	

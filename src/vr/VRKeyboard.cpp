@@ -193,7 +193,7 @@ void pressKey(const KeyboardKey & key) {
 
 bool updateVRKeyboard() {
 
-	TextInputHandler * handler = (isVRActive() && GInput) ? GInput->getTextInputHandler() : nullptr;
+	TextInputHandler * handler = (isVRMotionControlled() && GInput) ? GInput->getTextInputHandler() : nullptr;
 	if(handler != g_handler) {
 		g_handler = handler;
 		g_shift = false;
@@ -224,7 +224,7 @@ bool updateVRKeyboard() {
 
 void drawVRKeyboard() {
 
-	if(!g_handler || !isVRActive() || !GInput->getTextInputHandler() || !hFontControls) {
+	if(!g_handler || !isVRMotionControlled() || !GInput->getTextInputHandler() || !hFontControls) {
 		return;
 	}
 	TextureContainer * texture = getBookTexture();

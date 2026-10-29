@@ -19,6 +19,8 @@
 
 #include "vr/VRText.h"
 
+#include "core/Config.h"
+
 namespace {
 
 // '*' starts a new line. Messages without controls (or with interface elements VR does not show) are not replaced.
@@ -120,5 +122,6 @@ string="NPCs can hear you, so mind your footsteps. Click the left stick to sneak
 } // anonymous namespace
 
 std::string_view getVRLocalisation(std::string_view language) {
-	return (language == "english") ? g_english : std::string_view();
+	// With the keyboard and the mouse the game's own texts (keys and clicks) apply
+	return (language == "english" && !config.vr.keyboardMouse) ? g_english : std::string_view();
 }

@@ -44,7 +44,7 @@
 //! \return true if a left click on a note closes it, like in free look mode
 static bool isNoteClosedByClick() {
 	#if ARX_HAVE_OPENXR
-	if(isVRActive()) {
+	if(isVRMotionControlled()) {
 		// VR: the laser pointer clicks (main trigger) close notes too
 		return true;
 	}

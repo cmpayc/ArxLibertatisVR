@@ -801,9 +801,15 @@ void ManageCombatModeAnimations() {
 					}
 				}
 				
+				// Where the player aims: the view, in VR with the keyboard and the mouse where the head looks
+				Anglef aim = player.angle;
+				if(g_playerSpellAimHook) {
+					g_playerSpellAimHook(aim);
+				}
+
 				// Start arrow at the center of the player and shoot it directly forwards
 				Vec3f pos = player.pos + Vec3f(0.f, 40.f, 0.f); // Start position for the arrow
-				Vec3f dir = angleToVector(player.angle); // Unit vector describing the arrow direction
+				Vec3f dir = angleToVector(aim); // Unit vector describing the arrow direction
 				
 				if(config.input.improvedBowAim) {
 					
@@ -824,7 +830,7 @@ void ManageCombatModeAnimations() {
 					
 					PolyType ignored = POLY_HIDE | POLY_TRANS | POLY_NODRAW | POLY_NOCOL;
 					RaycastFlags flags = RaycastIgnorePlayer;
-					Vec3f dest = g_playerCamera.m_pos + angleToVector(player.angle) * 100000.f;
+					Vec3f dest = g_playerCamera.m_pos + angleToVector(aim) * 100000.f;
 					if(RaycastResult result = raycastScene(g_playerCamera.m_pos, dest, ignored, flags)) {
 						dest = result.pos;
 					}

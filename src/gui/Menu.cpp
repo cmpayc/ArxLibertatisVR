@@ -181,7 +181,7 @@ void ARX_MENU_Pause() {
 	 * requestVRWeaponDraw). Putting it away here played the animation that ended after resuming.
 	 */
 	#if ARX_HAVE_OPENXR
-	bool keepWeapon = isVRActive() && (player.Interface & INTER_COMBATMODE);
+	bool keepWeapon = isVRMotionControlled() && (player.Interface & INTER_COMBATMODE);
 	if(keepWeapon) {
 		player.Interface &= ~INTER_COMBATMODE;
 	}

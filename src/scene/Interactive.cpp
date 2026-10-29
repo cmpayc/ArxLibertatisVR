@@ -1701,7 +1701,10 @@ Entity * AddItem(const res::path & classPath_, EntityInstance instance, AddInter
 /*!
  * \brief Returns nearest interactive object found at position x, y
  */
-Entity * GetFirstInterAtPos(const Vec2s & pos) {
+Entity * GetFirstInterAtPos(const Vec2s & interfacePos) {
+	
+	// The objects are seen in the view of the scene, the cursor on the interface
+	const Vec2f pos = interfaceToScenePosition(Vec2f(interfacePos));
 	
 	float _fdist = 9999999999.f;
 	float fdistBB = 9999999999.f;

@@ -1196,7 +1196,7 @@ bool VRSystem::beginFrame() {
 	}
 
 	// Controllers are read for every frame, also when nothing is rendered
-	m_input.update(m_displayTime, m_stageSpace);
+	m_input.update(m_displayTime, m_stageSpace, config.vr.keyboardMouse);
 	// The hand motion first: the pointer checks whether the main hand touches an object (see VRGrab)
 	updateVRHandMotion();
 	updatePointer();
@@ -1625,7 +1625,8 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 	}
 
 	m_inventoryPanel.active = false; // Until it is shown again (see updateWristPanels)
-	if(overScene && !config.vr.showHud) {
+	const bool keyboardMouse = overScene && config.vr.keyboardMouse;
+	if(overScene && !config.vr.showHud && !keyboardMouse) {
 		drawWristIconBackings();
 	}
 	g_perfArea = drawPerfOverlay();
@@ -1654,6 +1655,13 @@ void VRSystem::endUIRender(const Vec2i & windowSize, bool overScene) {
 	}
 	if(!image) {
 		drawUIToWindow(windowSize, false);
+		return;
+	}
+
+	if(keyboardMouse) {
+		// Keyboard and mouse: the whole interface like without VR, in front of the eyes
+		drawUIToWindow(windowSize, false);
+		addHeadLockedScreenPanel();
 		return;
 	}
 
@@ -1722,6 +1730,50 @@ void VRSystem::addScreenPanel(const Rect & area, bool interactive, bool keepPosi
 		position += orientation * Vec3f(0.f, -offset, 0.f);
 	}
 	addUIPanel(area, pixelSize, position, orientation, interactive);
+
+}
+
+void VRSystem::addHeadLockedScreenPanel() {
+
+	/*
+	 * The whole virtual screen in front of the eyes, moving with the head: on the image plane of the center camera of
+	 * the scene (see prepareVRCamera), which sees the union of both eyes widened for the window's aspect ratio from a
+	 * little behind the eyes, at KeyboardMouseScreenDistance and centered like it. It is smaller than that view
+	 * (KeyboardMouseScreenAngle wide): the game picks objects in the world where the cursor is seen, see
+	 * interfaceToScenePosition, and the crosshair in the center is where the view is centered.
+	 */
+	const XrFovf & leftFov = m_views[0].fov;
+	const XrFovf & rightFov = m_views[1].fov;
+	float left = std::min(std::tan(leftFov.angleLeft), std::tan(rightFov.angleLeft));
+	float right = std::max(std::tan(leftFov.angleRight), std::tan(rightFov.angleRight));
+	float up = std::max(std::tan(leftFov.angleUp), std::tan(rightFov.angleUp));
+	float down = std::min(std::tan(leftFov.angleDown), std::tan(rightFov.angleDown));
+	float aspect = float(m_uiSize.x) / float(std::max(m_uiSize.y, s32(1)));
+	if((right - left) / (up - down) < aspect) {
+		float extra = ((up - down) * aspect - (right - left)) / 2.f;
+		left -= extra;
+		right += extra;
+	} else {
+		float extra = ((right - left) / aspect - (up - down)) / 2.f;
+		up += extra;
+		down -= extra;
+	}
+
+	const XrPosef & leftPose = m_views[0].pose;
+	const XrPosef & rightPose = m_views[1].pose;
+	Vec3f leftEye(leftPose.position.x, leftPose.position.y, leftPose.position.z);
+	Vec3f rightEye(rightPose.position.x, rightPose.position.y, rightPose.position.z);
+	glm::quat orientation(leftPose.orientation.w, leftPose.orientation.x, leftPose.orientation.y,
+	                      leftPose.orientation.z);
+	float halfIpd = glm::distance(leftEye, rightEye) * 0.5f;
+	float pullback = halfIpd / std::max(std::min(-left, right), 0.1f);
+	Vec3f origin = (leftEye + rightEye) * 0.5f + orientation * Vec3f(0.f, 0.f, pullback);
+
+	float distance = std::min(config.vr.uiDistance, KeyboardMouseScreenDistance);
+	Vec3f center = origin + orientation * (Vec3f((left + right) * 0.5f, (up + down) * 0.5f, -1.f) * distance);
+	float screenWidth = 2.f * std::tan(glm::radians(KeyboardMouseScreenAngle * 0.5f));
+	float pixelSize = std::min(screenWidth, right - left) * distance / float(m_uiSize.x);
+	addUIPanel(Rect(m_uiSize.x, m_uiSize.y), pixelSize, center, orientation, false);
 
 }
 

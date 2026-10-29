@@ -266,6 +266,17 @@ public:
 		//! Smooth the hands of the player model (hides the tremor of the hands)
 		bool dampenHands;
 
+		/*!
+		 * Play with the keyboard and the mouse like without VR, the headset only looks around: the controllers are not
+		 * used, the whole interface is shown in front of the eyes (see isVRMotionControlled)
+		 */
+		bool keyboardMouse;
+		/*!
+		 * With keyboardMouse: the headset does not move the view at all, the mouse turns and tilts it like without VR
+		 * (see isVRFullMouse)
+		 */
+		bool fullMouse;
+
 		//! Radius of the player collision cylinder in VR (meters, the game uses 0.52)
 		float bodyRadius;
 		

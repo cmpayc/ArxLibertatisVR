@@ -55,6 +55,10 @@
 
 #include "util/Cast.h"
 
+#if ARX_HAVE_OPENXR
+#include "vr/VRControls.h"
+#endif
+
 
 enum ARX_INTERFACE_CURSOR_MODE
 {
@@ -499,7 +503,19 @@ void ARX_INTERFACE_RenderCursor(bool flag) {
 		if(player.Interface & INTER_COMBATMODE) {
 			alpha *= std::max(player.m_bowAimRatio - 0.75f, 0.f) / 0.25f;
 		}
-		
+
+		/*
+		 * VR with the keyboard and the mouse: the crosshair is where the head looks and the strikes go (user: more
+		 * visible): fully bright, larger (the interface is small in the headset), also with a weapon drawn
+		 */
+		float crosshairScale = 1.f;
+		#if ARX_HAVE_OPENXR
+		if(isVRKeyboardMouse()) {
+			alpha = 1.f;
+			crosshairScale = 1.5f;
+		}
+		#endif
+
 		if(TRUE_PLAYER_MOUSELOOK_ON && config.interface.showCrosshair
 		   && !(player.Interface & (INTER_PLAYERBOOK)) && !g_note.isOpen() && alpha > 0.f) {
 			
@@ -511,7 +527,7 @@ void ARX_INTERFACE_RenderCursor(bool flag) {
 			UseRenderState additeState(render2D().blendAdditive());
 			
 			Vec2f pos = Vec2f(g_size.center());
-			Vec2f size = Vec2f(surf->m_size) * cursorScale;
+			Vec2f size = Vec2f(surf->m_size) * cursorScale * crosshairScale;
 			EERIEDrawBitmap(Rectf(pos - size * 0.5f, size.x, size.y), 0.f, surf, Color::gray(alpha));
 			
 		}

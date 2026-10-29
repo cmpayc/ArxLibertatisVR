@@ -340,9 +340,15 @@ void VRInput::detach() {
 
 }
 
-void VRInput::update(XrTime time, XrSpace space) {
+void VRInput::update(XrTime time, XrSpace space, bool ignore) {
 
 	if(m_session == XR_NULL_HANDLE) {
+		return;
+	}
+
+	m_ignored = ignore;
+	if(ignore) {
+		m_hands.fill(VRHandState());
 		return;
 	}
 
@@ -413,7 +419,7 @@ void VRInput::update(XrTime time, XrSpace space) {
 
 void VRInput::vibrate(VRHand hand, float amplitude, float duration) {
 
-	if(m_session == XR_NULL_HANDLE) {
+	if(m_session == XR_NULL_HANDLE || m_ignored) {
 		return;
 	}
 
